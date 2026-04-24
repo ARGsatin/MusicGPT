@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": false,
+    "baseUrl": ".",
+    "paths": {
+      "@musicgpt/shared": [
+        "packages/shared/src/index.ts"
+      ],
+      "@musicgpt/shared/*": [
+        "packages/shared/src/*"
+      ]
+    }
+  }
+}

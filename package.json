@@ -1,0 +1,28 @@
+{
+  "name": "musicgpt-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:ncm": "node scripts/start-ncm.mjs",
+    "ncm:cookie": "node scripts/setup-ncm-cookie.mjs",
+    "ncm:check": "node scripts/check-ncm-cookie.mjs",
+    "dev:full": "concurrently -n ncm,server,web -c green,cyan,magenta \"npm run dev:ncm\" \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "npm run dev -w @musicgpt/server",
+    "dev:web": "npm run dev -w @musicgpt/web",
+    "build": "npm run build -w @musicgpt/server && npm run build -w @musicgpt/web",
+    "test": "npm run test -w @musicgpt/shared && npm run test -w @musicgpt/server",
+    "typecheck": "npm run typecheck -w @musicgpt/shared && npm run typecheck -w @musicgpt/server && npm run typecheck -w @musicgpt/web"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}
