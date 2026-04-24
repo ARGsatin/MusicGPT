@@ -4,6 +4,8 @@ import process from "node:process";
 
 const DEFAULT_NCM_BASE_URL = "http://127.0.0.1:3001";
 const envPath = path.resolve(process.cwd(), ".env");
+const VERIFY_RETRY_COUNT = 3;
+const VERIFY_RETRY_INTERVAL_MS = 1200;
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   printHelp();
@@ -21,43 +23,23 @@ async function main() {
 
   const env = readEnvMap(envPath);
   const baseUrl = normalizeBaseUrl(env.NCM_BASE_URL || DEFAULT_NCM_BASE_URL);
-  const cookie = String(env.NCM_COOKIE || "").trim();
+  const cookie = normalizeCookieHeader(String(env.NCM_COOKIE || "").trim());
 
   if (!cookie || /^PASTE_/i.test(cookie)) {
     console.error("NCM_COOKIE is empty or still placeholder in .env.");
     console.error("Run: npm run ncm:cookie");
     process.exit(2);
   }
-
-  const loginStatus = await requestJsonSafe(`${baseUrl}/login/status?timestamp=${Date.now()}`, {
-    Cookie: cookie
-  });
-  if (!loginStatus.ok) {
-    console.error(`NCM API unreachable or login/status failed: ${loginStatus.errorMessage}`);
-    console.error(`Expected NCM API base URL: ${baseUrl}`);
-    process.exit(3);
+  if (!cookie.includes("MUSIC_U=")) {
+    console.error("NCM_COOKIE does not contain MUSIC_U. Please refresh via QR login.");
+    process.exit(2);
   }
 
-  const loginStatusPayload = unwrapLoginStatusPayload(loginStatus.payload);
-  const loginStatusCheck = validateAccountPayload(loginStatusPayload);
-  if (!loginStatusCheck.ok) {
-    console.error(`login/status check failed: ${loginStatusCheck.reason}`);
+  const accountCheck = await verifyLoggedInAccount(baseUrl, cookie);
+  if (!accountCheck.ok) {
+    console.error(`Cookie validation failed: ${accountCheck.reason}`);
     console.error("Cookie is invalid or still anonymous.");
     process.exit(4);
-  }
-
-  const account = await requestJsonSafe(`${baseUrl}/user/account?timestamp=${Date.now()}`, {
-    Cookie: cookie
-  });
-  if (!account.ok) {
-    console.error(`user/account failed: ${account.errorMessage}`);
-    process.exit(5);
-  }
-  const accountCheck = validateAccountPayload(account.payload);
-  if (!accountCheck.ok) {
-    console.error(`user/account check failed: ${accountCheck.reason}`);
-    console.error("Cookie is invalid or still anonymous.");
-    process.exit(6);
   }
 
   const likeList = await requestJsonSafe(
@@ -68,11 +50,13 @@ async function main() {
   );
   if (!likeList.ok) {
     console.error(`likelist fetch failed: ${likeList.errorMessage}`);
-    process.exit(7);
+    process.exit(5);
   }
 
   const likeCount = Array.isArray(likeList.payload?.ids) ? likeList.payload.ids.length : 0;
-  console.log(`NCM cookie check passed (uid=${accountCheck.userId}, likes=${likeCount}).`);
+  console.log(
+    `NCM cookie check passed via ${accountCheck.source} (uid=${accountCheck.userId}, likes=${likeCount}).`
+  );
 }
 
 function unwrapLoginStatusPayload(payload) {
@@ -110,6 +94,84 @@ function validateAccountPayload(payload) {
     ok: true,
     userId
   };
+}
+
+function normalizeCookieHeader(cookieText) {
+  const raw = String(cookieText || "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  const attributeKeys = new Set([
+    "path",
+    "expires",
+    "max-age",
+    "domain",
+    "samesite",
+    "secure",
+    "httponly",
+    "priority",
+    "partitioned"
+  ]);
+  const byKey = new Map();
+
+  for (const token of raw.split(";")) {
+    const part = token.trim();
+    if (!part) continue;
+    const idx = part.indexOf("=");
+    if (idx <= 0) continue;
+
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!key || !value) continue;
+    if (attributeKeys.has(key.toLowerCase())) continue;
+
+    byKey.set(key, value);
+  }
+
+  return [...byKey.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+async function verifyLoggedInAccount(baseUrl, cookie) {
+  let lastReason = "unknown";
+
+  for (let attempt = 1; attempt <= VERIFY_RETRY_COUNT; attempt += 1) {
+    const [statusResult, accountResult] = await Promise.all([
+      requestJsonSafe(`${baseUrl}/login/status?timestamp=${Date.now()}`, {
+        Cookie: cookie
+      }),
+      requestJsonSafe(`${baseUrl}/user/account?timestamp=${Date.now()}`, {
+        Cookie: cookie
+      })
+    ]);
+
+    if (statusResult.ok) {
+      const statusPayload = unwrapLoginStatusPayload(statusResult.payload);
+      const statusCheck = validateAccountPayload(statusPayload);
+      if (statusCheck.ok) {
+        return { ok: true, userId: statusCheck.userId, source: "/login/status" };
+      }
+      lastReason = `/login/status: ${statusCheck.reason}`;
+    } else {
+      lastReason = `/login/status request failed: ${statusResult.errorMessage}`;
+    }
+
+    if (accountResult.ok) {
+      const accountCheck = validateAccountPayload(accountResult.payload);
+      if (accountCheck.ok) {
+        return { ok: true, userId: accountCheck.userId, source: "/user/account" };
+      }
+      lastReason = `${lastReason}; /user/account: ${accountCheck.reason}`;
+    } else {
+      lastReason = `${lastReason}; /user/account request failed: ${accountResult.errorMessage}`;
+    }
+
+    if (attempt < VERIFY_RETRY_COUNT) {
+      await sleep(VERIFY_RETRY_INTERVAL_MS);
+    }
+  }
+
+  return { ok: false, reason: lastReason };
 }
 
 async function requestJsonSafe(url, headers = undefined) {
@@ -162,6 +224,10 @@ function readEnvMap(targetPath) {
 
 function normalizeBaseUrl(url) {
   return String(url).replace(/\/+$/, "");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function printHelp() {
