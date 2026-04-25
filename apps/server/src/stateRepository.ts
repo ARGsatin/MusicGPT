@@ -146,6 +146,13 @@ export class StateRepository {
     });
   }
 
+  getTrackStatsCount(): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM track_stats")
+      .get() as { count: number };
+    return row.count;
+  }
+
   patchTrackSongUrl(trackId: number, songUrl: string): void {
     const row = this.db
       .prepare("SELECT track_json FROM track_stats WHERE track_id = ?")
@@ -162,6 +169,12 @@ export class StateRepository {
     this.db
       .prepare("UPDATE track_stats SET track_json = ? WHERE track_id = ?")
       .run(JSON.stringify(parsed), trackId);
+  }
+
+  markTrackLiked(trackId: number, likedAt: string): void {
+    this.db
+      .prepare("UPDATE track_stats SET liked_at = COALESCE(liked_at, ?) WHERE track_id = ?")
+      .run(likedAt, trackId);
   }
 
   addPlayEvent(event: PlayEvent): void {

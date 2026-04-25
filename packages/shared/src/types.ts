@@ -105,7 +105,23 @@ export interface NextResponse {
   now: NowPlayingState;
 }
 
+export interface SystemStatus {
+  runningRoot: string;
+  ncmReachable: boolean;
+  trackStatsCount: number;
+  queueLength: number;
+  lastImportAt?: string;
+  lastImportError?: string;
+}
+
+export interface ImportNcmResponse {
+  ok: boolean;
+  importedCount: number;
+  systemStatus: SystemStatus;
+  error?: string;
+}
+
 export interface WsPayload {
-  event: "now_playing_updated" | "queue_updated" | "dj_tts_ready";
+  event: "now_playing_updated" | "queue_updated" | "dj_tts_ready" | "system_status";
   data: unknown;
 }

@@ -3,9 +3,11 @@ import { createExtensionProviders } from "./providers.js";
 import type {
   ChatResponse,
   FeedbackRequest,
+  ImportNcmResponse,
   NowPlayingState,
   PlayEvent,
   RadioPlanItem,
+  SystemStatus,
   TasteProfile,
   Track
 } from "@musicgpt/shared";
@@ -17,10 +19,20 @@ import { TasteEngine } from "./tasteEngine.js";
 import { TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
+const PLAN_WINDOW_SIZE = 10;
+const QUEUE_TARGET_SIZE = 10;
+const QUEUE_REFILL_THRESHOLD = 6;
+const IMPORT_RETRY_INTERVAL_MS = 60_000;
+const EMPTY_IMPORT_ERROR = "未导入到有效曲目，请检查 NCM API 与登录 Cookie。";
+
 export class RadioOrchestrator {
   private state: NowPlayingState = { queue: [], paused: false };
   private desiredMood?: string;
-  private tracksSinceLastDj = 0;
+  private completedTracksSinceLastDj = 0;
+  private importRetryTimer: ReturnType<typeof setInterval> | undefined;
+  private importInFlight = false;
+  private lastImportAt: string | undefined;
+  private lastImportError: string | undefined;
 
   constructor(
     private readonly repo: StateRepository,
@@ -30,30 +42,59 @@ export class RadioOrchestrator {
     private readonly djBrain: DjBrain,
     private readonly ttsPipeline: TtsPipeline,
     private readonly wsHub: WsHub,
-    private readonly djBroadcastInterval: number
+    private readonly djBroadcastInterval: number,
+    private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS
   ) {}
 
   async initialize(): Promise<void> {
     this.state = this.repo.getNowPlaying() ?? { queue: [], paused: false };
-    if (this.repo.getTrackStats(1).length === 0) {
-      await this.importFromNcm();
+    if (this.repo.getTrackStatsCount() === 0) {
+      await this.runNcmImport();
     }
     await this.refreshTasteProfile();
     await this.ensureQueue();
     if (!this.state.track && this.state.queue.length > 0) {
       await this.nextTrack();
     }
+    this.startImportRetryLoop();
 
     for (const provider of createExtensionProviders()) {
       await provider.refresh().catch(() => undefined);
     }
+    await this.broadcastSystemStatus();
   }
 
-  async importFromNcm(): Promise<void> {
-    const stats = await this.ncm.fetchUserMusicData();
-    if (stats.length > 0) {
-      this.repo.upsertTrackStats(stats);
+  close(): void {
+    this.stopImportRetryLoop();
+  }
+
+  async importFromNcm(): Promise<number> {
+    return this.runNcmImport();
+  }
+
+  async importFromNcmAndRefresh(): Promise<ImportNcmResponse> {
+    const importedCount = await this.runNcmImport();
+    if (importedCount > 0) {
+      await this.postImportRefresh();
+      this.stopImportRetryLoop();
+    } else {
+      this.startImportRetryLoop();
     }
+    await this.broadcastSystemStatus();
+    const systemStatus = await this.getSystemStatus();
+    if (importedCount > 0) {
+      return {
+        ok: true,
+        importedCount,
+        systemStatus
+      };
+    }
+    return {
+      ok: false,
+      importedCount,
+      error: this.lastImportError ?? EMPTY_IMPORT_ERROR,
+      systemStatus
+    };
   }
 
   getNow(): NowPlayingState {
@@ -62,6 +103,22 @@ export class RadioOrchestrator {
 
   getTaste(): TasteProfile | undefined {
     return this.repo.getTasteProfile();
+  }
+
+  async getSystemStatus(): Promise<SystemStatus> {
+    const status: SystemStatus = {
+      runningRoot: process.cwd(),
+      ncmReachable: await this.ncm.isReachable(),
+      trackStatsCount: this.repo.getTrackStatsCount(),
+      queueLength: this.state.queue.length
+    };
+    if (this.lastImportAt) {
+      status.lastImportAt = this.lastImportAt;
+    }
+    if (this.lastImportError) {
+      status.lastImportError = this.lastImportError;
+    }
+    return status;
   }
 
   async refreshTasteProfile(): Promise<TasteProfile> {
@@ -74,20 +131,20 @@ export class RadioOrchestrator {
   }
 
   async ensureQueue(): Promise<void> {
-    if (this.state.queue.length >= 5) {
+    if (this.state.queue.length >= QUEUE_REFILL_THRESHOLD) {
       return;
     }
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const planOptions = this.desiredMood
-      ? { windowSize: 10, desiredMood: this.desiredMood }
-      : { windowSize: 10 };
+      ? { windowSize: PLAN_WINDOW_SIZE, desiredMood: this.desiredMood }
+      : { windowSize: PLAN_WINDOW_SIZE };
     const planned = this.planner.plan(
       this.repo.getTrackStats(),
       profile,
       this.repo.getRecentPlayEvents(120),
       planOptions
     );
-    this.state.queue = dedupeByTrackId([...this.state.queue, ...planned]).slice(0, 12);
+    this.state.queue = dedupeByTrackId([...this.state.queue, ...planned]).slice(0, QUEUE_TARGET_SIZE);
     this.repo.saveNowPlaying(this.state);
     this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
   }
@@ -106,14 +163,7 @@ export class RadioOrchestrator {
     this.state.startedAt = new Date().toISOString();
     this.state.paused = false;
 
-    this.repo.addPlayEvent({
-      type: "complete",
-      trackId: resolved.track.id,
-      at: this.state.startedAt
-    });
-
     await this.ensureQueue();
-    await this.maybeGenerateDj();
 
     this.repo.saveNowPlaying(this.state);
     this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
@@ -127,6 +177,19 @@ export class RadioOrchestrator {
       at: new Date().toISOString()
     };
     this.repo.addPlayEvent(event);
+    if (feedback.type === "like") {
+      this.repo.markTrackLiked(feedback.trackId, event.at);
+    }
+    if (feedback.type === "complete") {
+      this.completedTracksSinceLastDj += 1;
+      await this.maybeGenerateDj();
+    }
+    if (feedback.type === "replay") {
+      this.state.paused = false;
+      this.state.startedAt = event.at;
+      this.repo.saveNowPlaying(this.state);
+      this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+    }
     await this.refreshTasteProfile();
     this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
   }
@@ -136,6 +199,9 @@ export class RadioOrchestrator {
     const lower = message.toLowerCase();
 
     if (/\b(skip|next|下一首|切歌)\b/.test(lower) || /下一首|切歌/.test(message)) {
+      if (this.state.track) {
+        await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
+      }
       const now = await this.nextTrack();
       return this.reply("skip", "收到，切到下一首。", now);
     }
@@ -180,8 +246,7 @@ export class RadioOrchestrator {
   }
 
   private async maybeGenerateDj(): Promise<void> {
-    this.tracksSinceLastDj += 1;
-    if (this.tracksSinceLastDj < this.djBroadcastInterval) {
+    if (this.completedTracksSinceLastDj < this.djBroadcastInterval) {
       return;
     }
     if (!this.state.track) {
@@ -197,7 +262,81 @@ export class RadioOrchestrator {
     this.state.djScript = voiced;
     this.repo.saveDjScript(voiced);
     this.wsHub.broadcast({ event: "dj_tts_ready", data: voiced });
-    this.tracksSinceLastDj = 0;
+    this.completedTracksSinceLastDj = 0;
+  }
+
+  private startImportRetryLoop(): void {
+    if (this.importRetryTimer) {
+      return;
+    }
+    if (this.repo.getTrackStatsCount() > 0) {
+      return;
+    }
+    this.importRetryTimer = setInterval(() => {
+      void this.retryImportIfNeeded();
+    }, this.importRetryIntervalMs);
+    this.importRetryTimer.unref?.();
+  }
+
+  private stopImportRetryLoop(): void {
+    if (!this.importRetryTimer) {
+      return;
+    }
+    clearInterval(this.importRetryTimer);
+    this.importRetryTimer = undefined;
+  }
+
+  private async retryImportIfNeeded(): Promise<void> {
+    if (this.repo.getTrackStatsCount() > 0) {
+      this.stopImportRetryLoop();
+      return;
+    }
+    const importedCount = await this.runNcmImport();
+    if (importedCount > 0) {
+      await this.postImportRefresh();
+      this.stopImportRetryLoop();
+    }
+    await this.broadcastSystemStatus();
+  }
+
+  private async runNcmImport(): Promise<number> {
+    if (this.importInFlight) {
+      this.lastImportError = "导入任务正在进行中。";
+      return 0;
+    }
+
+    this.importInFlight = true;
+    this.lastImportAt = new Date().toISOString();
+    try {
+      const stats = await this.ncm.fetchUserMusicData();
+      if (stats.length === 0) {
+        this.lastImportError = EMPTY_IMPORT_ERROR;
+        return 0;
+      }
+      this.repo.upsertTrackStats(stats);
+      this.lastImportError = undefined;
+      return stats.length;
+    } catch (error) {
+      this.lastImportError = error instanceof Error ? error.message : String(error);
+      return 0;
+    } finally {
+      this.importInFlight = false;
+    }
+  }
+
+  private async postImportRefresh(): Promise<void> {
+    await this.refreshTasteProfile();
+    await this.ensureQueue();
+    if (!this.state.track && this.state.queue.length > 0) {
+      await this.nextTrack();
+      return;
+    }
+    this.repo.saveNowPlaying(this.state);
+    this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
+  }
+
+  private async broadcastSystemStatus(): Promise<void> {
+    this.wsHub.broadcast({ event: "system_status", data: await this.getSystemStatus() });
   }
 
   private async hydrateSongUrl(item: RadioPlanItem): Promise<RadioPlanItem> {

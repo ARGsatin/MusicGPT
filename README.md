@@ -52,6 +52,8 @@ npm run dev
 - `POST /api/next`
 - `GET /api/taste`
 - `POST /api/feedback`
+- `GET /api/system/status`
+- `POST /api/import/ncm`
 - `GET /ws/stream`
 
 ## 测试

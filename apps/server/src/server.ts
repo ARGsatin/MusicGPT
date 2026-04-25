@@ -40,6 +40,7 @@ interface CreateServerOptions {
   djBrain?: DjBrain;
   ttsPipeline?: TtsPipeline;
   djBroadcastInterval?: number;
+  importRetryIntervalMs?: number;
 }
 
 export async function createServer(options: CreateServerOptions = {}) {
@@ -62,9 +63,13 @@ export async function createServer(options: CreateServerOptions = {}) {
     options.djBrain ?? new DjBrain(config.openAiApiKey),
     options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
-    options.djBroadcastInterval ?? config.djBroadcastInterval
+    options.djBroadcastInterval ?? config.djBroadcastInterval,
+    options.importRetryIntervalMs
   );
   await orchestrator.initialize();
+  app.addHook("onClose", async () => {
+    orchestrator.close();
+  });
 
   app.get("/health", async () => ({ ok: true }));
 
@@ -102,6 +107,16 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     await orchestrator.handleFeedback(parsed.data);
     return { ok: true };
+  });
+
+  app.get("/api/system/status", async () => orchestrator.getSystemStatus());
+
+  app.post("/api/import/ncm", async (_request, reply) => {
+    const result = await orchestrator.importFromNcmAndRefresh();
+    if (!result.ok) {
+      return reply.status(503).send(result);
+    }
+    return result;
   });
 
   app.get("/api/providers", async () => ({

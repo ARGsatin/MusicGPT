@@ -56,6 +56,10 @@ body {
   gap: 14px;
 }
 
+.system-panel {
+  margin-top: 16px;
+}
+
 .panel {
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -222,6 +226,11 @@ button:hover,
   color: var(--muted);
   font-size: 14px;
   text-transform: capitalize;
+}
+
+.error-text {
+  color: #ff9a9a;
+  margin: 8px 0 0;
 }
 
 progress {

@@ -111,6 +111,21 @@ export class NcmConnector {
     }
   }
 
+  async isReachable(): Promise<boolean> {
+    try {
+      const response = await this.fetchImpl(
+        this.makeUrl(`/login/status?timestamp=${Date.now()}`),
+        {
+          headers: this.cookie ? { Cookie: this.cookie } : {},
+          signal: AbortSignal.timeout(5000)
+        }
+      );
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async fetchUserMusicData(): Promise<TrackStat[]> {
     const uid = await this.getUserId();
     if (!uid) {

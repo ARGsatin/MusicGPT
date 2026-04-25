@@ -11,6 +11,8 @@ export const API_ROUTES = {
   next: "/api/next",
   taste: "/api/taste",
   feedback: "/api/feedback",
+  systemStatus: "/api/system/status",
+  importNcm: "/api/import/ncm",
   ws: "/ws/stream"
 } as const;
 

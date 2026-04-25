@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import type { NowPlayingState, TasteProfile, WsPayload } from "@musicgpt/shared";
-import { fetchNowPlaying, fetchTaste, requestNext, sendChat, sendFeedback } from "./api";
+import type { NowPlayingState, SystemStatus, TasteProfile, WsPayload } from "@musicgpt/shared";
+import {
+  fetchNowPlaying,
+  fetchSystemStatus,
+  fetchTaste,
+  importFromNcm,
+  requestNext,
+  sendChat,
+  sendFeedback
+} from "./api";
 import { useWsStream } from "./useWsStream";
 
 function formatArtists(artists: string[] | undefined): string {
@@ -15,14 +23,29 @@ function formatArtists(artists: string[] | undefined): string {
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
   const [taste, setTaste] = useState<TasteProfile | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [input, setInput] = useState("");
   const [assistantText, setAssistantText] = useState("我准备好给你播歌了。");
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
+  const advanceInFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [nowState, tasteProfile] = await Promise.all([fetchNowPlaying(), fetchTaste()]);
+    const [nowState, tasteProfile, status] = await Promise.all([
+      fetchNowPlaying(),
+      fetchTaste(),
+      fetchSystemStatus()
+    ]);
     setNow(nowState);
     setTaste(tasteProfile);
+    setSystemStatus(status);
+  }, []);
+
+  const refreshTaste = useCallback(async () => {
+    setTaste(await fetchTaste());
   }, []);
 
   useEffect(() => {
@@ -30,6 +53,10 @@ export default function App() {
       .catch(() => undefined)
       .finally(() => setLoading(false));
   }, [refresh]);
+
+  useEffect(() => {
+    currentTrackRef.current = now.track;
+  }, [now.track]);
 
   const onWsPayload = useCallback((payload: WsPayload) => {
     if (payload.event === "now_playing_updated") {
@@ -39,6 +66,8 @@ export default function App() {
     } else if (payload.event === "dj_tts_ready") {
       const script = payload.data as NowPlayingState["djScript"];
       setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
+    } else if (payload.event === "system_status") {
+      setSystemStatus(payload.data as SystemStatus);
     }
   }, []);
 
@@ -56,9 +85,41 @@ export default function App() {
     setNow(response.now);
   };
 
-  const onRequestNext = async () => {
-    const response = await requestNext();
-    setNow(response.now);
+  const runWithAdvanceLock = useCallback(async (job: () => Promise<void>) => {
+    if (advanceInFlightRef.current) {
+      return;
+    }
+    advanceInFlightRef.current = true;
+    try {
+      await job();
+    } finally {
+      advanceInFlightRef.current = false;
+    }
+  }, []);
+
+  const onRequestNext = async (recordSkip = false) => {
+    await runWithAdvanceLock(async () => {
+      const currentTrack = currentTrackRef.current;
+      if (recordSkip && currentTrack) {
+        await sendFeedback({ type: "skip", trackId: currentTrack.id });
+      }
+      const response = await requestNext();
+      setNow(response.now);
+      await refreshTaste();
+    });
+  };
+
+  const onTrackEnded = async () => {
+    await runWithAdvanceLock(async () => {
+      const currentTrack = currentTrackRef.current;
+      if (!currentTrack) {
+        return;
+      }
+      await sendFeedback({ type: "complete", trackId: currentTrack.id });
+      const response = await requestNext();
+      setNow(response.now);
+      await refreshTaste();
+    });
   };
 
   const onFeedback = async (type: "skip" | "like" | "replay" | "complete") => {
@@ -67,8 +128,27 @@ export default function App() {
     }
     await sendFeedback({ type, trackId: now.track.id });
     if (type === "skip") {
-      const response = await requestNext();
-      setNow(response.now);
+      await onRequestNext();
+      return;
+    }
+    if (type === "replay" && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      await audioRef.current.play().catch(() => undefined);
+    }
+    await refreshTaste();
+  };
+
+  const onImportNcm = async () => {
+    setImporting(true);
+    setImportError(null);
+    try {
+      const result = await importFromNcm();
+      setSystemStatus(result.systemStatus);
+      await refresh();
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "导入失败，请检查 NCM API 和 Cookie。");
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -87,11 +167,34 @@ export default function App() {
         </p>
       </section>
 
+      <section className="panel system-panel">
+        <header>
+          <h2>运行状态</h2>
+          <button onClick={() => void onImportNcm()} type="button" disabled={importing}>
+            {importing ? "导入中..." : "重新导入网易云数据"}
+          </button>
+        </header>
+        <p className="subtitle">
+          运行目录: {systemStatus?.runningRoot ?? "未知"} · NCM:
+          {systemStatus?.ncmReachable ? " 已连接" : " 未连接"}
+        </p>
+        <p className="subtitle">
+          曲库条数: {systemStatus?.trackStatsCount ?? 0} · 当前队列: {systemStatus?.queueLength ?? 0}
+        </p>
+        {systemStatus?.lastImportAt ? (
+          <p className="subtitle">最近导入时间: {new Date(systemStatus.lastImportAt).toLocaleString()}</p>
+        ) : null}
+        {systemStatus?.lastImportError ? (
+          <p className="error-text">最近导入异常: {systemStatus.lastImportError}</p>
+        ) : null}
+        {importError ? <p className="error-text">{importError}</p> : null}
+      </section>
+
       <section className="grid">
         <article className="panel player-panel">
           <header>
             <h2>Now Playing</h2>
-            <button className="ghost" onClick={onRequestNext} type="button">
+            <button className="ghost" onClick={() => void onRequestNext(true)} type="button">
               下一首
             </button>
           </header>
@@ -110,27 +213,28 @@ export default function App() {
             </div>
           </div>
           <audio
+            ref={audioRef}
             controls
             autoPlay
             src={now.track?.songUrl}
-            onEnded={onRequestNext}
+            onEnded={() => void onTrackEnded()}
             className="audio"
           />
           <div className="actions">
-            <button onClick={() => onFeedback("like")} type="button">
+            <button onClick={() => void onFeedback("like")} type="button">
               收藏
             </button>
-            <button onClick={() => onFeedback("skip")} type="button">
+            <button onClick={() => void onFeedback("skip")} type="button">
               跳过
             </button>
-            <button onClick={() => onFeedback("replay")} type="button">
+            <button onClick={() => void onFeedback("replay")} type="button">
               重播
             </button>
           </div>
           <div className="queue">
-            <h4>接下来</h4>
+            <h4>接下来（10 首窗口规划）</h4>
             <ol>
-              {now.queue.slice(0, 5).map((item) => (
+              {now.queue.slice(0, 10).map((item) => (
                 <li key={item.track.id}>
                   <strong>{item.track.title}</strong>
                   <span>{formatArtists(item.track.artists)}</span>
@@ -155,7 +259,7 @@ export default function App() {
           </form>
           <div className="dj-card">
             <h4>DJ 播报</h4>
-            <p>{now.djScript?.text ?? "每 3-5 首自动播报一次。"}</p>
+            <p>{now.djScript?.text ?? "默认每 4 首自动播报一次。"}</p>
             {now.djScript?.audioUrl ? (
               <audio controls src={now.djScript.audioUrl} className="audio" />
             ) : null}

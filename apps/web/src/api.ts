@@ -1,8 +1,10 @@
 import type {
   ChatResponse,
   FeedbackRequest,
+  ImportNcmResponse,
   NextResponse,
   NowPlayingState,
+  SystemStatus,
   TasteProfile
 } from "@musicgpt/shared";
 
@@ -58,4 +60,23 @@ export async function sendFeedback(payload: FeedbackRequest): Promise<void> {
   if (!response.ok) {
     throw new Error("Feedback failed");
   }
+}
+
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  const response = await fetch("/api/system/status");
+  if (!response.ok) {
+    throw new Error("Failed to load system status");
+  }
+  return (await response.json()) as SystemStatus;
+}
+
+export async function importFromNcm(): Promise<ImportNcmResponse> {
+  const response = await fetch("/api/import/ncm", {
+    method: "POST"
+  });
+  const payload = (await response.json()) as ImportNcmResponse;
+  if (!response.ok) {
+    throw new Error(payload.error ?? "NCM import failed");
+  }
+  return payload;
 }
