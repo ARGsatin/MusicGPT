@@ -9,3 +9,8 @@ script = ""
 name = "运行"
 icon = "run"
 command = "npm run dev"
+
+[[actions]]
+name = "完整启动"
+icon = "tool"
+command = "npm run dev:full"
