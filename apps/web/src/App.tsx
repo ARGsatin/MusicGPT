@@ -13,6 +13,15 @@ import {
 } from "./api";
 import { useWsStream } from "./useWsStream";
 
+const LYRIC_PREVIEW_LINES = [
+  "City lights fold into the midnight radio",
+  "A silver kick keeps time with your breathing",
+  "We drift where the synth line opens wide",
+  "Tell me the mood and I will tune the sky",
+  "Every next song should feel like it found you",
+  "Neonwave keeps the window warm tonight"
+];
+
 function formatArtists(artists: string[] | undefined): string {
   if (!artists || artists.length === 0) {
     return "未知艺术家";
@@ -20,15 +29,54 @@ function formatArtists(artists: string[] | undefined): string {
   return artists.join(" / ");
 }
 
+function formatDate(now: Date): string {
+  const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(now);
+  const day = new Intl.DateTimeFormat("en-US", { day: "2-digit" }).format(now);
+  const month = new Intl.DateTimeFormat("en-US", { month: "short" }).format(now);
+  const year = new Intl.DateTimeFormat("en-US", { year: "numeric" }).format(now);
+  return `${weekday} / ${day} ${month.toUpperCase()} ${year}`;
+}
+
+function formatClock(now: Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(now);
+}
+
+function formatTime(value: string | undefined): string {
+  if (!value) {
+    return "未导入";
+  }
+  return new Date(value).toLocaleString();
+}
+
+function formatDuration(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0:00";
+  }
+  const minutes = Math.floor(value / 60);
+  const seconds = Math.floor(value % 60);
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
   const [taste, setTaste] = useState<TasteProfile | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [input, setInput] = useState("");
-  const [assistantText, setAssistantText] = useState("我准备好给你播歌了。");
+  const [assistantText, setAssistantText] = useState(
+    "Neonwave is live. Ask for a song, a mood, or just stay here for the next glow."
+  );
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [clock, setClock] = useState(() => new Date());
+  const [playbackPaused, setPlaybackPaused] = useState(true);
+  const [audioTime, setAudioTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const [queueOpen, setQueueOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
@@ -55,7 +103,14 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     currentTrackRef.current = now.track;
+    setAudioTime(0);
+    setAudioDuration(0);
   }, [now.track]);
 
   const onWsPayload = useCallback((payload: WsPayload) => {
@@ -138,6 +193,33 @@ export default function App() {
     await refreshTaste();
   };
 
+  const onTogglePlayback = async () => {
+    if (!audioRef.current) {
+      return;
+    }
+    if (playbackPaused) {
+      try {
+        await audioRef.current.play();
+        setPlaybackPaused(false);
+        setNow((current) => ({ ...current, paused: false }));
+      } catch {
+        setPlaybackPaused(true);
+      }
+      return;
+    }
+    audioRef.current.pause();
+    setPlaybackPaused(true);
+    setNow((current) => ({ ...current, paused: true }));
+  };
+
+  const onSeek = (value: number) => {
+    if (!audioRef.current) {
+      return;
+    }
+    audioRef.current.currentTime = value;
+    setAudioTime(value);
+  };
+
   const onImportNcm = async () => {
     setImporting(true);
     setImportError(null);
@@ -153,142 +235,220 @@ export default function App() {
   };
 
   const favoritePeriod = useMemo(
-    () => taste?.favoritePeriods[0]?.period ?? "evening",
+    () => taste?.favoritePeriods[0]?.period ?? "night",
     [taste?.favoritePeriods]
   );
 
+  const trackTitle = now.track?.title ?? "等待开播";
+  const artists = formatArtists(now.track?.artists);
+  const isLive = Boolean(systemStatus?.ncmReachable);
+  const queuePreview = now.queue.slice(0, 10);
+  const nextTrack = now.queue[0]?.track;
+  const activeLyricIndex = Math.min(
+    LYRIC_PREVIEW_LINES.length - 1,
+    Math.floor((audioTime / Math.max(audioDuration || 180, 1)) * LYRIC_PREVIEW_LINES.length)
+  );
+
   return (
-    <main className="page">
-      <section className="hero">
-        <p className="eyebrow">MusicGPT • 私人电台</p>
-        <h1>真正懂你的 AI 音乐电台</h1>
-        <p className="subtitle">
-          自动续播、实时学习你的口味、必要时轻声播报。当前偏好时段: {favoritePeriod}
-        </p>
-      </section>
-
-      <section className="panel system-panel">
-        <header>
-          <h2>运行状态</h2>
-          <button onClick={() => void onImportNcm()} type="button" disabled={importing}>
-            {importing ? "导入中..." : "重新导入网易云数据"}
+    <main className="radio-shell">
+      <div className="breathing-light" aria-hidden="true" />
+      <header className="topbar" aria-label="Neonwave FM station header">
+        <div className="brand">
+          <div className="avatar" aria-hidden="true">
+            {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>N</span>}
+          </div>
+          <div>
+            <div className="wordmark">Neonwave FM</div>
+            <p className="brand-subline">{isLive ? "ON AIR" : "LOCAL SIGNAL"}</p>
+          </div>
+        </div>
+        <nav className="station-actions" aria-label="Station actions">
+          <button className="pill muted" type="button">
+            Login
           </button>
-        </header>
-        <p className="subtitle">
-          运行目录: {systemStatus?.runningRoot ?? "未知"} · NCM:
-          {systemStatus?.ncmReachable ? " 已连接" : " 未连接"}
-        </p>
-        <p className="subtitle">
-          曲库条数: {systemStatus?.trackStatsCount ?? 0} · 当前队列: {systemStatus?.queueLength ?? 0}
-        </p>
-        {systemStatus?.lastImportAt ? (
-          <p className="subtitle">最近导入时间: {new Date(systemStatus.lastImportAt).toLocaleString()}</p>
-        ) : null}
-        {systemStatus?.lastImportError ? (
-          <p className="error-text">最近导入异常: {systemStatus.lastImportError}</p>
-        ) : null}
-        {importError ? <p className="error-text">{importError}</p> : null}
+          <button className="pill active" type="button">
+            Dark
+          </button>
+          <button className="pill muted" type="button" onClick={() => void onImportNcm()} disabled={importing}>
+            {importing ? "Importing" : "Sync"}
+          </button>
+        </nav>
+      </header>
+
+      <section className="clock-stage" aria-label="On air status">
+        <div className="clock-card">
+          <p className="micro-label">Station time</p>
+          <h1>{formatClock(clock)}</h1>
+          <p className="date-line">{formatDate(clock)}</p>
+        </div>
+        <div className={isLive ? "live-signal is-live" : "live-signal"}>
+          <span aria-hidden="true" />
+          {isLive ? "ON AIR" : "OFFLINE"}
+        </div>
       </section>
 
-      <section className="grid">
-        <article className="panel player-panel">
-          <header>
-            <h2>Now Playing</h2>
-            <button className="ghost" onClick={() => void onRequestNext(true)} type="button">
-              下一首
-            </button>
-          </header>
-          {loading ? <p>加载中...</p> : null}
-          <div className="now-track">
-            <div className="cover">
-              {now.track?.coverUrl ? (
-                <img alt={now.track.title} src={now.track.coverUrl} />
-              ) : (
-                <span>{now.track ? now.track.title.slice(0, 1) : "M"}</span>
-              )}
+      <section className="console-grid" aria-label="Neonwave main console">
+        <section className="player-stack" aria-label="Audio and lyrics">
+          <article className="player-card">
+            <header className="card-header">
+              <div>
+                <p className="micro-label">Now playing</p>
+                <h2>{trackTitle}</h2>
+              </div>
+              <span className="status-chip">{playbackPaused ? "PAUSED" : "PLAYING"}</span>
+            </header>
+            <div className="player-body">
+              <div className="cover-frame" aria-hidden="true">
+                {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>NW</span>}
+              </div>
+              <div className="track-deck">
+                <p className="artist-line">{artists}</p>
+                <div className="equalizer" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                </div>
+                <div className="controls" aria-label="Playback controls">
+                  <button type="button" aria-label="Replay" onClick={() => void onFeedback("replay")}>
+                    <span aria-hidden="true">|&lt;</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="Play or pause"
+                    className="control-primary"
+                    onClick={() => void onTogglePlayback()}
+                  >
+                    <span aria-hidden="true">{playbackPaused ? ">" : "||"}</span>
+                  </button>
+                  <button type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
+                    <span aria-hidden="true">&gt;|</span>
+                  </button>
+                  <button type="button" aria-label="Like" onClick={() => void onFeedback("like")}>
+                    <span aria-hidden="true">♡</span>
+                  </button>
+                </div>
+              </div>
             </div>
-            <div>
-              <h3>{now.track?.title ?? "等待开播"}</h3>
-              <p>{formatArtists(now.track?.artists)}</p>
+            <div className="progress-row">
+              <span>{formatDuration(audioTime)}</span>
+              <input
+                type="range"
+                min={0}
+                max={audioDuration || 0}
+                value={Math.min(audioTime, audioDuration || 0)}
+                step={1}
+                onChange={(event) => onSeek(Number(event.currentTarget.value))}
+                aria-label="Seek current track"
+              />
+              <span>{formatDuration(audioDuration)}</span>
             </div>
-          </div>
-          <audio
-            ref={audioRef}
-            controls
-            autoPlay
-            src={now.track?.songUrl}
-            onEnded={() => void onTrackEnded()}
-            className="audio"
-          />
-          <div className="actions">
-            <button onClick={() => void onFeedback("like")} type="button">
-              收藏
-            </button>
-            <button onClick={() => void onFeedback("skip")} type="button">
-              跳过
-            </button>
-            <button onClick={() => void onFeedback("replay")} type="button">
-              重播
-            </button>
-          </div>
-          <div className="queue">
-            <h4>接下来（10 首窗口规划）</h4>
-            <ol>
-              {now.queue.slice(0, 10).map((item) => (
-                <li key={item.track.id}>
-                  <strong>{item.track.title}</strong>
-                  <span>{formatArtists(item.track.artists)}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-        </article>
+            <audio
+              ref={audioRef}
+              autoPlay
+              src={now.track?.songUrl}
+              onEnded={() => void onTrackEnded()}
+              onPlay={() => setPlaybackPaused(false)}
+              onPause={() => setPlaybackPaused(true)}
+              onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+              onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
+              className="audio"
+            />
+          </article>
 
-        <article className="panel chat-panel">
-          <header>
-            <h2>AI 电台对话</h2>
+          <article className="lyrics-card" aria-label="Lyrics preview">
+            <header className="card-header compact">
+              <div>
+                <p className="micro-label">Lyrics preview</p>
+                <h2>Scrolling window</h2>
+              </div>
+              <span className="status-chip muted">UI ONLY</span>
+            </header>
+            <div className="lyrics-window">
+              {LYRIC_PREVIEW_LINES.map((line, index) => (
+                <p key={line} className={index === activeLyricIndex ? "active" : undefined}>
+                  {line}
+                </p>
+              ))}
+            </div>
+          </article>
+        </section>
+
+        <article className="dj-console" aria-label="GPT DJ conversation">
+          <header className="card-header">
+            <div>
+              <p className="micro-label">GPT DJ window</p>
+              <h2>Conversation</h2>
+            </div>
+            <span className="context-chip">Context 8 turns</span>
           </header>
-          <p className="assistant">{assistantText}</p>
+          <div className="message-thread">
+            <div className="message-row assistant-row">
+              <div className="avatar small" aria-hidden="true">
+                {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>N</span>}
+              </div>
+              <div className="message-bubble">
+                <p>{now.djScript?.text ?? assistantText}</p>
+              </div>
+            </div>
+            <div className="message-row user-row">
+              <div className="message-bubble user-bubble">
+                <p>点一首更适合夜里写代码的旋律电音。</p>
+              </div>
+            </div>
+          </div>
+          <p className="now-caption">Now playing: {trackTitle}</p>
+          {now.djScript?.audioUrl ? <audio controls src={now.djScript.audioUrl} className="dj-audio" /> : null}
           <form onSubmit={onSubmitChat} className="chat-form">
             <input
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="比如：来点夜晚氛围、播放周杰伦、切歌"
+              placeholder="Ask for a song, a mood, or just chat..."
+              aria-label="Message Neonwave FM"
             />
-            <button type="submit">发送</button>
+            <button type="submit" aria-label="Send message">
+              ↑
+            </button>
           </form>
-          <div className="dj-card">
-            <h4>DJ 播报</h4>
-            <p>{now.djScript?.text ?? "默认每 4 首自动播报一次。"}</p>
-            {now.djScript?.audioUrl ? (
-              <audio controls src={now.djScript.audioUrl} className="audio" />
-            ) : null}
-          </div>
         </article>
+      </section>
 
-        <article className="panel profile-panel">
-          <header>
-            <h2>你的音乐画像</h2>
-          </header>
-          <p>{taste?.summary ?? "先听几首，我会逐渐学会你的偏好。"}</p>
-          <h4>高频艺人</h4>
-          <ul className="chips">
-            {(taste?.topArtists ?? []).slice(0, 6).map((artist) => (
-              <li key={artist.name}>
-                {artist.name} · {Math.round(artist.weight * 100)}%
+      <aside className="signal-strip" aria-label="Station details">
+        <span>Library {systemStatus?.trackStatsCount ?? 0}</span>
+        <span>Window {systemStatus?.queueLength ?? 0}</span>
+        <span>Taste {favoritePeriod}</span>
+        <span>Import {formatTime(systemStatus?.lastImportAt)}</span>
+        {systemStatus?.lastImportError ? <span className="error-text">{systemStatus.lastImportError}</span> : null}
+        {importError ? <span className="error-text">{importError}</span> : null}
+      </aside>
+
+      <section className={queueOpen ? "queue-drawer is-open" : "queue-drawer"} aria-label="Queue drawer">
+        <button className="queue-summary" type="button" onClick={() => setQueueOpen((open) => !open)}>
+          <span>QUEUE</span>
+          <strong>{now.queue.length} TRACKS</strong>
+          <em>NEXT: {nextTrack ? `${nextTrack.title} / ${formatArtists(nextTrack.artists)}` : "waiting for signal"}</em>
+          <b aria-hidden="true">{queueOpen ? "×" : "+"}</b>
+        </button>
+        <div className="queue-panel">
+          <ol>
+            {queuePreview.length > 0 ? (
+              queuePreview.map((item, index) => (
+                <li key={item.track.id}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <strong>{item.track.title}</strong>
+                  <em>{formatArtists(item.track.artists)}</em>
+                </li>
+              ))
+            ) : (
+              <li className="empty-queue">
+                <span>00</span>
+                <strong>{loading ? "Tuning library" : "Queue empty"}</strong>
+                <em>Neonwave will refill the window on the next request</em>
               </li>
-            ))}
-          </ul>
-          <h4>常听时段</h4>
-          <ul className="bars">
-            {(taste?.favoritePeriods ?? []).map((period) => (
-              <li key={period.period}>
-                <span>{period.period}</span>
-                <progress value={period.weight} max={1} />
-              </li>
-            ))}
-          </ul>
-        </article>
+            )}
+          </ol>
+        </div>
       </section>
     </main>
   );
