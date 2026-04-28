@@ -1,6 +1,6 @@
 import { inferMood } from "./moodClassifier.js";
 
-import type { Track, TrackStat } from "@musicgpt/shared";
+import type { LyricLine, Track, TrackLyrics, TrackStat } from "@musicgpt/shared";
 
 interface NcmAccountResponse {
   account?: {
@@ -59,6 +59,15 @@ interface NcmSearchResponse {
     }>;
   };
 }
+
+interface NcmLyricResponse {
+  nolyric?: boolean;
+  lrc?: { lyric?: string };
+  tlyric?: { lyric?: string };
+}
+
+const METADATA_LINE_PATTERN =
+  /^(作词|作曲|编曲|制作人|监制|出品|发行|混音|录音|母带|吉他|贝斯|鼓|和声|词|曲|OP|SP)\s*[:：]/i;
 
 export class NcmConnector {
   constructor(
@@ -222,6 +231,36 @@ export class NcmConnector {
     }
   }
 
+  async fetchLyrics(trackId: number): Promise<TrackLyrics> {
+    try {
+      const payload = await this.getJson<NcmLyricResponse>(`/lyric?id=${trackId}`);
+      if (payload.nolyric === true) {
+        return createPureMusicLyrics(trackId);
+      }
+
+      const originalLines = parseLrc(payload.lrc?.lyric);
+      if (originalLines.length === 0) {
+        return createPureMusicLyrics(trackId);
+      }
+
+      const translations = new Map(
+        parseLrc(payload.tlyric?.lyric).map((line) => [line.timeMs, line.text])
+      );
+      const lines = originalLines.map((line) => {
+        const translation = translations.get(line.timeMs);
+        return translation ? { ...line, translation } : line;
+      });
+
+      return {
+        trackId,
+        pureMusic: false,
+        lines
+      };
+    } catch {
+      return createPureMusicLyrics(trackId);
+    }
+  }
+
   async searchSongs(keyword: string): Promise<Track[]> {
     if (!keyword.trim()) {
       return [];
@@ -247,4 +286,47 @@ export class NcmConnector {
       return track;
     });
   }
+}
+
+function createPureMusicLyrics(trackId: number): TrackLyrics {
+  return {
+    trackId,
+    pureMusic: true,
+    lines: []
+  };
+}
+
+function parseLrc(raw: string | undefined): LyricLine[] {
+  if (!raw) {
+    return [];
+  }
+  const lines: LyricLine[] = [];
+  const seen = new Set<string>();
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const timestamps = [...rawLine.matchAll(/\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g)];
+    if (timestamps.length === 0) {
+      continue;
+    }
+    const text = rawLine.replace(/\[[^\]]+\]/g, "").trim();
+    if (!text || METADATA_LINE_PATTERN.test(text)) {
+      continue;
+    }
+
+    for (const timestamp of timestamps) {
+      const minutes = Number(timestamp[1]);
+      const seconds = Number(timestamp[2]);
+      const fraction = timestamp[3] ?? "0";
+      const milliseconds = Number(fraction.padEnd(3, "0").slice(0, 3));
+      const timeMs = minutes * 60_000 + seconds * 1000 + milliseconds;
+      const key = `${timeMs}:${text}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      lines.push({ timeMs, text });
+    }
+  }
+
+  return lines.sort((a, b) => a.timeMs - b.timeMs);
 }

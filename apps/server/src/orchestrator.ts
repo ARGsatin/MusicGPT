@@ -9,7 +9,8 @@ import type {
   RadioPlanItem,
   SystemStatus,
   TasteProfile,
-  Track
+  Track,
+  TrackLyrics
 } from "@musicgpt/shared";
 import { DjBrain } from "./djBrain.js";
 import { NcmConnector } from "./ncmConnector.js";
@@ -52,6 +53,10 @@ export class RadioOrchestrator {
       await this.runNcmImport();
     }
     await this.refreshTasteProfile();
+    if (this.state.track && this.state.lyrics?.trackId !== this.state.track.id) {
+      this.state.lyrics = await this.ncm.fetchLyrics(this.state.track.id);
+      this.repo.saveNowPlaying(this.state);
+    }
     await this.ensureQueue();
     if (!this.state.track && this.state.queue.length > 0) {
       await this.nextTrack();
@@ -158,8 +163,9 @@ export class RadioOrchestrator {
     if (!next) {
       return this.state;
     }
-    const resolved = await this.hydrateSongUrl(next);
-    this.state.track = resolved.track;
+    const resolved = await this.hydrateTrack(next);
+    this.state.track = resolved.item.track;
+    this.state.lyrics = resolved.lyrics;
     this.state.startedAt = new Date().toISOString();
     this.state.paused = false;
 
@@ -339,21 +345,25 @@ export class RadioOrchestrator {
     this.wsHub.broadcast({ event: "system_status", data: await this.getSystemStatus() });
   }
 
-  private async hydrateSongUrl(item: RadioPlanItem): Promise<RadioPlanItem> {
+  private async hydrateTrack(item: RadioPlanItem): Promise<{ item: RadioPlanItem; lyrics: TrackLyrics }> {
+    const lyrics = await this.ncm.fetchLyrics(item.track.id);
     if (item.track.songUrl) {
-      return item;
+      return { item, lyrics };
     }
     const songUrl = await this.ncm.resolveSongUrl(item.track.id);
     if (!songUrl) {
-      return item;
+      return { item, lyrics };
     }
     this.repo.patchTrackSongUrl(item.track.id, songUrl);
     return {
-      ...item,
-      track: {
-        ...item.track,
-        songUrl
-      }
+      item: {
+        ...item,
+        track: {
+          ...item.track,
+          songUrl
+        }
+      },
+      lyrics
     };
   }
 
