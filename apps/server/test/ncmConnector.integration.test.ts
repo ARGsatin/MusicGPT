@@ -61,6 +61,56 @@ describe("NcmConnector integration", () => {
 
     expect(stats).toEqual([]);
   });
+
+  it("parses timed lyrics and merges matching translated lines", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/lyric")) {
+        return json({
+          nolyric: false,
+          lrc: {
+            lyric:
+              "[00:00.000] 作词 : Someone\n[00:05.720]I won't see you tonight\n[00:12.430]But I don't know enough"
+          },
+          tlyric: {
+            lyric: "[00:05.720]今晚若见你\n[00:12.430]但我不解"
+          }
+        });
+      }
+      return json({});
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "cookie=abc", mockFetch);
+    const lyrics = await connector.fetchLyrics(5253801);
+
+    expect(lyrics).toEqual({
+      trackId: 5253801,
+      pureMusic: false,
+      lines: [
+        { timeMs: 5720, text: "I won't see you tonight", translation: "今晚若见你" },
+        { timeMs: 12430, text: "But I don't know enough", translation: "但我不解" }
+      ]
+    });
+  });
+
+  it("returns pure music lyrics for nolyric payloads", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/lyric")) {
+        return json({ nolyric: true, lrc: { lyric: "" } });
+      }
+      return json({});
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "cookie=abc", mockFetch);
+    const lyrics = await connector.fetchLyrics(1313354324);
+
+    expect(lyrics).toEqual({
+      trackId: 1313354324,
+      pureMusic: true,
+      lines: []
+    });
+  });
 });
 
 function json(payload: unknown): Response {

@@ -49,8 +49,16 @@ describe("API integration", () => {
     expect(chatPayload.action).toBe("replan");
 
     const nowRes = await fetch(`${base}/api/now`);
-    const now = (await nowRes.json()) as { track?: { id: number } };
+    const now = (await nowRes.json()) as {
+      track?: { id: number };
+      lyrics?: { trackId: number; pureMusic: boolean; lines: Array<{ text: string; translation?: string }> };
+    };
     expect(now.track?.id).toBeDefined();
+    expect(now.lyrics).toMatchObject({
+      trackId: now.track?.id,
+      pureMusic: false,
+      lines: [{ text: "I won't see you tonight", translation: "今晚若见你" }]
+    });
 
     const wsEvent = await wsMessage;
     expect(["queue_updated", "now_playing_updated"]).toContain(wsEvent.event);
@@ -105,6 +113,17 @@ const mockNcmFetch: typeof fetch = async (input) => {
       return json({ data: [{ id: 1, url: "https://example.com/1.mp3" }] });
     }
     return json({ data: [{ id: 2, url: "https://example.com/2.mp3" }] });
+  }
+  if (url.includes("/lyric")) {
+    return json({
+      nolyric: false,
+      lrc: {
+        lyric: "[00:05.720]I won't see you tonight"
+      },
+      tlyric: {
+        lyric: "[00:05.720]今晚若见你"
+      }
+    });
   }
   if (url.includes("/cloudsearch")) {
     return json({ result: { songs: [{ id: 1, name: "Sunlight", artists: [{ name: "Alpha" }] }] } });

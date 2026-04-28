@@ -14,3 +14,8 @@ command = "npm run dev"
 name = "完整启动"
 icon = "tool"
 command = "npm run dev:full"
+
+[[actions]]
+name = "test"
+icon = "tool"
+command = "npm run test -w @musicgpt/server"

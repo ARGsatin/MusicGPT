@@ -30,6 +30,18 @@ export interface TrackStat {
   lastPlayedHour?: number;
 }
 
+export interface LyricLine {
+  timeMs: number;
+  text: string;
+  translation?: string;
+}
+
+export interface TrackLyrics {
+  trackId: number;
+  pureMusic: boolean;
+  lines: LyricLine[];
+}
+
 export interface TopArtist {
   name: string;
   weight: number;
@@ -76,6 +88,7 @@ export interface DjScript {
 
 export interface NowPlayingState {
   track?: Track;
+  lyrics?: TrackLyrics;
   queue: RadioPlanItem[];
   startedAt?: string;
   paused: boolean;

@@ -13,15 +13,6 @@ import {
 } from "./api";
 import { useWsStream } from "./useWsStream";
 
-const LYRIC_PREVIEW_LINES = [
-  "City lights fold into the midnight radio",
-  "A silver kick keeps time with your breathing",
-  "We drift where the synth line opens wide",
-  "Tell me the mood and I will tune the sky",
-  "Every next song should feel like it found you",
-  "Neonwave keeps the window warm tonight"
-];
-
 function formatArtists(artists: string[] | undefined): string {
   if (!artists || artists.length === 0) {
     return "未知艺术家";
@@ -77,7 +68,9 @@ export default function App() {
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
   const [queueOpen, setQueueOpen] = useState(false);
+  const [lyricPulseKey, setLyricPulseKey] = useState(0);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const activeLyricRef = useRef<HTMLDivElement | null>(null);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
 
@@ -244,10 +237,46 @@ export default function App() {
   const isLive = Boolean(systemStatus?.ncmReachable);
   const queuePreview = now.queue.slice(0, 10);
   const nextTrack = now.queue[0]?.track;
-  const activeLyricIndex = Math.min(
-    LYRIC_PREVIEW_LINES.length - 1,
-    Math.floor((audioTime / Math.max(audioDuration || 180, 1)) * LYRIC_PREVIEW_LINES.length)
-  );
+  const lyricLines = now.lyrics?.lines ?? [];
+  const activeLyricIndex = useMemo(() => {
+    if (lyricLines.length === 0) {
+      return -1;
+    }
+    const currentMs = audioTime * 1000;
+    let activeIndex = 0;
+    for (let index = 0; index < lyricLines.length; index += 1) {
+      const line = lyricLines[index];
+      if (!line) {
+        continue;
+      }
+      if (line.timeMs <= currentMs + 120) {
+        activeIndex = index;
+      } else {
+        break;
+      }
+    }
+    return activeIndex;
+  }, [audioTime, lyricLines]);
+
+  useEffect(() => {
+    if (activeLyricIndex < 0) {
+      return undefined;
+    }
+    setLyricPulseKey((key) => key + 1);
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        activeLyricRef.current?.scrollIntoView({
+          block: "center",
+          behavior: "smooth"
+        });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeLyricIndex, now.lyrics?.trackId]);
 
   return (
     <main className="radio-shell">
@@ -360,17 +389,36 @@ export default function App() {
           <article className="lyrics-card" aria-label="Lyrics preview">
             <header className="card-header compact">
               <div>
-                <p className="micro-label">Lyrics preview</p>
+                <p className="micro-label">Lyrics</p>
                 <h2>Scrolling window</h2>
               </div>
-              <span className="status-chip muted">UI ONLY</span>
+              <span className="status-chip muted">{now.lyrics?.pureMusic ? "PURE" : "SYNC"}</span>
             </header>
             <div className="lyrics-window">
-              {LYRIC_PREVIEW_LINES.map((line, index) => (
-                <p key={line} className={index === activeLyricIndex ? "active" : undefined}>
-                  {line}
-                </p>
-              ))}
+              {now.lyrics?.pureMusic ? (
+                <div className="lyric-line pure-music is-active">Pure music, please enjoy</div>
+              ) : lyricLines.length > 0 ? (
+                lyricLines.map((line, index) => {
+                  const isActive = index === activeLyricIndex;
+                  return (
+                    <div
+                      key={`${line.timeMs}-${line.text}`}
+                      ref={isActive ? activeLyricRef : undefined}
+                      className={
+                        isActive
+                          ? `lyric-line is-active pulse-${lyricPulseKey % 2}`
+                          : "lyric-line"
+                      }
+                      aria-current={isActive ? "true" : undefined}
+                    >
+                      <p className="lyric-original">{line.text}</p>
+                      {line.translation ? <span className="lyric-translation">{line.translation}</span> : null}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="lyric-line pure-music">Waiting for lyrics</div>
+              )}
             </div>
           </article>
         </section>
