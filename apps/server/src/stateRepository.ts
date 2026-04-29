@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
+  ChatMessage,
   DjScript,
   NowPlayingState,
   PlayEvent,
@@ -11,12 +12,6 @@ import type {
   Track,
   TrackStat
 } from "@musicgpt/shared";
-
-interface MessageRecord {
-  role: "user" | "assistant";
-  text: string;
-  at: string;
-}
 
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) {
@@ -263,16 +258,16 @@ export class StateRepository {
     return row ? parseJson<DjScript | undefined>(row.script_json, undefined) : undefined;
   }
 
-  addChatMessage(message: MessageRecord): void {
+  addChatMessage(message: ChatMessage): void {
     this.db
       .prepare("INSERT INTO chat_messages(role, text, at) VALUES(?, ?, ?)")
       .run(message.role, message.text, message.at);
   }
 
-  getRecentMessages(limit = 30): MessageRecord[] {
+  getRecentMessages(limit = 30): ChatMessage[] {
     const rows = this.db
       .prepare("SELECT role, text, at FROM chat_messages ORDER BY id DESC LIMIT ?")
-      .all(limit) as unknown as MessageRecord[];
+      .all(limit) as unknown as ChatMessage[];
     return rows.slice().reverse();
   }
 }

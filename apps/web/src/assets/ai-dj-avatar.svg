@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pixel AI DJ avatar">
+  <rect width="64" height="64" fill="#050607"/>
+  <path fill="#101318" d="M8 12h48v40H8z"/>
+  <path fill="#202832" d="M12 8h40v8h4v36h-8v4H16v-4H8V16h4z"/>
+  <path fill="#31efb2" d="M16 16h32v4h4v24h-4v4H16v-4h-4V20h4z"/>
+  <path fill="#07100d" d="M20 20h24v4h4v16h-4v4H20v-4h-4V24h4z"/>
+  <path fill="#f4f1ea" d="M24 28h8v8h-8zm16 0h4v8h-8v-8z"/>
+  <path fill="#31efb2" d="M28 40h8v4h-8zm-8-16h4v4h-4zm24 0h4v4h-4z"/>
+  <path fill="#d8c88c" d="M12 28H8v12h4zm44 0h-4v12h4z"/>
+  <path fill="#615cff" d="M20 52h24v4H20z"/>
+  <path fill="#f4f1ea" d="M28 8h8v4h-8z"/>
+</svg>

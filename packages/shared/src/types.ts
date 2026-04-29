@@ -86,10 +86,25 @@ export interface ChatRequest {
   message: string;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+}
+
 export interface ChatResponse {
-  action: "skip" | "pause" | "resume" | "replan" | "play_specific" | "noop";
+  action:
+    | "skip"
+    | "pause"
+    | "resume"
+    | "replan"
+    | "play_specific"
+    | "play_by_description"
+    | "comment_current"
+    | "noop";
   reply: string;
   now: NowPlayingState;
+  messages: ChatMessage[];
 }
 
 export interface FeedbackRequest {
@@ -108,6 +123,10 @@ export interface NextResponse {
 export interface SystemStatus {
   runningRoot: string;
   ncmReachable: boolean;
+  aiDjConfigured: boolean;
+  aiDjModel?: string;
+  aiDjBaseUrlConfigured?: boolean;
+  aiDjLastError?: string;
   trackStatsCount: number;
   queueLength: number;
   lastImportAt?: string;

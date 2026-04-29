@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   ChatResponse,
   FeedbackRequest,
   ImportNcmResponse,
@@ -37,6 +38,15 @@ export async function sendChat(message: string): Promise<ChatResponse> {
     throw new Error("Chat failed");
   }
   return (await response.json()) as ChatResponse;
+}
+
+export async function fetchChatHistory(): Promise<ChatMessage[]> {
+  const response = await fetch("/api/chat/history");
+  if (!response.ok) {
+    throw new Error("Failed to load chat history");
+  }
+  const payload = (await response.json()) as { messages: ChatMessage[] };
+  return payload.messages;
 }
 
 export async function requestNext(forceReplan = false): Promise<NextResponse> {

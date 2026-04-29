@@ -7,6 +7,7 @@ import type {
 
 export const API_ROUTES = {
   chat: "/api/chat",
+  chatHistory: "/api/chat/history",
   now: "/api/now",
   next: "/api/next",
   taste: "/api/taste",

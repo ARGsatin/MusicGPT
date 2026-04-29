@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import type { NowPlayingState, SystemStatus, TasteProfile, WsPayload } from "@musicgpt/shared";
+import type { ChatMessage, NowPlayingState, SystemStatus, TasteProfile, WsPayload } from "@musicgpt/shared";
 import {
+  fetchChatHistory,
   fetchNowPlaying,
   fetchSystemStatus,
   fetchTaste,
@@ -11,6 +12,7 @@ import {
   sendChat,
   sendFeedback
 } from "./api";
+import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
 import { useWsStream } from "./useWsStream";
 
 const LYRIC_PREVIEW_LINES = [
@@ -65,10 +67,10 @@ export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
   const [taste, setTaste] = useState<TasteProfile | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [assistantText, setAssistantText] = useState(
-    "Neonwave is live. Ask for a song, a mood, or just stay here for the next glow."
-  );
+  const [chatError, setChatError] = useState<string | null>(null);
+  const [chatLoading, setChatLoading] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -78,18 +80,21 @@ export default function App() {
   const [audioDuration, setAudioDuration] = useState(0);
   const [queueOpen, setQueueOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const messageThreadRef = useRef<HTMLDivElement>(null);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [nowState, tasteProfile, status] = await Promise.all([
+    const [nowState, tasteProfile, status, chatHistory] = await Promise.all([
       fetchNowPlaying(),
       fetchTaste(),
-      fetchSystemStatus()
+      fetchSystemStatus(),
+      fetchChatHistory().catch(() => [])
     ]);
     setNow(nowState);
     setTaste(tasteProfile);
     setSystemStatus(status);
+    setMessages(chatHistory);
   }, []);
 
   const refreshTaste = useCallback(async () => {
@@ -130,14 +135,33 @@ export default function App() {
 
   const onSubmitChat = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!input.trim()) {
+    await submitChat(input);
+  };
+
+  const submitChat = async (rawMessage: string) => {
+    if (chatLoading) {
       return;
     }
-    const message = input.trim();
+    if (!rawMessage.trim()) {
+      return;
+    }
+    const message = rawMessage.trim();
+    const optimistic: ChatMessage = { role: "user", text: message, at: new Date().toISOString() };
     setInput("");
-    const response = await sendChat(message);
-    setAssistantText(response.reply);
-    setNow(response.now);
+    setChatError(null);
+    setChatLoading(true);
+    setMessages((current) => [...current, optimistic]);
+    try {
+      const response = await sendChat(message);
+      setMessages(response.messages);
+      setNow(response.now);
+      await refreshTaste();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "GPT DJ 暂时掉线了。");
+      setMessages((current) => current.filter((item) => item !== optimistic));
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const runWithAdvanceLock = useCallback(async (job: () => Promise<void>) => {
@@ -248,14 +272,32 @@ export default function App() {
     LYRIC_PREVIEW_LINES.length - 1,
     Math.floor((audioTime / Math.max(audioDuration || 180, 1)) * LYRIC_PREVIEW_LINES.length)
   );
+  const visibleMessages =
+    messages.length > 0
+      ? messages
+      : [
+          {
+            role: "assistant" as const,
+            text: now.djScript?.text ?? "Neonwave is live. Describe a mood, a scene, or ask me to dissect the current track.",
+            at: new Date().toISOString()
+          }
+        ];
+
+  useEffect(() => {
+    const thread = messageThreadRef.current;
+    if (!thread) {
+      return;
+    }
+    thread.scrollTop = thread.scrollHeight;
+  }, [visibleMessages.length, chatLoading]);
 
   return (
     <main className="radio-shell">
       <div className="breathing-light" aria-hidden="true" />
       <header className="topbar" aria-label="Neonwave FM station header">
         <div className="brand">
-          <div className="avatar" aria-hidden="true">
-            {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>N</span>}
+          <div className="avatar brand-avatar" aria-hidden="true">
+            <img alt="" src={aiDjAvatarUrl} />
           </div>
           <div>
             <div className="wordmark">Neonwave FM</div>
@@ -383,32 +425,54 @@ export default function App() {
             </div>
             <span className="context-chip">Context 8 turns</span>
           </header>
-          <div className="message-thread">
-            <div className="message-row assistant-row">
-              <div className="avatar small" aria-hidden="true">
-                {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>N</span>}
+          <div className="message-thread" ref={messageThreadRef}>
+            {visibleMessages.map((message, index) => (
+              <div
+                className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
+                key={`${message.at}-${index}`}
+              >
+                {message.role === "assistant" ? (
+                  <div className="avatar small dj-avatar" aria-hidden="true">
+                    <img alt="" src={aiDjAvatarUrl} />
+                  </div>
+                ) : null}
+                <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
+                  <p>{message.text}</p>
+                </div>
               </div>
-              <div className="message-bubble">
-                <p>{now.djScript?.text ?? assistantText}</p>
+            ))}
+            {chatLoading ? (
+              <div className="message-row assistant-row">
+                <div className="avatar small dj-avatar" aria-hidden="true">
+                  <img alt="" src={aiDjAvatarUrl} />
+                </div>
+                <div className="message-bubble is-thinking">
+                  <p>GPT DJ 正在翻箱倒柜地找那首最像你的歌...</p>
+                </div>
               </div>
-            </div>
-            <div className="message-row user-row">
-              <div className="message-bubble user-bubble">
-                <p>点一首更适合夜里写代码的旋律电音。</p>
-              </div>
-            </div>
+            ) : null}
           </div>
           <p className="now-caption">Now playing: {trackTitle}</p>
           {now.djScript?.audioUrl ? <audio controls src={now.djScript.audioUrl} className="dj-audio" /> : null}
+          <div className="chat-actions" aria-label="GPT DJ quick actions">
+            <button type="button" onClick={() => void submitChat("点评当前这首")} disabled={chatLoading || !now.track}>
+              点评当前
+            </button>
+            <button type="button" onClick={() => void submitChat("来点适合现在氛围的歌")} disabled={chatLoading}>
+              氛围点歌
+            </button>
+          </div>
+          {chatError ? <p className="chat-error">{chatError}</p> : null}
           <form onSubmit={onSubmitChat} className="chat-form">
             <input
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="Ask for a song, a mood, or just chat..."
+              placeholder="描述你想听的歌、点歌，或让 GPT DJ 点评当前曲目..."
               aria-label="Message Neonwave FM"
+              disabled={chatLoading}
             />
-            <button type="submit" aria-label="Send message">
-              ↑
+            <button type="submit" aria-label="Send message" disabled={chatLoading}>
+              {chatLoading ? "..." : "→"}
             </button>
           </form>
         </article>
@@ -417,8 +481,10 @@ export default function App() {
       <aside className="signal-strip" aria-label="Station details">
         <span>Library {systemStatus?.trackStatsCount ?? 0}</span>
         <span>Window {systemStatus?.queueLength ?? 0}</span>
+        <span>{systemStatus?.aiDjConfigured ? `AI ${systemStatus.aiDjModel ?? "ONLINE"}` : "AI FALLBACK"}</span>
         <span>Taste {favoritePeriod}</span>
         <span>Import {formatTime(systemStatus?.lastImportAt)}</span>
+        {systemStatus?.aiDjLastError ? <span className="error-text">AI {systemStatus.aiDjLastError}</span> : null}
         {systemStatus?.lastImportError ? <span className="error-text">{systemStatus.lastImportError}</span> : null}
         {importError ? <span className="error-text">{importError}</span> : null}
       </aside>

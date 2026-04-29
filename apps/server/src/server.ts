@@ -7,6 +7,8 @@ import Fastify from "fastify";
 import { z } from "zod";
 
 import { config } from "./config.js";
+import type { AiDjAssistant } from "./aiDjAssistant.js";
+import { OpenAiDjAssistant } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
@@ -38,6 +40,7 @@ interface CreateServerOptions {
   planner?: RadioPlanner;
   tasteEngine?: TasteEngine;
   djBrain?: DjBrain;
+  aiDjAssistant?: AiDjAssistant;
   ttsPipeline?: TtsPipeline;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
@@ -61,9 +64,16 @@ export async function createServer(options: CreateServerOptions = {}) {
     options.tasteEngine ?? new TasteEngine(),
     options.planner ?? new RadioPlanner(),
     options.djBrain ?? new DjBrain(config.openAiApiKey),
+    options.aiDjAssistant ??
+      new OpenAiDjAssistant({
+        apiKey: config.openAiApiKey,
+        baseUrl: config.openAiBaseUrl,
+        model: config.openAiModel
+      }),
     options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
     options.djBroadcastInterval ?? config.djBroadcastInterval,
+    config.aiDjMemoryTurns,
     options.importRetryIntervalMs
   );
   await orchestrator.initialize();
@@ -99,6 +109,8 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     return orchestrator.handleChat(parsed.data.message);
   });
+
+  app.get("/api/chat/history", async () => orchestrator.getChatHistory());
 
   app.post("/api/feedback", async (request, reply) => {
     const parsed = feedbackSchema.safeParse(request.body);
@@ -137,6 +149,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/ws/stream", { websocket: true }, (socket) => {
     wsHub.addSocket(socket);
+    socket.send(JSON.stringify({ event: "queue_updated", data: orchestrator.getNow().queue }));
     socket.on("close", () => wsHub.removeSocket(socket));
   });
 
