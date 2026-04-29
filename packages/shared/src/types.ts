@@ -99,15 +99,43 @@ export interface ChatRequest {
   message: string;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+  trackSuggestion?: TrackSuggestion;
+}
+
+export interface TrackSuggestion {
+  id: string;
+  track: Track;
+  reason: string;
+  createdAt: string;
+}
+
 export interface ChatResponse {
-  action: "skip" | "pause" | "resume" | "replan" | "play_specific" | "noop";
+  action:
+    | "skip"
+    | "pause"
+    | "resume"
+    | "replan"
+    | "play_specific"
+    | "play_by_description"
+    | "comment_current"
+    | "noop";
   reply: string;
   now: NowPlayingState;
+  messages: ChatMessage[];
 }
 
 export interface FeedbackRequest {
   type: FeedbackType;
   trackId: number;
+}
+
+export interface PlayTrackRequest {
+  track: Track;
+  reason?: string;
 }
 
 export interface NextRequest {
@@ -118,9 +146,17 @@ export interface NextResponse {
   now: NowPlayingState;
 }
 
+export interface PlayTrackResponse {
+  now: NowPlayingState;
+}
+
 export interface SystemStatus {
   runningRoot: string;
   ncmReachable: boolean;
+  aiDjConfigured: boolean;
+  aiDjModel?: string;
+  aiDjBaseUrlConfigured?: boolean;
+  aiDjLastError?: string;
   trackStatsCount: number;
   queueLength: number;
   lastImportAt?: string;

@@ -7,6 +7,9 @@ import Fastify from "fastify";
 import { z } from "zod";
 
 import { config } from "./config.js";
+import type { Track } from "@musicgpt/shared";
+import type { AiDjAssistant } from "./aiDjAssistant.js";
+import { OpenAiDjAssistant } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
@@ -26,6 +29,22 @@ const nextSchema = z
   })
   .optional();
 
+const trackSchema = z.object({
+  id: z.number().int(),
+  title: z.string().min(1),
+  artists: z.array(z.string()),
+  album: z.string().optional(),
+  durationMs: z.number().optional(),
+  coverUrl: z.string().optional(),
+  songUrl: z.string().optional(),
+  moodTag: z.enum(["calm", "focus", "warm", "night", "energy", "nostalgia", "unknown"]).optional()
+});
+
+const playTrackSchema = z.object({
+  track: trackSchema,
+  reason: z.string().optional()
+});
+
 const feedbackSchema = z.object({
   type: z.enum(["skip", "like", "replay", "complete"]),
   trackId: z.number().int()
@@ -38,6 +57,7 @@ interface CreateServerOptions {
   planner?: RadioPlanner;
   tasteEngine?: TasteEngine;
   djBrain?: DjBrain;
+  aiDjAssistant?: AiDjAssistant;
   ttsPipeline?: TtsPipeline;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
@@ -61,9 +81,16 @@ export async function createServer(options: CreateServerOptions = {}) {
     options.tasteEngine ?? new TasteEngine(),
     options.planner ?? new RadioPlanner(),
     options.djBrain ?? new DjBrain(config.openAiApiKey),
+    options.aiDjAssistant ??
+      new OpenAiDjAssistant({
+        apiKey: config.openAiApiKey,
+        baseUrl: config.openAiBaseUrl,
+        model: config.openAiModel
+      }),
     options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
     options.djBroadcastInterval ?? config.djBroadcastInterval,
+    config.aiDjMemoryTurns,
     options.importRetryIntervalMs
   );
   await orchestrator.initialize();
@@ -92,6 +119,15 @@ export async function createServer(options: CreateServerOptions = {}) {
     return { now };
   });
 
+  app.post("/api/play-track", async (request, reply) => {
+    const parsed = playTrackSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const now = await orchestrator.playSuggestedTrack(parsed.data.track as Track, parsed.data.reason);
+    return { now };
+  });
+
   app.post("/api/chat", async (request, reply) => {
     const parsed = chatSchema.safeParse(request.body);
     if (!parsed.success) {
@@ -99,6 +135,8 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     return orchestrator.handleChat(parsed.data.message);
   });
+
+  app.get("/api/chat/history", async () => orchestrator.getChatHistory());
 
   app.post("/api/feedback", async (request, reply) => {
     const parsed = feedbackSchema.safeParse(request.body);
@@ -137,6 +175,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/ws/stream", { websocket: true }, (socket) => {
     wsHub.addSocket(socket);
+    socket.send(JSON.stringify({ event: "queue_updated", data: orchestrator.getNow().queue }));
     socket.on("close", () => wsHub.removeSocket(socket));
   });
 

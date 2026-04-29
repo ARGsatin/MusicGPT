@@ -10,8 +10,11 @@ import type {
   SystemStatus,
   TasteProfile,
   Track,
-  TrackLyrics
+  TrackLyrics,
+  TrackSuggestion
 } from "@musicgpt/shared";
+import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
+import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
@@ -41,9 +44,11 @@ export class RadioOrchestrator {
     private readonly tasteEngine: TasteEngine,
     private readonly planner: RadioPlanner,
     private readonly djBrain: DjBrain,
+    private readonly aiDjAssistant: AiDjAssistant,
     private readonly ttsPipeline: TtsPipeline,
     private readonly wsHub: WsHub,
     private readonly djBroadcastInterval: number,
+    private readonly memoryTurns: number,
     private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS
   ) {}
 
@@ -88,11 +93,7 @@ export class RadioOrchestrator {
     await this.broadcastSystemStatus();
     const systemStatus = await this.getSystemStatus();
     if (importedCount > 0) {
-      return {
-        ok: true,
-        importedCount,
-        systemStatus
-      };
+      return { ok: true, importedCount, systemStatus };
     }
     return {
       ok: false,
@@ -110,13 +111,28 @@ export class RadioOrchestrator {
     return this.repo.getTasteProfile();
   }
 
+  getChatHistory(): { messages: ChatResponse["messages"] } {
+    return { messages: this.repo.getRecentMessages(this.chatHistoryLimit()) };
+  }
+
   async getSystemStatus(): Promise<SystemStatus> {
+    const aiDjStatus = this.aiDjAssistant.status();
     const status: SystemStatus = {
       runningRoot: process.cwd(),
       ncmReachable: await this.ncm.isReachable(),
+      aiDjConfigured: aiDjStatus.configured,
       trackStatsCount: this.repo.getTrackStatsCount(),
       queueLength: this.state.queue.length
     };
+    if (aiDjStatus.model) {
+      status.aiDjModel = aiDjStatus.model;
+    }
+    if (typeof aiDjStatus.baseUrlConfigured === "boolean") {
+      status.aiDjBaseUrlConfigured = aiDjStatus.baseUrlConfigured;
+    }
+    if (aiDjStatus.lastError) {
+      status.aiDjLastError = aiDjStatus.lastError;
+    }
     if (this.lastImportAt) {
       status.lastImportAt = this.lastImportAt;
     }
@@ -176,6 +192,15 @@ export class RadioOrchestrator {
     return this.state;
   }
 
+  async playSuggestedTrack(track: Track, reason?: string): Promise<NowPlayingState> {
+    this.state.queue.unshift({
+      track,
+      score: 0.99,
+      reason: reason?.trim() || `Requested from GPT DJ: ${track.title}`
+    });
+    return this.nextTrack();
+  }
+
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {
     const event: PlayEvent = {
       type: feedback.type,
@@ -202,53 +227,146 @@ export class RadioOrchestrator {
 
   async handleChat(message: string): Promise<ChatResponse> {
     this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const lower = message.toLowerCase();
+    const context = this.buildAiContext();
+    const intent = await this.classifySafely(message, context);
 
-    if (/\b(skip|next|下一首|切歌)\b/.test(lower) || /下一首|切歌/.test(message)) {
-      if (this.state.track) {
-        await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
-      }
-      const now = await this.nextTrack();
-      return this.reply("skip", "收到，切到下一首。", now);
-    }
-
-    if (/暂停|pause/.test(message)) {
-      this.state.paused = true;
-      this.repo.saveNowPlaying(this.state);
-      this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-      return this.reply("pause", "已暂停，你说继续我就接着播。", this.state);
-    }
-
-    if (/继续|resume|播放/.test(message)) {
-      this.state.paused = false;
-      if (!this.state.track) {
-        await this.nextTrack();
-      }
-      this.repo.saveNowPlaying(this.state);
-      this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-      return this.reply("resume", "已恢复播放。", this.state);
-    }
-
-    const desiredMood = this.extractMood(message);
-    if (desiredMood) {
-      this.desiredMood = desiredMood;
-      const now = await this.nextTrack(true);
-      return this.reply("replan", `已切到${desiredMood}风格，我继续按这个方向播。`, now);
-    }
-
-    const playSpecific = this.extractPlayKeyword(message);
-    if (playSpecific) {
-      const matches = await this.ncm.searchSongs(playSpecific);
-      const target = matches[0];
-      if (target) {
-        this.state.queue.unshift({ track: target, score: 0.99, reason: `按你的指令点播：${playSpecific}` });
-        const now = await this.nextTrack();
-        return this.reply("play_specific", `安排上了《${target.title}》。`, now);
+    switch (intent.type) {
+      case "skip":
+        if (this.state.track) {
+          await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
+        }
+        return this.reply("skip", "收到，切到下一首。", await this.nextTrack());
+      case "pause":
+        this.state.paused = true;
+        this.repo.saveNowPlaying(this.state);
+        this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+        return this.reply("pause", "已暂停。你说继续，我就把夜色重新推上轨道。", this.state);
+      case "resume":
+        this.state.paused = false;
+        if (!this.state.track) {
+          await this.nextTrack();
+        }
+        this.repo.saveNowPlaying(this.state);
+        this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+        return this.reply("resume", "继续播放。唱针已回到它该去的地方。", this.state);
+      case "replan":
+        this.desiredMood = intent.desiredMood;
+        await this.nextTrack(true);
+        this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+        return this.reply("replan", `已切到 ${intent.desiredMood} 风格，我继续按这个方向播。`, this.state);
+      case "comment_current":
+        return this.commentCurrentTrack(context);
+      case "play_specific":
+        return this.suggestSpecific(intent);
+      case "play_by_description":
+        return this.suggestByDescription(intent, context);
+      case "chat":
+      default: {
+        const reply = await this.aiDjAssistant
+          .chat(message, context)
+          .catch(() => fallbackChatReply(message, context));
+        return this.reply("noop", reply, this.state);
       }
     }
+  }
 
-    await this.ensureQueue();
-    return this.reply("noop", "我在，想点歌、换风格或切歌都可以直接说。", this.state);
+  private async classifySafely(message: string, context: AiDjContext): Promise<AiDjIntent> {
+    try {
+      return await this.aiDjAssistant.classify(message, context);
+    } catch {
+      return fallbackClassify(message);
+    }
+  }
+
+  private buildAiContext(): AiDjContext {
+    return {
+      messages: this.repo.getRecentMessages(this.chatHistoryLimit()),
+      nowTrack: this.state.track,
+      queue: this.state.queue.slice(0, 10),
+      taste: this.repo.getTasteProfile()
+    };
+  }
+
+  private chatHistoryLimit(): number {
+    return Math.max(2, this.memoryTurns * 2);
+  }
+
+  private async suggestSpecific(intent: Extract<AiDjIntent, { type: "play_specific" }>): Promise<ChatResponse> {
+    const query = intent.searchQuery?.trim() || intent.query.trim();
+    const matches = await this.ncm.searchSongs(query);
+    const target = matches[0];
+    if (!target) {
+      return this.reply("noop", `我没搜到《${query}》。换个歌名或歌手，我再找。`, this.state);
+    }
+    const comment = await this.aiDjAssistant
+      .commentTrack(target, this.buildAiContext(), `direct song request: ${query}`)
+      .catch(() => fallbackComment(target));
+    return this.reply(
+      "play_specific",
+      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      this.state,
+      this.createTrackSuggestion(target, `direct song request: ${query}`)
+    );
+  }
+
+  private async suggestByDescription(
+    intent: Extract<AiDjIntent, { type: "play_by_description" }>,
+    context: AiDjContext
+  ): Promise<ChatResponse> {
+    const local = this.findLocalCandidates(intent.description);
+    let candidates = local.map((candidate) => candidate.track);
+    const bestLocalScore = local[0]?.score ?? 0;
+    if (bestLocalScore < 0.35) {
+      const searchQuery = intent.searchQuery?.trim() || intent.description;
+      const remote = await this.ncm.searchSongs(searchQuery).catch(() => []);
+      candidates = dedupeTracks([...candidates, ...remote]).slice(0, 12);
+    }
+
+    if (candidates.length === 0) {
+      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，比如年代、声线、节奏或情绪深浅。", this.state);
+    }
+
+    const selection = await this.aiDjAssistant
+      .selectTrack(intent.description, candidates, context)
+      .catch((): TrackSelection => ({ trackId: candidates[0]?.id, reason: "候选里它最贴近这次描述。" }));
+    const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
+    if (!target) {
+      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，我继续调频。", this.state);
+    }
+
+    const comment = await this.aiDjAssistant
+      .commentTrack(
+        target,
+        this.buildAiContext(),
+        `request description: ${intent.description}; selection reason: ${selection.reason}`
+      )
+      .catch(() => fallbackComment(target));
+    return this.reply(
+      "play_by_description",
+      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      this.state,
+      this.createTrackSuggestion(target, selection.reason || `request description: ${intent.description}`)
+    );
+  }
+
+  private async commentCurrentTrack(context: AiDjContext): Promise<ChatResponse> {
+    if (!this.state.track) {
+      return this.reply("comment_current", "现在还没有正在播放的歌。先点一首，我们再认真拆它的骨相。", this.state);
+    }
+    const reply = await this.aiDjAssistant.commentCurrent(context).catch(() => fallbackComment(this.state.track!));
+    return this.reply("comment_current", reply, this.state);
+  }
+
+  private findLocalCandidates(description: string): Array<{ track: Track; score: number }> {
+    return this.repo
+      .getTrackStats(800)
+      .map((entry) => ({
+        track: entry.track,
+        score: scoreTrackForDescription(entry, description)
+      }))
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 10);
   }
 
   private async maybeGenerateDj(): Promise<void> {
@@ -367,38 +485,28 @@ export class RadioOrchestrator {
     };
   }
 
-  private extractMood(text: string): string | undefined {
-    const moodMap: Array<{ mood: string; keywords: RegExp }> = [
-      { mood: "calm", keywords: /轻松|舒缓|平静|calm/i },
-      { mood: "energy", keywords: /燃|动感|摇滚|edm|energy/i },
-      { mood: "night", keywords: /夜晚|深夜|晚安|night/i },
-      { mood: "focus", keywords: /专注|学习|工作|focus/i },
-      { mood: "nostalgia", keywords: /怀旧|经典|old/i },
-      { mood: "warm", keywords: /治愈|温柔|暖/i }
-    ];
-
-    for (const item of moodMap) {
-      if (item.keywords.test(text)) {
-        return item.mood;
-      }
-    }
-    return undefined;
+  private createTrackSuggestion(track: Track, reason: string): TrackSuggestion {
+    return {
+      id: `suggestion_${track.id}_${Date.now()}`,
+      track,
+      reason,
+      createdAt: new Date().toISOString()
+    };
   }
 
-  private extractPlayKeyword(text: string): string | undefined {
-    const match = text.match(/来一首(.+)/) ?? text.match(/播放(.+)/);
-    if (!match) {
-      return undefined;
-    }
-    return match[1]?.trim();
-  }
-
-  private reply(action: ChatResponse["action"], reply: string, now: NowPlayingState): ChatResponse {
-    this.repo.addChatMessage({ role: "assistant", text: reply, at: new Date().toISOString() });
+  private reply(
+    action: ChatResponse["action"],
+    reply: string,
+    now: NowPlayingState,
+    trackSuggestion?: TrackSuggestion
+  ): ChatResponse {
+    const message = { role: "assistant" as const, text: reply, at: new Date().toISOString() };
+    this.repo.addChatMessage(trackSuggestion ? { ...message, trackSuggestion } : message);
     return {
       action,
       reply,
-      now
+      now,
+      messages: this.repo.getRecentMessages(this.chatHistoryLimit())
     };
   }
 }
@@ -414,4 +522,52 @@ function dedupeByTrackId(items: RadioPlanItem[]): RadioPlanItem[] {
     output.push(item);
   }
   return output;
+}
+
+function dedupeTracks(items: Track[]): Track[] {
+  const seen = new Set<number>();
+  const output: Track[] = [];
+  for (const item of items) {
+    if (seen.has(item.id)) {
+      continue;
+    }
+    seen.add(item.id);
+    output.push(item);
+  }
+  return output;
+}
+
+function scoreTrackForDescription(entry: { track: Track; playCount: number }, description: string): number {
+  const text = `${entry.track.title} ${entry.track.artists.join(" ")} ${entry.track.album ?? ""}`.toLowerCase();
+  const desc = description.toLowerCase();
+  let score = Math.min(0.2, entry.playCount / 500);
+
+  const rules: Array<{ pattern: RegExp; moods: string[]; words: string[]; weight: number }> = [
+    { pattern: /雨|rain|下雨/, moods: ["calm", "night", "warm"], words: ["rain", "雨"], weight: 0.28 },
+    { pattern: /夜|凌晨|深夜|晚|night|midnight/, moods: ["night"], words: ["night", "midnight", "nocturne", "deep"], weight: 0.45 },
+    { pattern: /代码|工作|学习|专注|focus|coding/, moods: ["focus"], words: ["focus", "code", "work"], weight: 0.45 },
+    { pattern: /电子|低频|edm|bass|electro/, moods: ["energy", "focus"], words: ["bass", "electro", "edm", "synth"], weight: 0.35 },
+    { pattern: /散步|安静|平静|calm|walk/, moods: ["calm", "night", "warm"], words: ["walk", "quiet", "calm"], weight: 0.25 },
+    { pattern: /怀旧|经典|nostalgia|old/, moods: ["nostalgia"], words: ["old", "classic"], weight: 0.32 }
+  ];
+
+  for (const rule of rules) {
+    if (!rule.pattern.test(desc)) {
+      continue;
+    }
+    if (entry.track.moodTag && rule.moods.includes(entry.track.moodTag)) {
+      score += rule.weight;
+    }
+    if (rule.words.some((word) => text.includes(word))) {
+      score += rule.weight;
+    }
+  }
+
+  for (const token of desc.split(/\s+/).filter((part) => part.length >= 2)) {
+    if (text.includes(token)) {
+      score += 0.2;
+    }
+  }
+
+  return score;
 }
