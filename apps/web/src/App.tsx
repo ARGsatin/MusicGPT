@@ -8,6 +8,7 @@ import {
   fetchSystemStatus,
   fetchTaste,
   importFromNcm,
+  playSuggestedTrack,
   requestNext,
   sendChat,
   sendFeedback
@@ -71,6 +72,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
+  const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -161,6 +163,23 @@ export default function App() {
       setMessages((current) => current.filter((item) => item !== optimistic));
     } finally {
       setChatLoading(false);
+    }
+  };
+
+  const onPlaySuggestion = async (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => {
+    if (suggestionLoadingId) {
+      return;
+    }
+    setSuggestionLoadingId(suggestion.id);
+    setChatError(null);
+    try {
+      const response = await playSuggestedTrack(suggestion.track, suggestion.reason);
+      setNow(response.now);
+      await refreshTaste();
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
+    } finally {
+      setSuggestionLoadingId(null);
     }
   };
 
@@ -438,19 +457,33 @@ export default function App() {
                 ) : null}
                 <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
                   <p>{message.text}</p>
+                  {message.role === "assistant" && message.trackSuggestion ? (
+                    <button
+                      className="track-suggestion"
+                      type="button"
+                      onClick={() => void onPlaySuggestion(message.trackSuggestion!)}
+                      disabled={Boolean(suggestionLoadingId)}
+                    >
+                      <span className="suggestion-cover" aria-hidden="true">
+                        {message.trackSuggestion.track.coverUrl ? (
+                          <img alt="" src={message.trackSuggestion.track.coverUrl} />
+                        ) : (
+                          "♪"
+                        )}
+                      </span>
+                      <span className="suggestion-copy">
+                        <strong>{message.trackSuggestion.track.title}</strong>
+                        <em>{formatArtists(message.trackSuggestion.track.artists)}</em>
+                        <small>{message.trackSuggestion.reason}</small>
+                      </span>
+                      <span className="suggestion-action">
+                        {suggestionLoadingId === message.trackSuggestion.id ? "切换中" : "切到这首"}
+                      </span>
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ))}
-            {chatLoading ? (
-              <div className="message-row assistant-row">
-                <div className="avatar small dj-avatar" aria-hidden="true">
-                  <img alt="" src={aiDjAvatarUrl} />
-                </div>
-                <div className="message-bubble is-thinking">
-                  <p>GPT DJ 正在翻箱倒柜地找那首最像你的歌...</p>
-                </div>
-              </div>
-            ) : null}
           </div>
           <p className="now-caption">Now playing: {trackTitle}</p>
           {now.djScript?.audioUrl ? <audio controls src={now.djScript.audioUrl} className="dj-audio" /> : null}

@@ -4,7 +4,8 @@ import {
   encodeWsPayload,
   isChatRequest,
   isFeedbackRequest,
-  isNextRequest
+  isNextRequest,
+  isPlayTrackRequest
 } from "../src/contracts.js";
 
 describe("contracts", () => {
@@ -21,6 +22,16 @@ describe("contracts", () => {
   it("validates next payload", () => {
     expect(isNextRequest({ forceReplan: true })).toBe(true);
     expect(isNextRequest({ forceReplan: "yes" })).toBe(false);
+  });
+
+  it("validates suggested track playback payload", () => {
+    expect(
+      isPlayTrackRequest({
+        track: { id: 99, title: "Night Drive", artists: ["Ari"] },
+        reason: "matches the requested mood"
+      })
+    ).toBe(true);
+    expect(isPlayTrackRequest({ track: { id: "99", title: "Night Drive", artists: ["Ari"] } })).toBe(false);
   });
 
   it("encodes ws payload", () => {

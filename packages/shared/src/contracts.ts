@@ -2,6 +2,7 @@ import type {
   ChatRequest,
   FeedbackRequest,
   NextRequest,
+  PlayTrackRequest,
   WsPayload
 } from "./types.js";
 
@@ -10,6 +11,7 @@ export const API_ROUTES = {
   chatHistory: "/api/chat/history",
   now: "/api/now",
   next: "/api/next",
+  playTrack: "/api/play-track",
   taste: "/api/taste",
   feedback: "/api/feedback",
   systemStatus: "/api/system/status",
@@ -41,6 +43,22 @@ export function isFeedbackRequest(value: unknown): value is FeedbackRequest {
   return (
     typeof maybe.trackId === "number" &&
     ["skip", "like", "replay", "complete"].includes(maybe.type)
+  );
+}
+
+export function isPlayTrackRequest(value: unknown): value is PlayTrackRequest {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const maybe = value as PlayTrackRequest;
+  return (
+    Boolean(maybe.track) &&
+    typeof maybe.track === "object" &&
+    typeof maybe.track.id === "number" &&
+    typeof maybe.track.title === "string" &&
+    Array.isArray(maybe.track.artists) &&
+    maybe.track.artists.every((artist) => typeof artist === "string") &&
+    (maybe.reason === undefined || typeof maybe.reason === "string")
   );
 }
 

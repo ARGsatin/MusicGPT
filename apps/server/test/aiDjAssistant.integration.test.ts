@@ -23,7 +23,7 @@ afterEach(async () => {
 });
 
 describe("AI DJ assistant chat", () => {
-  it("selects a described song from the local library and plays it immediately", async () => {
+  it("selects a described song from the local library without changing playback", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "雨夜散步，不要太伤", searchQuery: "雨夜 散步" },
@@ -38,11 +38,37 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "点一首适合雨夜散步但不要太伤的歌");
 
     expect(response.action).toBe("play_by_description");
-    expect(response.now.track?.id).toBe(102);
+    expect(response.now.track).toBeUndefined();
+    expect(response.now.queue).toHaveLength(0);
     expect(response.reply).toContain("Rain Walk");
     expect(response.messages.at(-1)?.role).toBe("assistant");
+    const suggestion = response.messages.at(-1)?.trackSuggestion;
+    expect(suggestion?.track.id).toBe(102);
+    expect(suggestion?.track.songUrl).toBeUndefined();
     expect(fixture.assistant.lastCandidates.map((candidate) => candidate.id)).toContain(102);
     expect(fixture.ncmSearches).toHaveLength(0);
+  });
+
+  it("plays a suggested track only after the user clicks the suggestion", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_by_description", description: "rain walk", searchQuery: "rain walk" },
+        selection: { trackId: 102, reason: "soft night pacing" }
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 102, title: "Rain Walk", artists: ["Nocturne"], album: "Quiet City", moodTag: "night", playCount: 12 })
+    ]);
+
+    const response = await postChat(fixture.base, "play something for rain walk");
+    const suggestion = response.messages.at(-1)?.trackSuggestion;
+    expect(suggestion?.track.id).toBe(102);
+    expect(response.now.track).toBeUndefined();
+
+    const playResponse = await postPlayTrack(fixture.base, suggestion!.track, suggestion!.reason);
+
+    expect(playResponse.now.track?.id).toBe(102);
+    expect(playResponse.now.track?.songUrl).toBe("https://example.com/102.mp3");
   });
 
   it("falls back to NCM search when local candidates are weak", async () => {
@@ -60,7 +86,8 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "来点凌晨写代码的低频电子");
 
     expect(response.action).toBe("play_by_description");
-    expect(response.now.track?.id).toBe(202);
+    expect(response.now.track).toBeUndefined();
+    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(202);
     expect(fixture.ncmSearches).toEqual(["低频 电子"]);
   });
 
@@ -119,6 +146,8 @@ describe("AI DJ assistant chat", () => {
     expect(response.reply).toContain("Terminal Glow");
     expect(response.reply).toContain("terminal window");
     expect(response.reply).not.toContain("internal ranking reason");
+    expect(response.now.track).toBeUndefined();
+    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(402);
   });
 
   it("adds a free DJ comment after a direct song request", async () => {
@@ -133,7 +162,8 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "play Nevada");
 
     expect(response.action).toBe("play_specific");
-    expect(response.now.track?.id).toBe(403);
+    expect(response.now.track).toBeUndefined();
+    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(403);
     expect(response.reply).toContain("Nevada");
     expect(response.reply).toContain("skyline");
   });
@@ -250,7 +280,19 @@ async function postChat(base: string, message: string) {
     action: string;
     reply: string;
     now: { track?: Track; queue: unknown[]; paused: boolean };
-    messages: ChatMessage[];
+    messages: Array<ChatMessage & { trackSuggestion?: { track: Track; reason: string } }>;
+  };
+}
+
+async function postPlayTrack(base: string, track: Track, reason: string) {
+  const response = await fetch(`${base}/api/play-track`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ track, reason })
+  });
+  expect(response.ok).toBe(true);
+  return (await response.json()) as {
+    now: { track?: Track; queue: unknown[]; paused: boolean };
   };
 }
 

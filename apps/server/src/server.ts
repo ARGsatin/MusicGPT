@@ -7,6 +7,7 @@ import Fastify from "fastify";
 import { z } from "zod";
 
 import { config } from "./config.js";
+import type { Track } from "@musicgpt/shared";
 import type { AiDjAssistant } from "./aiDjAssistant.js";
 import { OpenAiDjAssistant } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
@@ -27,6 +28,22 @@ const nextSchema = z
     forceReplan: z.boolean().optional()
   })
   .optional();
+
+const trackSchema = z.object({
+  id: z.number().int(),
+  title: z.string().min(1),
+  artists: z.array(z.string()),
+  album: z.string().optional(),
+  durationMs: z.number().optional(),
+  coverUrl: z.string().optional(),
+  songUrl: z.string().optional(),
+  moodTag: z.enum(["calm", "focus", "warm", "night", "energy", "nostalgia", "unknown"]).optional()
+});
+
+const playTrackSchema = z.object({
+  track: trackSchema,
+  reason: z.string().optional()
+});
 
 const feedbackSchema = z.object({
   type: z.enum(["skip", "like", "replay", "complete"]),
@@ -99,6 +116,15 @@ export async function createServer(options: CreateServerOptions = {}) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const now = await orchestrator.nextTrack(parsed.data?.forceReplan ?? false);
+    return { now };
+  });
+
+  app.post("/api/play-track", async (request, reply) => {
+    const parsed = playTrackSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const now = await orchestrator.playSuggestedTrack(parsed.data.track as Track, parsed.data.reason);
     return { now };
   });
 

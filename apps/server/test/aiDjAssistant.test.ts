@@ -27,10 +27,12 @@ describe("AI DJ assistant fallback comments", () => {
     const second = fallbackChatReply("我想听冷一点", { messages: [], queue: [] });
 
     expect(first).not.toBe(second);
-    expect(first + second).toMatch(/本地|OpenAI|模型/);
+    expect(first.length).toBeLessThan(80);
+    expect(second.length).toBeLessThan(80);
   });
 
   it("does not treat explicit no-playback chat as a song request", () => {
     expect(fallbackClassify("别点歌，随便聊聊你怎么看今晚这首歌的气质")).toEqual({ type: "chat" });
+    expect(fallbackClassify("只聊天：你现在是真的在线吗？")).toEqual({ type: "chat" });
   });
 });

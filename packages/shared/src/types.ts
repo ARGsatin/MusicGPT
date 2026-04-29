@@ -90,6 +90,14 @@ export interface ChatMessage {
   role: "user" | "assistant";
   text: string;
   at: string;
+  trackSuggestion?: TrackSuggestion;
+}
+
+export interface TrackSuggestion {
+  id: string;
+  track: Track;
+  reason: string;
+  createdAt: string;
 }
 
 export interface ChatResponse {
@@ -112,11 +120,20 @@ export interface FeedbackRequest {
   trackId: number;
 }
 
+export interface PlayTrackRequest {
+  track: Track;
+  reason?: string;
+}
+
 export interface NextRequest {
   forceReplan?: boolean;
 }
 
 export interface NextResponse {
+  now: NowPlayingState;
+}
+
+export interface PlayTrackResponse {
   now: NowPlayingState;
 }
 

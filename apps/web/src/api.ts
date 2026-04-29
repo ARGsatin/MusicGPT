@@ -5,8 +5,10 @@ import type {
   ImportNcmResponse,
   NextResponse,
   NowPlayingState,
+  PlayTrackResponse,
   SystemStatus,
-  TasteProfile
+  TasteProfile,
+  Track
 } from "@musicgpt/shared";
 
 export async function fetchNowPlaying(): Promise<NowPlayingState> {
@@ -59,6 +61,18 @@ export async function requestNext(forceReplan = false): Promise<NextResponse> {
     throw new Error("Failed to fetch next track");
   }
   return (await response.json()) as NextResponse;
+}
+
+export async function playSuggestedTrack(track: Track, reason?: string): Promise<PlayTrackResponse> {
+  const response = await fetch("/api/play-track", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ track, reason })
+  });
+  if (!response.ok) {
+    throw new Error("Failed to play suggested track");
+  }
+  return (await response.json()) as PlayTrackResponse;
 }
 
 export async function sendFeedback(payload: FeedbackRequest): Promise<void> {

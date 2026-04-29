@@ -150,7 +150,13 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       const response = await this.client.chat.completions.create({
         model: this.model,
         temperature: 0.9,
+        max_tokens: 180,
         messages: [
+          {
+            role: "system",
+            content:
+              "回复必须像聊天，不像长评。最多 1-3 句，总长尽量控制在 80 字以内；只挑一个具体听感说，别展开成文章。"
+          },
           {
             role: "system",
             content:
@@ -186,7 +192,13 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       const response = await this.client.chat.completions.create({
         model: this.model,
         temperature: 0.92,
+        max_tokens: 140,
         messages: [
+          {
+            role: "system",
+            content:
+              "回复必须短，像朋友在聊天。最多 1-3 句，总长尽量控制在 80 字以内；不要分点，不要长段分析。"
+          },
           {
             role: "system",
             content:
@@ -310,6 +322,16 @@ function fallbackSelection(_description: string, candidates: Track[]): TrackSele
 }
 
 export function fallbackComment(track: Track): string {
+  {
+    const artist = track.artists.join(" / ") || "这位音乐人";
+    const title = `《${track.title}》`;
+    const variants = [
+      `${title}可以。${artist}把气口留得很舒服，不抢你，只把当前气氛往前推半步。`,
+      `${title}挺贴。它的质感不厚重，但有抓手，适合现在这种想听歌、不想被歌教育的时刻。`,
+      `${title}我会留它。${artist}这里最妙的是分寸感，情绪到了，但没有把话说满。`
+    ];
+    return variants[stableIndex(`${track.id}:${track.title}`, variants.length)]!;
+  }
   const artist = track.artists.join(" / ") || "这位音乐人";
   const title = `《${track.title}》`;
   switch (track.moodTag) {
@@ -331,8 +353,19 @@ export function fallbackComment(track: Track): string {
 }
 
 export function fallbackChatReply(message: string, context: AiDjContext): string {
+  {
+    const current = context.nowTrack
+      ? `现在垫着《${context.nowTrack!.title}》`
+      : "现在唱针还没落稳";
+    const variants = [
+      `${current}。你继续说，我按你的语气往歌里找。`,
+      "懂，我先不急着点歌。这个听感可以再冷一点，也可以更松一点。",
+      `${current}。别写论文，我们就按耳朵走。`
+    ];
+    return variants[/冷|cold/i.test(message) ? 1 : stableIndex(message, variants.length)]!;
+  }
   const current = context.nowTrack
-    ? `现在垫底的是《${context.nowTrack.title}》 - ${context.nowTrack.artists.join(" / ") || "未知艺人"}`
+    ? `现在垫底的是《${context.nowTrack!.title}》 - ${context.nowTrack!.artists.join(" / ") || "未知艺人"}`
     : "现在唱针还悬在半空";
   const variants = [
     `${current}。我目前还在本地 DJ 模式，脑子里没有云端模型那块湿润的灰质；但你可以继续甩给我一个画面，我会先用曲库和播放记录给你掏一首不太敷衍的。`,

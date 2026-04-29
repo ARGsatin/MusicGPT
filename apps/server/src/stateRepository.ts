@@ -68,9 +68,18 @@ export class StateRepository {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         role TEXT NOT NULL,
         text TEXT NOT NULL,
-        at TEXT NOT NULL
+        at TEXT NOT NULL,
+        metadata_json TEXT
       );
     `);
+    this.ensureChatMetadataColumn();
+  }
+
+  private ensureChatMetadataColumn(): void {
+    const columns = this.db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "metadata_json")) {
+      this.db.exec("ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT");
+    }
   }
 
   upsertTrackStats(stats: TrackStat[]): void {
@@ -260,14 +269,33 @@ export class StateRepository {
 
   addChatMessage(message: ChatMessage): void {
     this.db
-      .prepare("INSERT INTO chat_messages(role, text, at) VALUES(?, ?, ?)")
-      .run(message.role, message.text, message.at);
+      .prepare("INSERT INTO chat_messages(role, text, at, metadata_json) VALUES(?, ?, ?, ?)")
+      .run(
+        message.role,
+        message.text,
+        message.at,
+        JSON.stringify({ trackSuggestion: message.trackSuggestion })
+      );
   }
 
   getRecentMessages(limit = 30): ChatMessage[] {
     const rows = this.db
-      .prepare("SELECT role, text, at FROM chat_messages ORDER BY id DESC LIMIT ?")
-      .all(limit) as unknown as ChatMessage[];
-    return rows.slice().reverse();
+      .prepare("SELECT role, text, at, metadata_json FROM chat_messages ORDER BY id DESC LIMIT ?")
+      .all(limit) as Array<{ role: ChatMessage["role"]; text: string; at: string; metadata_json?: string | null }>;
+    return rows
+      .slice()
+      .reverse()
+      .map((row) => {
+        const metadata = parseJson<{ trackSuggestion?: ChatMessage["trackSuggestion"] }>(row.metadata_json ?? null, {});
+        const message: ChatMessage = {
+          role: row.role,
+          text: row.text,
+          at: row.at
+        };
+        if (metadata.trackSuggestion) {
+          message.trackSuggestion = metadata.trackSuggestion;
+        }
+        return message;
+      });
   }
 }

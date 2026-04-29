@@ -9,7 +9,8 @@ import type {
   RadioPlanItem,
   SystemStatus,
   TasteProfile,
-  Track
+  Track,
+  TrackSuggestion
 } from "@musicgpt/shared";
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
 import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
@@ -185,6 +186,15 @@ export class RadioOrchestrator {
     return this.state;
   }
 
+  async playSuggestedTrack(track: Track, reason?: string): Promise<NowPlayingState> {
+    this.state.queue.unshift({
+      track,
+      score: 0.99,
+      reason: reason?.trim() || `Requested from GPT DJ: ${track.title}`
+    });
+    return this.nextTrack();
+  }
+
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {
     const event: PlayEvent = {
       type: feedback.type,
@@ -241,9 +251,9 @@ export class RadioOrchestrator {
       case "comment_current":
         return this.commentCurrentTrack(context);
       case "play_specific":
-        return this.playSpecific(intent);
+        return this.suggestSpecific(intent);
       case "play_by_description":
-        return this.playByDescription(intent, context);
+        return this.suggestByDescription(intent, context);
       case "chat":
       default: {
         const reply = await this.aiDjAssistant
@@ -275,22 +285,25 @@ export class RadioOrchestrator {
     return Math.max(2, this.memoryTurns * 2);
   }
 
-  private async playSpecific(intent: Extract<AiDjIntent, { type: "play_specific" }>): Promise<ChatResponse> {
+  private async suggestSpecific(intent: Extract<AiDjIntent, { type: "play_specific" }>): Promise<ChatResponse> {
     const query = intent.searchQuery?.trim() || intent.query.trim();
     const matches = await this.ncm.searchSongs(query);
     const target = matches[0];
     if (!target) {
-      return this.reply("noop", `我没搜到「${query}」。换个歌名、歌手或给我一点氛围，我再挖。`, this.state);
+      return this.reply("noop", `我没搜到《${query}》。换个歌名或歌手，我再找。`, this.state);
     }
-    this.state.queue.unshift({ track: target, score: 0.99, reason: `按你的指令点播：${query}` });
-    const now = await this.nextTrack();
     const comment = await this.aiDjAssistant
       .commentTrack(target, this.buildAiContext(), `direct song request: ${query}`)
       .catch(() => fallbackComment(target));
-    return this.reply("play_specific", `安排上了《${target.title}》 - ${target.artists.join(" / ")}。\n${comment}`, now);
+    return this.reply(
+      "play_specific",
+      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      this.state,
+      this.createTrackSuggestion(target, `direct song request: ${query}`)
+    );
   }
 
-  private async playByDescription(
+  private async suggestByDescription(
     intent: Extract<AiDjIntent, { type: "play_by_description" }>,
     context: AiDjContext
   ): Promise<ChatResponse> {
@@ -304,7 +317,7 @@ export class RadioOrchestrator {
     }
 
     if (candidates.length === 0) {
-      return this.reply("noop", "我暂时没有找到足够贴合的候选。再给我一点关键词，比如年代、男女声、节奏或情绪深浅。", this.state);
+      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，比如年代、声线、节奏或情绪深浅。", this.state);
     }
 
     const selection = await this.aiDjAssistant
@@ -312,22 +325,21 @@ export class RadioOrchestrator {
       .catch((): TrackSelection => ({ trackId: candidates[0]?.id, reason: "候选里它最贴近这次描述。" }));
     const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
     if (!target) {
-      return this.reply("noop", "我暂时没有找到足够贴合的候选。再给我一点关键词，我会继续调频。", this.state);
+      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，我继续调频。", this.state);
     }
 
-    this.state.queue.unshift({
-      track: target,
-      score: 0.99,
-      reason: selection.reason || `按你的描述点播：${intent.description}`
-    });
-    const now = await this.nextTrack();
     const comment = await this.aiDjAssistant
-      .commentTrack(target, this.buildAiContext(), `request description: ${intent.description}; selection reason: ${selection.reason}`)
+      .commentTrack(
+        target,
+        this.buildAiContext(),
+        `request description: ${intent.description}; selection reason: ${selection.reason}`
+      )
       .catch(() => fallbackComment(target));
     return this.reply(
       "play_by_description",
-      `我选《${target.title}》 - ${target.artists.join(" / ")}。\n${comment}`,
-      now
+      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      this.state,
+      this.createTrackSuggestion(target, selection.reason || `request description: ${intent.description}`)
     );
   }
 
@@ -463,8 +475,23 @@ export class RadioOrchestrator {
     };
   }
 
-  private reply(action: ChatResponse["action"], reply: string, now: NowPlayingState): ChatResponse {
-    this.repo.addChatMessage({ role: "assistant", text: reply, at: new Date().toISOString() });
+  private createTrackSuggestion(track: Track, reason: string): TrackSuggestion {
+    return {
+      id: `suggestion_${track.id}_${Date.now()}`,
+      track,
+      reason,
+      createdAt: new Date().toISOString()
+    };
+  }
+
+  private reply(
+    action: ChatResponse["action"],
+    reply: string,
+    now: NowPlayingState,
+    trackSuggestion?: TrackSuggestion
+  ): ChatResponse {
+    const message = { role: "assistant" as const, text: reply, at: new Date().toISOString() };
+    this.repo.addChatMessage(trackSuggestion ? { ...message, trackSuggestion } : message);
     return {
       action,
       reply,

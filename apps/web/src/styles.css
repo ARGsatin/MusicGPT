@@ -585,6 +585,86 @@ button:hover:not(:disabled) {
   color: var(--muted);
 }
 
+.track-suggestion {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+  border: 1px solid rgba(49, 239, 178, 0.22);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--text);
+  background: rgba(49, 239, 178, 0.08);
+  cursor: pointer;
+  text-align: left;
+}
+
+.track-suggestion:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
+.suggestion-cover {
+  width: 54px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  color: var(--amber);
+  background: #101114;
+  font-size: 22px;
+}
+
+.suggestion-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.suggestion-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.suggestion-copy strong,
+.suggestion-copy em,
+.suggestion-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-copy strong {
+  color: #ffffff;
+  font-size: 14px;
+}
+
+.suggestion-copy em {
+  color: var(--amber);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.suggestion-copy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.suggestion-action {
+  min-width: 72px;
+  border-radius: 999px;
+  padding: 8px 10px;
+  color: #06120f;
+  background: var(--mint);
+  font-family: "Space Mono", "Noto Sans SC", monospace;
+  font-size: 12px;
+  text-align: center;
+}
+
 .user-bubble {
   max-width: 82%;
   color: var(--amber);
@@ -957,6 +1037,19 @@ button:hover:not(:disabled) {
 
   .user-bubble {
     max-width: 100%;
+  }
+
+  .track-suggestion {
+    grid-template-columns: 46px minmax(0, 1fr);
+  }
+
+  .suggestion-cover {
+    width: 46px;
+  }
+
+  .suggestion-action {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .queue-panel li {
