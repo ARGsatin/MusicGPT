@@ -11,6 +11,12 @@ export type DayPeriod = "morning" | "afternoon" | "evening" | "late_night";
 
 export type FeedbackType = "skip" | "like" | "replay" | "complete";
 
+export type WeatherKind = "clear" | "cloudy" | "rain" | "snow" | "fog" | "storm" | "unknown";
+
+export type DjTone = "lively" | "calm" | "professional";
+
+export type VoiceGender = "female" | "male";
+
 export interface Track {
   id: number;
   title: string;
@@ -62,6 +68,39 @@ export interface TasteProfile {
   }>;
   moodWeights: Record<MoodTag, number>;
   pacingPreference: "gentle" | "balanced" | "dynamic";
+}
+
+export interface EnvironmentLocation {
+  latitude: number;
+  longitude: number;
+  label?: string;
+}
+
+export interface EnvironmentContext {
+  dayPeriod: DayPeriod;
+  weather: WeatherKind;
+  temperature?: number;
+  location?: EnvironmentLocation;
+  updatedAt: string;
+}
+
+export interface EnvironmentLocationRequest {
+  latitude: number;
+  longitude: number;
+  label?: string;
+}
+
+export interface DjSettings {
+  tone: DjTone;
+  voiceGender: VoiceGender;
+  voice: string;
+}
+
+export interface RecommendationImportResponse {
+  importedCount: number;
+  skippedCount: number;
+  environment: EnvironmentContext;
+  systemStatus: SystemStatus;
 }
 
 export interface RadioPlanItem {
@@ -162,6 +201,8 @@ export interface SystemStatus {
   queueLength: number;
   lastImportAt?: string;
   lastImportError?: string;
+  environment?: EnvironmentContext;
+  djSettings?: DjSettings;
 }
 
 export interface ImportNcmResponse {

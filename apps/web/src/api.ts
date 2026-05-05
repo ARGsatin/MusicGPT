@@ -1,11 +1,15 @@
 import type {
   ChatMessage,
   ChatResponse,
+  DjSettings,
+  EnvironmentContext,
+  EnvironmentLocationRequest,
   FeedbackRequest,
   ImportNcmResponse,
   NextResponse,
   NowPlayingState,
   PlayTrackResponse,
+  RecommendationImportResponse,
   SystemStatus,
   TasteProfile,
   Track
@@ -92,6 +96,58 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
     throw new Error("Failed to load system status");
   }
   return (await response.json()) as SystemStatus;
+}
+
+export async function fetchEnvironment(): Promise<EnvironmentContext> {
+  const response = await fetch("/api/environment");
+  if (!response.ok) {
+    throw new Error("Failed to load environment");
+  }
+  return (await response.json()) as EnvironmentContext;
+}
+
+export async function updateEnvironmentLocation(
+  payload: EnvironmentLocationRequest
+): Promise<EnvironmentContext> {
+  const response = await fetch("/api/environment/location", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error("Weather location update failed");
+  }
+  return (await response.json()) as EnvironmentContext;
+}
+
+export async function importRecommendations(): Promise<RecommendationImportResponse> {
+  const response = await fetch("/api/recommendations/import", {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error("Recommendation import failed");
+  }
+  return (await response.json()) as RecommendationImportResponse;
+}
+
+export async function fetchDjSettings(): Promise<DjSettings> {
+  const response = await fetch("/api/dj/settings");
+  if (!response.ok) {
+    throw new Error("Failed to load DJ settings");
+  }
+  return (await response.json()) as DjSettings;
+}
+
+export async function updateDjSettings(payload: DjSettings): Promise<DjSettings> {
+  const response = await fetch("/api/dj/settings", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    throw new Error("Failed to update DJ settings");
+  }
+  return (await response.json()) as DjSettings;
 }
 
 export async function importFromNcm(): Promise<ImportNcmResponse> {

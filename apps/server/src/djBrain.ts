@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-import type { DjScript, RadioPlanItem, TasteProfile, Track } from "@musicgpt/shared";
+import type { DjScript, DjSettings, RadioPlanItem, TasteProfile, Track } from "@musicgpt/shared";
 
 const DJ_BANNED_WORDS = ["违法", "低俗", "辱骂"];
 const DJ_MAX_LENGTH = 90;
@@ -9,6 +9,7 @@ interface GenerateInput {
   profile: TasteProfile;
   nowTrack: Track;
   upcoming: RadioPlanItem[];
+  settings?: DjSettings;
 }
 
 export class DjBrain {
@@ -43,6 +44,7 @@ export class DjBrain {
     }
     const prompt = [
       "你是私人AI电台DJ，回复简短中文播报。",
+      `DJ语气: ${toneInstruction(input.settings?.tone)}`,
       `用户偏好摘要: ${input.profile.summary}`,
       `当前歌曲: ${input.nowTrack.title} - ${input.nowTrack.artists.join(", ")}`,
       `下一首候选: ${input.upcoming
@@ -64,8 +66,21 @@ export class DjBrain {
   private fallbackScript(input: GenerateInput): string {
     const artist = input.nowTrack.artists[0] ?? "这位歌手";
     const next = input.upcoming[0]?.track.title ?? "下一首";
+    if (input.settings?.tone === "lively") {
+      return `轻快一点：现在是 ${artist} 的《${input.nowTrack.title}》，等会接《${next}》，节奏会更亮一些。`;
+    }
     return `现在是 ${artist} 的《${input.nowTrack.title}》，等会接《${next}》，整体会更贴合你这个时段的听感。`;
   }
+}
+
+function toneInstruction(tone: DjSettings["tone"] | undefined): string {
+  if (tone === "lively") {
+    return "活泼、轻快、有精神，但不要油腻或喊口号";
+  }
+  if (tone === "professional") {
+    return "克制、清楚、像专业电台主持";
+  }
+  return "自然、温和、低打扰";
 }
 
 export function sanitizeDjText(text: string): string {

@@ -39,4 +39,16 @@ describe("DjBrain", () => {
     expect(script.text.length).toBeGreaterThan(0);
     expect(script.trackIds[0]).toBe(1);
   });
+
+  it("includes lively tone cues in fallback script when requested", async () => {
+    const brain = new DjBrain();
+    const script = await brain.generate({
+      profile,
+      nowTrack: { id: 1, title: "Song", artists: ["Artist"] },
+      upcoming: [],
+      settings: { tone: "lively", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" }
+    });
+
+    expect(script.text).toContain("轻快");
+  });
 });
