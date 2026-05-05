@@ -121,6 +121,7 @@ export class RadioOrchestrator {
       runningRoot: process.cwd(),
       ncmReachable: await this.ncm.isReachable(),
       aiDjConfigured: aiDjStatus.configured,
+      aiDjProvider: aiDjStatus.provider,
       trackStatsCount: this.repo.getTrackStatsCount(),
       queueLength: this.state.queue.length
     };
@@ -262,9 +263,12 @@ export class RadioOrchestrator {
         return this.suggestByDescription(intent, context);
       case "chat":
       default: {
-        const reply = await this.aiDjAssistant
-          .chat(message, context)
-          .catch(() => fallbackChatReply(message, context));
+        const aiStatus = this.aiDjAssistant.status();
+        const reply = aiStatus.configured
+          ? await this.aiDjAssistant
+              .chat(message, context)
+              .catch((error) => aiFallbackNotice(aiStatus.provider, error, fallbackChatReply(message, context)))
+          : aiNotConfiguredNotice(fallbackChatReply(message, context));
         return this.reply("noop", reply, this.state);
       }
     }
@@ -570,4 +574,18 @@ function scoreTrackForDescription(entry: { track: Track; playCount: number }, de
   }
 
   return score;
+}
+
+function aiNotConfiguredNotice(fallback: string): string {
+  return `DeepSeek 还没有接入：未检测到 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。现在先用本地 DJ 模式回复。\n${fallback}`;
+}
+
+function aiFallbackNotice(provider: string, error: unknown, fallback: string): string {
+  const label = provider === "deepseek" ? "DeepSeek" : "AI";
+  return `${label} 调用失败，已临时切到本地 DJ 模式：${summarizeAiError(error)}\n${fallback}`;
+}
+
+function summarizeAiError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, " ").slice(0, 160);
 }

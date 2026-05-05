@@ -30,7 +30,10 @@ const optionalUrl = () => z.preprocess((value) => (value === "" ? undefined : va
 const schema = z.object({
   OPENAI_API_KEY: optionalString(),
   OPENAI_BASE_URL: optionalUrl(),
-  OPENAI_MODEL: z.string().default("gpt-4.1-mini"),
+  OPENAI_MODEL: optionalString(),
+  DEEPSEEK_API_KEY: optionalString(),
+  DEEPSEEK_BASE_URL: optionalUrl(),
+  DEEPSEEK_MODEL: optionalString(),
   AI_DJ_MEMORY_TURNS: z.coerce.number().int().min(1).max(30).default(8),
   NCM_COOKIE: optionalString(),
   NCM_BASE_URL: z.string().url().default("http://127.0.0.1:3001"),
@@ -42,6 +45,42 @@ const schema = z.object({
 
 const parsed = schema.parse(process.env);
 
+export type AiProvider = "openai" | "deepseek" | "local";
+
+function resolveAiProvider(values: z.infer<typeof schema>): {
+  provider: AiProvider;
+  apiKey: string | undefined;
+  baseUrl: string | undefined;
+  model: string;
+} {
+  if (values.OPENAI_API_KEY) {
+    return {
+      provider: "openai",
+      apiKey: values.OPENAI_API_KEY,
+      baseUrl: values.OPENAI_BASE_URL,
+      model: values.OPENAI_MODEL ?? "gpt-4.1-mini"
+    };
+  }
+
+  if (values.DEEPSEEK_API_KEY) {
+    return {
+      provider: "deepseek",
+      apiKey: values.DEEPSEEK_API_KEY,
+      baseUrl: values.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
+      model: values.DEEPSEEK_MODEL ?? "deepseek-v4-flash"
+    };
+  }
+
+  return {
+    provider: "local",
+    apiKey: undefined,
+    baseUrl: undefined,
+    model: values.OPENAI_MODEL ?? values.DEEPSEEK_MODEL ?? "gpt-4.1-mini"
+  };
+}
+
+const aiProvider = resolveAiProvider(parsed);
+
 const resolvedDbPath = path.isAbsolute(parsed.DB_PATH)
   ? parsed.DB_PATH
   : path.resolve(process.cwd(), parsed.DB_PATH);
@@ -49,9 +88,10 @@ const resolvedDbPath = path.isAbsolute(parsed.DB_PATH)
 const resolvedTtsDir = path.resolve(path.dirname(resolvedDbPath), "../tts-cache");
 
 export const config = {
-  openAiApiKey: parsed.OPENAI_API_KEY,
-  openAiBaseUrl: parsed.OPENAI_BASE_URL,
-  openAiModel: parsed.OPENAI_MODEL,
+  aiProvider: aiProvider.provider,
+  openAiApiKey: aiProvider.apiKey,
+  openAiBaseUrl: aiProvider.baseUrl,
+  openAiModel: aiProvider.model,
   aiDjMemoryTurns: parsed.AI_DJ_MEMORY_TURNS,
   ncmCookie: parsed.NCM_COOKIE,
   ncmBaseUrl: parsed.NCM_BASE_URL,

@@ -17,6 +17,7 @@ describe("AI DJ assistant fallback comments", () => {
 
     expect(assistant.status()).toEqual({
       configured: false,
+      provider: "openai",
       model: "gpt-4.1-mini",
       baseUrlConfigured: false
     });

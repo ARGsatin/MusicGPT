@@ -85,7 +85,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       new OpenAiDjAssistant({
         apiKey: config.openAiApiKey,
         baseUrl: config.openAiBaseUrl,
-        model: config.openAiModel
+        model: config.openAiModel,
+        provider: config.aiProvider
       }),
     options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,

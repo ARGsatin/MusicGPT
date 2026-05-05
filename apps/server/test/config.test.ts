@@ -44,4 +44,29 @@ describe("config", () => {
     expect(config.openAiBaseUrl).toBe("https://api.deepseek.com");
     expect(config.openAiModel).toBe("deepseek-v4-flash");
   });
+
+  it("uses DeepSeek environment variables as the OpenAI-compatible AI provider", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.DEEPSEEK_API_KEY = "deepseek-project-key";
+    process.env.DEEPSEEK_MODEL = "deepseek-v4-flash";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.aiProvider).toBe("deepseek");
+    expect(config.openAiApiKey).toBe("deepseek-project-key");
+    expect(config.openAiBaseUrl).toBe("https://api.deepseek.com");
+    expect(config.openAiModel).toBe("deepseek-v4-flash");
+  });
+
+  it("does not send the OpenAI default model name to DeepSeek", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.DEEPSEEK_API_KEY = "deepseek-project-key";
+    process.env.OPENAI_MODEL = "gpt-4.1-mini";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.aiProvider).toBe("deepseek");
+    expect(config.openAiBaseUrl).toBe("https://api.deepseek.com");
+    expect(config.openAiModel).toBe("deepseek-v4-flash");
+  });
 });

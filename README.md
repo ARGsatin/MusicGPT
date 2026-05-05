@@ -34,7 +34,10 @@ cp .env.example .env
 至少需要填：
 
 - `NCM_COOKIE`：你的网易云 Cookie（本地使用）
-- `OPENAI_API_KEY`：可选，不填也能用模板 DJ 文案
+- `DEEPSEEK_API_KEY`：推荐，用于 GPT DJ 对话和意图理解；默认会使用 `https://api.deepseek.com` 和 `deepseek-v4-flash`
+- `OPENAI_API_KEY`：可选，也可以使用 OpenAI 兼容配置；如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，优先使用 `OPENAI_API_KEY`
+
+如果前端状态条显示 `AI FALLBACK`，说明服务端没有读到 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY`。如果聊天回复里出现 “DeepSeek 调用失败”，说明 key 已读到，但 DeepSeek 请求失败，需要检查 key、余额、网络或模型名。
 
 3. 启动
 

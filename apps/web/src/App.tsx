@@ -563,7 +563,11 @@ export default function App() {
       <aside className="signal-strip" aria-label="Station details">
         <span>Library {systemStatus?.trackStatsCount ?? 0}</span>
         <span>Window {systemStatus?.queueLength ?? 0}</span>
-        <span>{systemStatus?.aiDjConfigured ? `AI ${systemStatus.aiDjModel ?? "ONLINE"}` : "AI FALLBACK"}</span>
+        <span>
+          {systemStatus?.aiDjConfigured
+            ? `AI ${systemStatus.aiDjProvider.toUpperCase()} ${systemStatus.aiDjModel ?? "ONLINE"}`
+            : "AI FALLBACK"}
+        </span>
         <span>Taste {favoritePeriod}</span>
         <span>Import {formatTime(systemStatus?.lastImportAt)}</span>
         {systemStatus?.aiDjLastError ? <span className="error-text">AI {systemStatus.aiDjLastError}</span> : null}

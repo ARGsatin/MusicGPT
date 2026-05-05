@@ -25,7 +25,7 @@ export interface AiDjContext {
 }
 
 export interface AiDjAssistant {
-  status(): { configured: boolean; model?: string; baseUrlConfigured?: boolean; lastError?: string };
+  status(): { configured: boolean; provider: string; model?: string; baseUrlConfigured?: boolean; lastError?: string };
   classify(message: string, context: AiDjContext): Promise<AiDjIntent>;
   selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection>;
   commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string>;
@@ -37,16 +37,19 @@ interface OpenAiDjAssistantOptions {
   apiKey?: string | undefined;
   baseUrl?: string | undefined;
   model: string;
+  provider?: string | undefined;
 }
 
 export class OpenAiDjAssistant implements AiDjAssistant {
   private readonly client?: OpenAI;
   private readonly model: string;
+  private readonly provider: string;
   private readonly baseUrlConfigured: boolean;
   private lastError: string | undefined;
 
   constructor(options: OpenAiDjAssistantOptions) {
     this.model = options.model;
+    this.provider = options.provider ?? "openai";
     this.baseUrlConfigured = Boolean(options.baseUrl);
     if (options.apiKey) {
       this.client = new OpenAI({
@@ -56,9 +59,10 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     }
   }
 
-  status(): { configured: boolean; model?: string; baseUrlConfigured?: boolean; lastError?: string } {
+  status(): { configured: boolean; provider: string; model?: string; baseUrlConfigured?: boolean; lastError?: string } {
     const status = {
       configured: Boolean(this.client),
+      provider: this.provider,
       model: this.model,
       baseUrlConfigured: this.baseUrlConfigured
     };

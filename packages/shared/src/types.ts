@@ -154,6 +154,7 @@ export interface SystemStatus {
   runningRoot: string;
   ncmReachable: boolean;
   aiDjConfigured: boolean;
+  aiDjProvider: string;
   aiDjModel?: string;
   aiDjBaseUrlConfigured?: boolean;
   aiDjLastError?: string;

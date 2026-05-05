@@ -183,8 +183,8 @@ class FakeAssistant implements AiDjAssistant {
     }
   ) {}
 
-  status(): { configured: boolean; model?: string; baseUrlConfigured?: boolean; lastError?: string } {
-    return { configured: true, model: "fake-dj", baseUrlConfigured: false };
+  status(): { configured: boolean; provider: string; model?: string; baseUrlConfigured?: boolean; lastError?: string } {
+    return { configured: true, provider: "fake", model: "fake-dj", baseUrlConfigured: false };
   }
 
   async classify(_message: string, context: AiDjContext): Promise<AiDjIntent> {
@@ -266,7 +266,7 @@ async function createFixture(options: { assistant: AiDjAssistant; searchTracks?:
   });
   servers.push(app);
   const base = await app.listen({ port: 0, host: "127.0.0.1" });
-  return { app, base, repo, assistant: options.assistant as FakeAssistant, ncmSearches };
+  return { app, base, repo, assistant: options.assistant as unknown as FakeAssistant, ncmSearches };
 }
 
 async function postChat(base: string, message: string) {

@@ -1,4 +1,4 @@
-const CACHE_NAME = "musicgpt-shell-v2";
+const CACHE_NAME = "musicgpt-shell-v3";
 const SHELL_FILES = ["/", "/manifest.webmanifest", "/icon-192.svg", "/icon-512.svg"];
 
 self.addEventListener("install", (event) => {
