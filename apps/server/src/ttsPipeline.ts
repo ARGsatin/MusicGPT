@@ -11,10 +11,20 @@ type SaveFn = (text: string, filePath: string, options?: { voice?: string }) => 
 export class TtsPipeline {
   constructor(
     private readonly cacheDir: string,
-    private readonly voice: string,
+    private voice: string,
     private readonly saveFn: SaveFn = ttsSave
   ) {
     fs.mkdirSync(cacheDir, { recursive: true });
+  }
+
+  setVoice(voice: string): void {
+    if (voice.trim()) {
+      this.voice = voice.trim();
+    }
+  }
+
+  getVoice(): string {
+    return this.voice;
   }
 
   async synthesize(script: DjScript): Promise<DjScript> {

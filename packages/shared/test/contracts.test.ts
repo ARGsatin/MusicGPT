@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  API_ROUTES,
   encodeWsPayload,
   isChatRequest,
+  isDjSettingsRequest,
+  isEnvironmentLocationRequest,
   isFeedbackRequest,
   isNextRequest,
   isPlayTrackRequest
@@ -38,5 +41,29 @@ describe("contracts", () => {
     expect(encodeWsPayload({ event: "queue_updated", data: { n: 1 } })).toBe(
       "{\"event\":\"queue_updated\",\"data\":{\"n\":1}}"
     );
+  });
+
+  it("exposes V1.5 route contracts", () => {
+    expect(API_ROUTES.environment).toBe("/api/environment");
+    expect(API_ROUTES.environmentLocation).toBe("/api/environment/location");
+    expect(API_ROUTES.importRecommendations).toBe("/api/recommendations/import");
+    expect(API_ROUTES.djSettings).toBe("/api/dj/settings");
+  });
+
+  it("validates environment location payload", () => {
+    expect(isEnvironmentLocationRequest({ latitude: 31.23, longitude: 121.47 })).toBe(true);
+    expect(isEnvironmentLocationRequest({ latitude: 120, longitude: 121.47 })).toBe(false);
+    expect(isEnvironmentLocationRequest({ latitude: 31.23, longitude: "121.47" })).toBe(false);
+  });
+
+  it("validates DJ settings payload", () => {
+    expect(
+      isDjSettingsRequest({
+        tone: "lively",
+        voiceGender: "female",
+        voice: "zh-CN-XiaoxiaoNeural"
+      })
+    ).toBe(true);
+    expect(isDjSettingsRequest({ tone: "sleepy", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" })).toBe(false);
   });
 });

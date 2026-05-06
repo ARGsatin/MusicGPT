@@ -5,7 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 
 import type {
   ChatMessage,
+  DjSettings,
   DjScript,
+  EnvironmentContext,
   NowPlayingState,
   PlayEvent,
   TasteProfile,
@@ -235,21 +237,27 @@ export class StateRepository {
   }
 
   saveNowPlaying(state: NowPlayingState): void {
-    this.db
-      .prepare(
-        "INSERT INTO app_state(key, value_json) VALUES('now_playing', ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json"
-      )
-      .run(JSON.stringify(state));
+    this.saveAppState("now_playing", state);
   }
 
   getNowPlaying(): NowPlayingState | undefined {
-    const row = this.db
-      .prepare("SELECT value_json FROM app_state WHERE key = 'now_playing'")
-      .get() as { value_json: string } | undefined;
-    if (!row) {
-      return undefined;
-    }
-    return parseJson<NowPlayingState | undefined>(row.value_json, undefined);
+    return this.getAppState<NowPlayingState>("now_playing");
+  }
+
+  saveEnvironmentContext(context: EnvironmentContext): void {
+    this.saveAppState("environment", context);
+  }
+
+  getEnvironmentContext(): EnvironmentContext | undefined {
+    return this.getAppState<EnvironmentContext>("environment");
+  }
+
+  saveDjSettings(settings: DjSettings): void {
+    this.saveAppState("dj_settings", settings);
+  }
+
+  getDjSettings(): DjSettings | undefined {
+    return this.getAppState<DjSettings>("dj_settings");
   }
 
   saveDjScript(script: DjScript): void {
@@ -297,5 +305,23 @@ export class StateRepository {
         }
         return message;
       });
+  }
+
+  private saveAppState<T>(key: string, value: T): void {
+    this.db
+      .prepare(
+        "INSERT INTO app_state(key, value_json) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json"
+      )
+      .run(key, JSON.stringify(value));
+  }
+
+  private getAppState<T>(key: string): T | undefined {
+    const row = this.db
+      .prepare("SELECT value_json FROM app_state WHERE key = ?")
+      .get(key) as { value_json: string } | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return parseJson<T | undefined>(row.value_json, undefined);
   }
 }

@@ -1,5 +1,7 @@
 import type {
   ChatRequest,
+  DjSettings,
+  EnvironmentLocationRequest,
   FeedbackRequest,
   NextRequest,
   PlayTrackRequest,
@@ -16,6 +18,10 @@ export const API_ROUTES = {
   feedback: "/api/feedback",
   systemStatus: "/api/system/status",
   importNcm: "/api/import/ncm",
+  environment: "/api/environment",
+  environmentLocation: "/api/environment/location",
+  importRecommendations: "/api/recommendations/import",
+  djSettings: "/api/dj/settings",
   ws: "/ws/stream"
 } as const;
 
@@ -59,6 +65,37 @@ export function isPlayTrackRequest(value: unknown): value is PlayTrackRequest {
     Array.isArray(maybe.track.artists) &&
     maybe.track.artists.every((artist) => typeof artist === "string") &&
     (maybe.reason === undefined || typeof maybe.reason === "string")
+  );
+}
+
+export function isEnvironmentLocationRequest(value: unknown): value is EnvironmentLocationRequest {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const maybe = value as EnvironmentLocationRequest;
+  return (
+    typeof maybe.latitude === "number" &&
+    Number.isFinite(maybe.latitude) &&
+    maybe.latitude >= -90 &&
+    maybe.latitude <= 90 &&
+    typeof maybe.longitude === "number" &&
+    Number.isFinite(maybe.longitude) &&
+    maybe.longitude >= -180 &&
+    maybe.longitude <= 180 &&
+    (maybe.label === undefined || typeof maybe.label === "string")
+  );
+}
+
+export function isDjSettingsRequest(value: unknown): value is DjSettings {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const maybe = value as DjSettings;
+  return (
+    ["lively", "calm", "professional"].includes(maybe.tone) &&
+    ["female", "male"].includes(maybe.voiceGender) &&
+    typeof maybe.voice === "string" &&
+    maybe.voice.trim().length > 0
   );
 }
 

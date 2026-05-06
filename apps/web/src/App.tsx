@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
-import type { ChatMessage, NowPlayingState, SystemStatus, TasteProfile, WsPayload } from "@musicgpt/shared";
+import type {
+  ChatMessage,
+  DjSettings,
+  EnvironmentContext,
+  NowPlayingState,
+  SystemStatus,
+  TasteProfile,
+  WsPayload
+} from "@musicgpt/shared";
 import {
+  fetchDjSettings,
+  fetchEnvironment,
   fetchChatHistory,
   fetchNowPlaying,
   fetchSystemStatus,
   fetchTaste,
+  importRecommendations,
   importFromNcm,
   playSuggestedTrack,
   requestNext,
   sendChat,
-  sendFeedback
+  sendFeedback,
+  updateDjSettings,
+  updateEnvironmentLocation
 } from "./api";
 import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
 import { useWsStream } from "./useWsStream";
@@ -46,6 +59,29 @@ function formatTime(value: string | undefined): string {
   return new Date(value).toLocaleString();
 }
 
+function formatWeather(environment: EnvironmentContext | null): string {
+  if (!environment) {
+    return "WEATHER --";
+  }
+  const labels: Record<EnvironmentContext["weather"], string> = {
+    clear: "CLEAR",
+    cloudy: "CLOUDY",
+    rain: "RAIN",
+    snow: "SNOW",
+    fog: "FOG",
+    storm: "STORM",
+    unknown: "WEATHER --"
+  };
+  const temp = typeof environment.temperature === "number" ? ` ${environment.temperature}C` : "";
+  return `${labels[environment.weather]}${temp}`;
+}
+
+const DEFAULT_DJ_SETTINGS: DjSettings = {
+  tone: "lively",
+  voiceGender: "female",
+  voice: "zh-CN-XiaoxiaoNeural"
+};
+
 function formatDuration(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "0:00";
@@ -58,6 +94,8 @@ function formatDuration(value: number): string {
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
   const [taste, setTaste] = useState<TasteProfile | null>(null);
+  const [environment, setEnvironment] = useState<EnvironmentContext | null>(null);
+  const [djSettings, setDjSettings] = useState<DjSettings>(DEFAULT_DJ_SETTINGS);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -66,6 +104,9 @@ export default function App() {
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [recommendationLoading, setRecommendationLoading] = useState(false);
+  const [v15Error, setV15Error] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [clock, setClock] = useState(() => new Date());
   const [playbackPaused, setPlaybackPaused] = useState(true);
@@ -80,16 +121,20 @@ export default function App() {
   const advanceInFlightRef = useRef(false);
 
   const refresh = useCallback(async () => {
-    const [nowState, tasteProfile, status, chatHistory] = await Promise.all([
+    const [nowState, tasteProfile, status, chatHistory, environmentContext, settings] = await Promise.all([
       fetchNowPlaying(),
       fetchTaste(),
       fetchSystemStatus(),
-      fetchChatHistory().catch(() => [])
+      fetchChatHistory().catch(() => []),
+      fetchEnvironment().catch(() => null),
+      fetchDjSettings().catch(() => DEFAULT_DJ_SETTINGS)
     ]);
     setNow(nowState);
     setTaste(tasteProfile);
     setSystemStatus(status);
     setMessages(chatHistory);
+    setEnvironment(environmentContext);
+    setDjSettings(settings);
   }, []);
 
   const refreshTaste = useCallback(async () => {
@@ -122,7 +167,14 @@ export default function App() {
       const script = payload.data as NowPlayingState["djScript"];
       setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
     } else if (payload.event === "system_status") {
-      setSystemStatus(payload.data as SystemStatus);
+      const status = payload.data as SystemStatus;
+      setSystemStatus(status);
+      if (status.environment) {
+        setEnvironment(status.environment);
+      }
+      if (status.djSettings) {
+        setDjSettings(status.djSettings);
+      }
     }
   }, []);
 
@@ -270,6 +322,59 @@ export default function App() {
     }
   };
 
+  const onSyncWeather = async () => {
+    setWeatherLoading(true);
+    setV15Error(null);
+    try {
+      if (!navigator.geolocation) {
+        throw new Error("当前浏览器不支持定位。");
+      }
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          maximumAge: 10 * 60 * 1000,
+          timeout: 8000
+        });
+      });
+      const context = await updateEnvironmentLocation({
+        latitude: Number(position.coords.latitude.toFixed(4)),
+        longitude: Number(position.coords.longitude.toFixed(4))
+      });
+      setEnvironment(context);
+      await refresh();
+    } catch (error) {
+      setV15Error(error instanceof Error ? error.message : "天气定位失败，已保留时间推荐。");
+    } finally {
+      setWeatherLoading(false);
+    }
+  };
+
+  const onImportRecommendations = async () => {
+    setRecommendationLoading(true);
+    setV15Error(null);
+    try {
+      const result = await importRecommendations();
+      setEnvironment(result.environment);
+      setSystemStatus(result.systemStatus);
+      await refresh();
+    } catch (error) {
+      setV15Error(error instanceof Error ? error.message : "推荐扩充失败，请稍后再试。");
+    } finally {
+      setRecommendationLoading(false);
+    }
+  };
+
+  const onChangeDjTone = async (tone: DjSettings["tone"]) => {
+    const nextSettings = { ...djSettings, tone };
+    setDjSettings(nextSettings);
+    setV15Error(null);
+    try {
+      setDjSettings(await updateDjSettings(nextSettings));
+    } catch (error) {
+      setV15Error(error instanceof Error ? error.message : "DJ 设置保存失败。");
+    }
+  };
+
   const favoritePeriod = useMemo(
     () => taste?.favoritePeriods[0]?.period ?? "night",
     [taste?.favoritePeriods]
@@ -341,8 +446,13 @@ export default function App() {
   }, [visibleMessages.length, chatLoading]);
 
   return (
-    <main className="radio-shell">
+    <main className={`radio-shell weather-${environment?.weather ?? "unknown"}`}>
       <div className="breathing-light" aria-hidden="true" />
+      <div className="weather-particles" aria-hidden="true">
+        {Array.from({ length: 24 }, (_, index) => (
+          <span key={index} />
+        ))}
+      </div>
       <header className="topbar" aria-label="Neonwave FM station header">
         <div className="brand">
           <div className="avatar brand-avatar" aria-hidden="true">
@@ -362,6 +472,17 @@ export default function App() {
           </button>
           <button className="pill muted" type="button" onClick={() => void onImportNcm()} disabled={importing}>
             {importing ? "Importing" : "Sync"}
+          </button>
+          <button className="pill muted" type="button" onClick={() => void onSyncWeather()} disabled={weatherLoading}>
+            {weatherLoading ? "Weather..." : "Weather"}
+          </button>
+          <button
+            className="pill muted"
+            type="button"
+            onClick={() => void onImportRecommendations()}
+            disabled={recommendationLoading}
+          >
+            {recommendationLoading ? "Tuning..." : "Expand"}
           </button>
         </nav>
       </header>
@@ -491,7 +612,18 @@ export default function App() {
               <p className="micro-label">GPT DJ window</p>
               <h2>Conversation</h2>
             </div>
-            <span className="context-chip">Context 8 turns</span>
+            <div className="dj-settings-bar">
+              <select
+                value={djSettings.tone}
+                onChange={(event) => void onChangeDjTone(event.currentTarget.value as DjSettings["tone"])}
+                aria-label="DJ tone"
+              >
+                <option value="lively">活泼</option>
+                <option value="calm">温和</option>
+                <option value="professional">专业</option>
+              </select>
+              <span className="context-chip">女声</span>
+            </div>
           </header>
           <div className="message-thread" ref={messageThreadRef}>
             {visibleMessages.map((message, index) => (
@@ -569,10 +701,13 @@ export default function App() {
             : "AI FALLBACK"}
         </span>
         <span>Taste {favoritePeriod}</span>
+        <span>{formatWeather(environment)}</span>
+        <span>DJ {djSettings.tone.toUpperCase()} / {djSettings.voiceGender.toUpperCase()}</span>
         <span>Import {formatTime(systemStatus?.lastImportAt)}</span>
         {systemStatus?.aiDjLastError ? <span className="error-text">AI {systemStatus.aiDjLastError}</span> : null}
         {systemStatus?.lastImportError ? <span className="error-text">{systemStatus.lastImportError}</span> : null}
         {importError ? <span className="error-text">{importError}</span> : null}
+        {v15Error ? <span className="error-text">{v15Error}</span> : null}
       </aside>
 
       <section className={queueOpen ? "queue-drawer is-open" : "queue-drawer"} aria-label="Queue drawer">

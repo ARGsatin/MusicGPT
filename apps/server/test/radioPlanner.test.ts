@@ -62,4 +62,21 @@ describe("RadioPlanner", () => {
 
     expect(firstId).not.toBe(1);
   });
+
+  it("boosts rainy-night friendly moods from environment context", () => {
+    const planner = new RadioPlanner(() => 0.5);
+    const plan = planner.plan(stats, profile, [], {
+      environment: {
+        dayPeriod: "late_night",
+        weather: "rain",
+        temperature: 18,
+        location: { latitude: 31.23, longitude: 121.47, label: "Shanghai" },
+        updatedAt: new Date().toISOString()
+      }
+    });
+
+    expect(plan[0]?.track.id).toBe(2);
+    expect(plan[0]?.reason).toContain("雨天");
+    expect(plan[0]?.reason).toContain("深夜");
+  });
 });

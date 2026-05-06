@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { EnvironmentService } from "../src/environmentService.js";
 import { DjBrain } from "../src/djBrain.js";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
@@ -22,6 +23,72 @@ afterEach(async () => {
 });
 
 describe("core feature integration", () => {
+  it("exposes V1.5 environment, recommendation import, and DJ settings endpoints", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-v15-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
+      fs.writeFileSync(filePath, "audio");
+    });
+    const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
+    const environmentService: Pick<EnvironmentService, "getContext" | "updateLocation"> = {
+      getContext: () => ({
+        dayPeriod: "late_night",
+        weather: "rain",
+        temperature: 17,
+        location: { latitude: 31.23, longitude: 121.47 },
+        updatedAt: new Date().toISOString()
+      }),
+      updateLocation: async (location) => ({
+        dayPeriod: "late_night",
+        weather: "rain",
+        temperature: 17,
+        location,
+        updatedAt: new Date().toISOString()
+      })
+    };
+    const app = await createServer({
+      repo,
+      ncm,
+      djBrain: new DjBrain(),
+      ttsPipeline: tts,
+      environmentService,
+      djBroadcastInterval: 4,
+      importRetryIntervalMs: 50
+    });
+    servers.push(app);
+
+    const base = await app.listen({ port: 0, host: "127.0.0.1" });
+
+    const locationRes = await fetch(`${base}/api/environment/location`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ latitude: 31.23, longitude: 121.47 })
+    });
+    expect(locationRes.ok).toBe(true);
+    const environment = (await locationRes.json()) as { weather: string; location: { latitude: number } };
+    expect(environment.weather).toBe("rain");
+    expect(environment.location.latitude).toBe(31.23);
+
+    const importRes = await fetch(`${base}/api/recommendations/import`, { method: "POST" });
+    expect(importRes.ok).toBe(true);
+    const importPayload = (await importRes.json()) as { importedCount: number; skippedCount: number };
+    expect(importPayload.importedCount).toBeGreaterThan(0);
+    expect(importPayload.skippedCount).toBeGreaterThanOrEqual(0);
+
+    const settingsRes = await fetch(`${base}/api/dj/settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tone: "lively", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" })
+    });
+    expect(settingsRes.ok).toBe(true);
+    const settings = (await settingsRes.json()) as { tone: string; voiceGender: string; voice: string };
+    expect(settings).toEqual({
+      tone: "lively",
+      voiceGender: "female",
+      voice: "zh-CN-XiaoxiaoNeural"
+    });
+  });
+
   it("records completion via feedback and triggers DJ by completed tracks", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-core-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
@@ -187,7 +254,19 @@ function createMockNcmFetch(): typeof fetch {
       });
     }
     if (url.includes("/cloudsearch")) {
-      return json({ result: { songs: [] } });
+      return json({
+        result: {
+          songs: [
+            {
+              id: 8801,
+              name: "Rain Window",
+              artists: [{ name: "Cloud DJ" }],
+              album: { name: "Weather Signals" },
+              duration: 205000
+            }
+          ]
+        }
+      });
     }
     return json({});
   };

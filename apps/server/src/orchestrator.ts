@@ -2,8 +2,12 @@ import { createExtensionProviders } from "./providers.js";
 
 import type {
   ChatResponse,
+  DjSettings,
+  EnvironmentContext,
+  EnvironmentLocationRequest,
   FeedbackRequest,
   ImportNcmResponse,
+  RecommendationImportResponse,
   NowPlayingState,
   PlayEvent,
   RadioPlanItem,
@@ -16,8 +20,10 @@ import type {
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
 import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
+import { EnvironmentService } from "./environmentService.js";
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
+import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
 import { TasteEngine } from "./tasteEngine.js";
 import { TtsPipeline } from "./ttsPipeline.js";
@@ -28,6 +34,13 @@ const QUEUE_TARGET_SIZE = 10;
 const QUEUE_REFILL_THRESHOLD = 6;
 const IMPORT_RETRY_INTERVAL_MS = 60_000;
 const EMPTY_IMPORT_ERROR = "未导入到有效曲目，请检查 NCM API 与登录 Cookie。";
+export const DEFAULT_DJ_SETTINGS: DjSettings = {
+  tone: "lively",
+  voiceGender: "female",
+  voice: "zh-CN-XiaoxiaoNeural"
+};
+
+type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation">;
 
 export class RadioOrchestrator {
   private state: NowPlayingState = { queue: [], paused: false };
@@ -49,11 +62,14 @@ export class RadioOrchestrator {
     private readonly wsHub: WsHub,
     private readonly djBroadcastInterval: number,
     private readonly memoryTurns: number,
-    private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS
+    private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS,
+    private readonly environmentService: EnvironmentRuntime = new EnvironmentService(),
+    private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm)
   ) {}
 
   async initialize(): Promise<void> {
     this.state = this.repo.getNowPlaying() ?? { queue: [], paused: false };
+    this.ensureDjSettings();
     if (this.repo.getTrackStatsCount() === 0) {
       await this.runNcmImport();
     }
@@ -111,6 +127,34 @@ export class RadioOrchestrator {
     return this.repo.getTasteProfile();
   }
 
+  getEnvironment(): EnvironmentContext {
+    return this.repo.getEnvironmentContext() ?? this.environmentService.getContext();
+  }
+
+  async updateEnvironmentLocation(location: EnvironmentLocationRequest): Promise<EnvironmentContext> {
+    const context = await this.environmentService.updateLocation(location);
+    this.repo.saveEnvironmentContext(context);
+    await this.ensureQueue();
+    await this.broadcastSystemStatus();
+    return context;
+  }
+
+  getDjSettings(): DjSettings {
+    return this.repo.getDjSettings() ?? DEFAULT_DJ_SETTINGS;
+  }
+
+  async updateDjSettings(settings: DjSettings): Promise<DjSettings> {
+    const normalized: DjSettings = {
+      tone: settings.tone,
+      voiceGender: settings.voiceGender,
+      voice: settings.voice.trim() || DEFAULT_DJ_SETTINGS.voice
+    };
+    this.repo.saveDjSettings(normalized);
+    this.ttsPipeline.setVoice(normalized.voice);
+    await this.broadcastSystemStatus();
+    return normalized;
+  }
+
   getChatHistory(): { messages: ChatResponse["messages"] } {
     return { messages: this.repo.getRecentMessages(this.chatHistoryLimit()) };
   }
@@ -140,6 +184,8 @@ export class RadioOrchestrator {
     if (this.lastImportError) {
       status.lastImportError = this.lastImportError;
     }
+    status.environment = this.getEnvironment();
+    status.djSettings = this.getDjSettings();
     return status;
   }
 
@@ -158,8 +204,8 @@ export class RadioOrchestrator {
     }
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const planOptions = this.desiredMood
-      ? { windowSize: PLAN_WINDOW_SIZE, desiredMood: this.desiredMood }
-      : { windowSize: PLAN_WINDOW_SIZE };
+      ? { windowSize: PLAN_WINDOW_SIZE, desiredMood: this.desiredMood, environment: this.getEnvironment() }
+      : { windowSize: PLAN_WINDOW_SIZE, environment: this.getEnvironment() };
     const planned = this.planner.plan(
       this.repo.getTrackStats(),
       profile,
@@ -274,6 +320,23 @@ export class RadioOrchestrator {
     }
   }
 
+  async importRecommendations(): Promise<RecommendationImportResponse> {
+    const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
+    const environment = this.getEnvironment();
+    const result = await this.recommendationImporter.importRecommendations(profile, environment);
+    if (result.importedCount > 0) {
+      await this.refreshTasteProfile();
+      this.state.queue = [];
+      await this.ensureQueue();
+    }
+    await this.broadcastSystemStatus();
+    return {
+      ...result,
+      environment,
+      systemStatus: await this.getSystemStatus()
+    };
+  }
+
   private async classifySafely(message: string, context: AiDjContext): Promise<AiDjIntent> {
     try {
       return await this.aiDjAssistant.classify(message, context);
@@ -384,7 +447,8 @@ export class RadioOrchestrator {
     const script = await this.djBrain.generate({
       profile,
       nowTrack: this.state.track,
-      upcoming: this.state.queue.slice(0, 3)
+      upcoming: this.state.queue.slice(0, 3),
+      settings: this.getDjSettings()
     });
     const voiced = await this.ttsPipeline.synthesize(script);
     this.state.djScript = voiced;
@@ -465,6 +529,13 @@ export class RadioOrchestrator {
 
   private async broadcastSystemStatus(): Promise<void> {
     this.wsHub.broadcast({ event: "system_status", data: await this.getSystemStatus() });
+  }
+
+  private ensureDjSettings(): DjSettings {
+    const settings = this.repo.getDjSettings() ?? DEFAULT_DJ_SETTINGS;
+    this.repo.saveDjSettings(settings);
+    this.ttsPipeline.setVoice(settings.voice);
+    return settings;
   }
 
   private async hydrateTrack(item: RadioPlanItem): Promise<{ item: RadioPlanItem; lyrics: TrackLyrics }> {

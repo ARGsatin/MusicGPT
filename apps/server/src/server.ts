@@ -11,9 +11,12 @@ import type { Track } from "@musicgpt/shared";
 import type { AiDjAssistant } from "./aiDjAssistant.js";
 import { OpenAiDjAssistant } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
+import type { EnvironmentService } from "./environmentService.js";
+import { EnvironmentService as OpenMeteoEnvironmentService } from "./environmentService.js";
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
 import { RadioPlanner } from "./radioPlanner.js";
+import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
 import { TasteEngine } from "./tasteEngine.js";
 import { TtsPipeline } from "./ttsPipeline.js";
@@ -50,6 +53,20 @@ const feedbackSchema = z.object({
   trackId: z.number().int()
 });
 
+const environmentLocationSchema = z.object({
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  label: z.string().optional()
+});
+
+const djSettingsSchema = z.object({
+  tone: z.enum(["lively", "calm", "professional"]),
+  voiceGender: z.enum(["female", "male"]),
+  voice: z.string().min(1)
+});
+
+type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation">;
+
 interface CreateServerOptions {
   repo?: StateRepository;
   ncm?: NcmConnector;
@@ -59,6 +76,8 @@ interface CreateServerOptions {
   djBrain?: DjBrain;
   aiDjAssistant?: AiDjAssistant;
   ttsPipeline?: TtsPipeline;
+  environmentService?: EnvironmentRuntime;
+  recommendationImporter?: RecommendationImporter;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
 }
@@ -75,6 +94,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   const repo = options.repo ?? new StateRepository(config.dbPath);
   const ncm = options.ncm ?? new NcmConnector(config.ncmBaseUrl, config.ncmCookie);
   const wsHub = options.wsHub ?? new WsHub();
+  const environmentService = options.environmentService ?? new OpenMeteoEnvironmentService();
   const orchestrator = new RadioOrchestrator(
     repo,
     ncm,
@@ -92,7 +112,9 @@ export async function createServer(options: CreateServerOptions = {}) {
     wsHub,
     options.djBroadcastInterval ?? config.djBroadcastInterval,
     config.aiDjMemoryTurns,
-    options.importRetryIntervalMs
+    options.importRetryIntervalMs,
+    environmentService,
+    options.recommendationImporter ?? new RecommendationImporter(repo, ncm)
   );
   await orchestrator.initialize();
   app.addHook("onClose", async () => {
@@ -149,6 +171,33 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.get("/api/system/status", async () => orchestrator.getSystemStatus());
+
+  app.get("/api/environment", async () => orchestrator.getEnvironment());
+
+  app.post("/api/environment/location", async (request, reply) => {
+    const parsed = environmentLocationSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const location = {
+      latitude: parsed.data.latitude,
+      longitude: parsed.data.longitude,
+      ...(parsed.data.label ? { label: parsed.data.label } : {})
+    };
+    return orchestrator.updateEnvironmentLocation(location);
+  });
+
+  app.post("/api/recommendations/import", async () => orchestrator.importRecommendations());
+
+  app.get("/api/dj/settings", async () => orchestrator.getDjSettings());
+
+  app.post("/api/dj/settings", async (request, reply) => {
+    const parsed = djSettingsSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    return orchestrator.updateDjSettings(parsed.data);
+  });
 
   app.post("/api/import/ncm", async (_request, reply) => {
     const result = await orchestrator.importFromNcmAndRefresh();
