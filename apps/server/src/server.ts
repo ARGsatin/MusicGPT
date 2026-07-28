@@ -163,6 +163,8 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/api/chat/history", async () => orchestrator.getChatHistory());
 
+  app.delete("/api/chat/history", async () => orchestrator.clearChatHistory());
+
   app.post("/api/feedback", async (request, reply) => {
     const parsed = feedbackSchema.safeParse(request.body);
     if (!parsed.success) {

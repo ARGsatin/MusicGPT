@@ -55,6 +55,15 @@ export async function fetchChatHistory(): Promise<ChatMessage[]> {
   return payload.messages;
 }
 
+export async function clearChatHistory(): Promise<void> {
+  const response = await fetch("/api/chat/history", {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to clear chat history");
+  }
+}
+
 export async function requestNext(forceReplan = false): Promise<NextResponse> {
   const response = await fetch("/api/next", {
     method: "POST",

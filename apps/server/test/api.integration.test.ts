@@ -93,6 +93,34 @@ describe("API integration", () => {
     const wsEvent = await wsMessage;
     expect(["queue_updated", "now_playing_updated"]).toContain(wsEvent.event);
   });
+
+  it("permanently clears chat history through the history endpoint", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-chat-clear-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    repo.addChatMessage({ role: "user", text: "keep this?", at: "2026-07-28T08:00:00.000Z" });
+    repo.addChatMessage({ role: "assistant", text: "not after clearing", at: "2026-07-28T08:00:01.000Z" });
+    const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch);
+    const app = await createServer({
+      repo,
+      ncm,
+      importRetryIntervalMs: 60_000
+    });
+    servers.push(app);
+    const base = await app.listen({ port: 0, host: "127.0.0.1" });
+
+    const beforeResponse = await fetch(`${base}/api/chat/history`);
+    const before = (await beforeResponse.json()) as { messages: unknown[] };
+    expect(before.messages).toHaveLength(2);
+
+    const clearResponse = await fetch(`${base}/api/chat/history`, { method: "DELETE" });
+    expect(clearResponse.ok).toBe(true);
+    await expect(clearResponse.json()).resolves.toEqual({ ok: true, messages: [] });
+
+    const afterResponse = await fetch(`${base}/api/chat/history`);
+    const after = (await afterResponse.json()) as { messages: unknown[] };
+    expect(after.messages).toEqual([]);
+    expect(repo.getRecentMessages()).toEqual([]);
+  });
 });
 
 function waitForWsEvent(url: string): Promise<{ event: string }> {

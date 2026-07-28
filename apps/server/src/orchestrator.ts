@@ -161,6 +161,11 @@ export class RadioOrchestrator {
     return { messages: this.repo.getRecentMessages(this.chatHistoryLimit()) };
   }
 
+  clearChatHistory(): { ok: true; messages: [] } {
+    this.repo.clearChatMessages();
+    return { ok: true, messages: [] };
+  }
+
   async getSystemStatus(): Promise<SystemStatus> {
     const aiDjStatus = this.aiDjAssistant.status();
     const status: SystemStatus = {

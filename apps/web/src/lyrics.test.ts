@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { findActiveLyricIndex } from "./lyrics";
+import { findActiveLyricIndex, selectLyricWindow } from "./lyrics";
 
 describe("findActiveLyricIndex", () => {
   it("preserves the first line before playback reaches its timestamp", () => {
@@ -40,5 +40,28 @@ describe("findActiveLyricIndex", () => {
 
   it("returns -1 when lyrics are unavailable", () => {
     expect(findActiveLyricIndex([], 10_000)).toBe(-1);
+  });
+});
+
+describe("selectLyricWindow", () => {
+  const lines = Array.from({ length: 5 }, (_, index) => ({
+    timeMs: index * 1_000,
+    text: `line ${index}`
+  }));
+
+  it("returns only the previous, current, and next lyric around the active line", () => {
+    expect(selectLyricWindow(lines, 2).map(({ index }) => index)).toEqual([1, 2, 3]);
+  });
+
+  it("keeps the active line visible at both document boundaries", () => {
+    expect(selectLyricWindow(lines, 0).map(({ index }) => index)).toEqual([0, 1]);
+    expect(selectLyricWindow(lines, 4).map(({ index }) => index)).toEqual([3, 4]);
+  });
+
+  it("never renders more than three rows for a long lyric document", () => {
+    const window = selectLyricWindow(lines, 2);
+
+    expect(window).toHaveLength(3);
+    expect(window[1]).toMatchObject({ index: 2, line: lines[2] });
   });
 });

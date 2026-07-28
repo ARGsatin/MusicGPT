@@ -1,5 +1,10 @@
 import type { LyricLine } from "@musicgpt/shared";
 
+export interface VisibleLyricLine {
+  index: number;
+  line: LyricLine;
+}
+
 export function findActiveLyricIndex(
   lines: readonly LyricLine[],
   currentMs: number,
@@ -26,4 +31,27 @@ export function findActiveLyricIndex(
   }
 
   return activeIndex;
+}
+
+export function selectLyricWindow(
+  lines: readonly LyricLine[],
+  activeIndex: number
+): VisibleLyricLine[] {
+  if (lines.length === 0) {
+    return [];
+  }
+
+  const currentIndex = Math.min(Math.max(activeIndex, 0), lines.length - 1);
+  const startIndex = Math.max(0, currentIndex - 1);
+  const endIndex = Math.min(lines.length, currentIndex + 2);
+  const visibleLines: VisibleLyricLine[] = [];
+
+  for (let index = startIndex; index < endIndex; index += 1) {
+    const line = lines[index];
+    if (line) {
+      visibleLines.push({ index, line });
+    }
+  }
+
+  return visibleLines;
 }

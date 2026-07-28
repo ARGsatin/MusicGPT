@@ -307,6 +307,10 @@ export class StateRepository {
       });
   }
 
+  clearChatMessages(): void {
+    this.db.prepare("DELETE FROM chat_messages").run();
+  }
+
   private saveAppState<T>(key: string, value: T): void {
     this.db
       .prepare(

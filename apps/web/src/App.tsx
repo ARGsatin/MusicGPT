@@ -12,6 +12,7 @@ import type {
   WsPayload
 } from "@musicgpt/shared";
 import {
+  clearChatHistory,
   fetchDjSettings,
   fetchEnvironment,
   fetchChatHistory,
@@ -28,8 +29,15 @@ import {
   updateEnvironmentLocation
 } from "./api";
 import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
-import { findActiveLyricIndex } from "./lyrics";
+import { findActiveLyricIndex, selectLyricWindow } from "./lyrics";
 import { useWsStream } from "./useWsStream";
+import {
+  applyPlayerVolume,
+  DEFAULT_PLAYER_VOLUME,
+  loadPlayerVolume,
+  normalizeVolumeLevel,
+  savePlayerVolume
+} from "./volume";
 
 function formatArtists(artists: string[] | undefined): string {
   if (!artists || artists.length === 0) {
@@ -93,6 +101,17 @@ function formatDuration(value: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function getBrowserStorage(): Storage | undefined {
+  if (typeof window === "undefined") {
+    return undefined;
+  }
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
 const EMPTY_LYRIC_LINES: TrackLyrics["lines"] = [];
 
 const WeatherParticles = memo(function WeatherParticles() {
@@ -153,27 +172,18 @@ const LyricLineRow = memo(function LyricLineRow({ isActive, line, pulse }: Lyric
 
 const LyricsWindow = memo(function LyricsWindow({ activeIndex, lyrics }: LyricsWindowProps) {
   const [pulseKey, setPulseKey] = useState(0);
-  const lyricsWindowRef = useRef<HTMLDivElement | null>(null);
   const lines = lyrics?.lines ?? EMPTY_LYRIC_LINES;
+  const visibleLines = useMemo(
+    () => selectLyricWindow(lines, activeIndex),
+    [activeIndex, lines]
+  );
 
   useEffect(() => {
     if (activeIndex < 0) {
       return undefined;
     }
     setPulseKey((key) => key + 1);
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => {
-        lyricsWindowRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({
-          block: "center",
-          behavior: "smooth"
-        });
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
+    return undefined;
   }, [activeIndex, lyrics?.trackId]);
 
   if (lyrics?.pureMusic) {
@@ -185,13 +195,13 @@ const LyricsWindow = memo(function LyricsWindow({ activeIndex, lyrics }: LyricsW
   }
 
   return (
-    <div className="lyrics-window" ref={lyricsWindowRef}>
-      {lines.length > 0 ? (
-        lines.map((line, index) => {
+    <div className="lyrics-window">
+      {visibleLines.length > 0 ? (
+        visibleLines.map(({ index, line }) => {
           const isActive = index === activeIndex;
           return (
             <LyricLineRow
-              key={`${line.timeMs}-${line.text}`}
+              key={`${index}-${line.timeMs}-${line.text}`}
               isActive={isActive}
               line={line}
               pulse={isActive ? pulseKey % 2 : undefined}
@@ -291,7 +301,11 @@ const PlayerStack = memo(function PlayerStack({
   const [playbackPaused, setPlaybackPaused] = useState(true);
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
+  const [playerVolume, setPlayerVolume] = useState(() => loadPlayerVolume(getBrowserStorage()));
   const audioRef = useRef<HTMLAudioElement>(null);
+  const lastAudibleVolumeRef = useRef(
+    playerVolume.level > 0 ? playerVolume.level : DEFAULT_PLAYER_VOLUME.level
+  );
   const lyricLines = now.lyrics?.lines ?? EMPTY_LYRIC_LINES;
   const activeLyricIndex = useMemo(
     () => findActiveLyricIndex(lyricLines, audioTime * 1000),
@@ -302,6 +316,13 @@ const PlayerStack = memo(function PlayerStack({
     setAudioTime(0);
     setAudioDuration(0);
   }, [now.track]);
+
+  useEffect(() => {
+    if (audioRef.current) {
+      applyPlayerVolume(audioRef.current, playerVolume);
+    }
+    savePlayerVolume(getBrowserStorage(), playerVolume);
+  }, [playerVolume]);
 
   const onTogglePlayback = async () => {
     if (!audioRef.current) {
@@ -338,6 +359,28 @@ const PlayerStack = memo(function PlayerStack({
     audioRef.current.currentTime = 0;
     await audioRef.current.play().catch(() => undefined);
   };
+
+  const onChangeVolume = (percent: number) => {
+    const level = normalizeVolumeLevel(percent / 100);
+    if (level > 0) {
+      lastAudibleVolumeRef.current = level;
+    }
+    setPlayerVolume({ level, muted: level === 0 });
+  };
+
+  const onToggleMute = () => {
+    setPlayerVolume((current) => {
+      const isSilent = current.muted || current.level === 0;
+      if (!isSilent) {
+        return { ...current, muted: true };
+      }
+      const level = current.level > 0 ? current.level : lastAudibleVolumeRef.current;
+      return { level, muted: false };
+    });
+  };
+
+  const volumePercent = Math.round(playerVolume.level * 100);
+  const volumeMuted = playerVolume.muted || volumePercent === 0;
 
   return (
     <section className="player-stack" aria-label="Audio and lyrics">
@@ -380,6 +423,28 @@ const PlayerStack = memo(function PlayerStack({
               <button type="button" aria-label="Like" onClick={() => void onFeedback("like")}>
                 <span aria-hidden="true">♡</span>
               </button>
+            </div>
+            <div className="volume-control">
+              <button
+                type="button"
+                className="volume-button"
+                aria-label={volumeMuted ? "Unmute" : "Mute"}
+                aria-pressed={volumeMuted}
+                onClick={onToggleMute}
+              >
+                <span aria-hidden="true">{volumeMuted ? "×" : "◖"}</span>
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={volumePercent}
+                onChange={(event) => onChangeVolume(Number(event.currentTarget.value))}
+                aria-label="Playback volume"
+                aria-valuetext={`${volumePercent}%`}
+              />
+              <output aria-live="polite">{volumePercent}%</output>
             </div>
           </div>
         </div>
@@ -433,6 +498,7 @@ export default function App() {
   const [input, setInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatClearing, setChatClearing] = useState(false);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -544,6 +610,27 @@ export default function App() {
       setSuggestionLoadingId(null);
     }
   }, [refreshTaste, suggestionLoadingId]);
+
+  const onClearChatHistory = async () => {
+    if (chatLoading || chatClearing || messages.length === 0) {
+      return;
+    }
+    const confirmed = window.confirm("确定清空全部历史聊天记录吗？此操作无法撤销。");
+    if (!confirmed) {
+      return;
+    }
+
+    setChatClearing(true);
+    setChatError(null);
+    try {
+      await clearChatHistory();
+      setMessages([]);
+    } catch (error) {
+      setChatError(error instanceof Error ? error.message : "聊天记录清空失败，请稍后再试。");
+    } finally {
+      setChatClearing(false);
+    }
+  };
 
   const runWithAdvanceLock = useCallback(async (job: () => Promise<void>) => {
     if (advanceInFlightRef.current) {
@@ -773,6 +860,14 @@ export default function App() {
             </button>
             <button type="button" onClick={() => void submitChat("来点适合现在氛围的歌")} disabled={chatLoading}>
               氛围点歌
+            </button>
+            <button
+              className="clear-chat-button"
+              type="button"
+              onClick={() => void onClearChatHistory()}
+              disabled={chatLoading || chatClearing || messages.length === 0}
+            >
+              {chatClearing ? "清空中…" : "清空历史"}
             </button>
           </div>
           {chatError ? <p className="chat-error">{chatError}</p> : null}

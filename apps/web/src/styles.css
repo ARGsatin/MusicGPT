@@ -402,6 +402,8 @@ button {
   min-height: var(--console-height);
   display: grid;
   grid-template-columns: minmax(0, 0.92fr) minmax(400px, 1.08fr);
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
   gap: 18px;
   margin-top: 18px;
 }
@@ -411,6 +413,8 @@ button {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 18px;
   min-width: 0;
+  min-height: 0;
+  height: 100%;
 }
 
 .player-card,
@@ -540,6 +544,51 @@ button {
   box-shadow: 0 10px 22px rgba(109, 123, 255, 0.34);
 }
 
+.volume-control {
+  display: grid;
+  grid-template-columns: 36px minmax(84px, 150px) 42px;
+  align-items: center;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.volume-control .volume-button {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--brand);
+  background: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.volume-control .volume-button:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-soft);
+}
+
+.volume-control .volume-button[aria-pressed="true"] {
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.volume-control input {
+  width: 100%;
+  height: 18px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.volume-control output {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
 .progress-row {
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr) 46px;
@@ -575,23 +624,20 @@ button {
 
 /* ===== Lyrics ===== */
 .lyrics-card {
-  min-height: 200px;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
 }
 
 .lyrics-window {
   position: relative;
-  height: 100%;
-  min-height: 150px;
-  overflow-y: auto;
-  scroll-behavior: smooth;
-  padding: 48px 4px;
-  mask-image: linear-gradient(180deg, transparent, #000 18%, #000 82%, transparent);
-  scrollbar-width: none;
-}
-
-.lyrics-window::-webkit-scrollbar {
-  display: none;
+  min-height: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  overflow: hidden;
+  padding: 8px 4px;
 }
 
 .lyric-line {
@@ -631,7 +677,7 @@ button {
   opacity: 1;
   margin-block: 6px;
   background: linear-gradient(90deg, var(--brand-soft), rgba(139, 92, 246, 0.06) 60%, transparent);
-  transform: translateX(3px) scale(1.03);
+  transform: none;
 }
 
 .lyric-line.is-active .lyric-original {
@@ -661,9 +707,8 @@ button {
 }
 
 @keyframes lyric-pop {
-  0% { transform: translateX(0) scale(1); }
-  46% { transform: translateX(3px) scale(1.06); }
-  100% { transform: translateX(3px) scale(1.03); }
+  0% { opacity: 0.72; transform: translateY(4px); }
+  100% { opacity: 1; transform: none; }
 }
 
 /* ===== DJ console / chat ===== */
@@ -680,7 +725,6 @@ button {
 
 .message-thread {
   min-height: 0;
-  height: 100%;
   overflow-x: hidden;
   overflow-y: auto;
   display: grid;
@@ -870,6 +914,13 @@ button {
 .chat-actions button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: var(--shadow-soft);
+}
+
+.chat-actions .clear-chat-button {
+  margin-left: auto;
+  color: var(--danger);
+  background: rgba(239, 90, 114, 0.09);
+  border-color: rgba(239, 90, 114, 0.2);
 }
 
 .chat-actions button:disabled,
@@ -1068,6 +1119,84 @@ button {
   text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ===== Responsive console containment ===== */
+@media (max-width: 900px) {
+  .console-grid {
+    height: auto;
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+  }
+
+  .player-stack {
+    height: auto;
+    grid-template-rows: auto auto;
+  }
+
+  .lyrics-card {
+    min-height: 220px;
+  }
+
+  .dj-console {
+    height: clamp(540px, 78vh, 680px);
+    min-height: 540px;
+    max-height: 680px;
+  }
+}
+
+@media (max-width: 520px) {
+  .radio-shell {
+    padding-inline: 12px;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .station-actions {
+    justify-content: flex-start;
+  }
+
+  .player-body {
+    grid-template-columns: 96px minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .controls {
+    gap: 6px;
+  }
+
+  .controls button {
+    width: 38px;
+    height: 38px;
+  }
+
+  .controls .control-primary {
+    width: 44px;
+    height: 44px;
+  }
+
+  .volume-control {
+    grid-template-columns: 32px minmax(68px, 1fr) 38px;
+  }
+
+  .volume-control .volume-button {
+    width: 32px;
+    height: 32px;
+  }
+
+  .player-card,
+  .lyrics-card,
+  .dj-console {
+    padding: 18px;
+  }
+
+  .chat-actions .clear-chat-button {
+    margin-left: 0;
+  }
 }
 
 /* ===== Motion ===== */
