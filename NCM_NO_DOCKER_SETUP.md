@@ -23,6 +23,7 @@ npm run ncm:cookie
 What this command does:
 - calls NCM QR login endpoints
 - writes QR image to `D:\MusicGPT\.ncm-login-qr.png`
+- opens the QR image automatically
 - waits for login confirmation on your phone
 - overwrites `NCM_COOKIE` in `.env`
 - verifies `/user/account` with the new cookie
@@ -46,7 +47,8 @@ This command verifies:
 npm run dev:ncm
 ```
 
-This runs `npx -y NeteaseCloudMusicApi@latest` with `PORT=3001`.
+This runs the project-pinned `NeteaseCloudMusicApi@4.32.0` with `PORT=3001`.
+The supervisor keeps checking its health and restarts the managed child process if it goes down.
 
 ## 4) Start full stack
 
@@ -58,6 +60,8 @@ This starts:
 - NCM API on `3001`
 - MusicGPT server on `8787`
 - MusicGPT web on `5173`
+
+Startup is ordered rather than best-effort: the server waits for NCM readiness and a valid login, and the web app waits for the server health check. A failed dependency stops startup instead of leaving a misleading half-running stack.
 
 ## 5) Health checks
 

@@ -6,6 +6,7 @@ const DEFAULT_NCM_BASE_URL = "http://127.0.0.1:3001";
 const envPath = path.resolve(process.cwd(), ".env");
 const VERIFY_RETRY_COUNT = 3;
 const VERIFY_RETRY_INTERVAL_MS = 1200;
+const LIKE_LIST_RETRY_COUNT = 3;
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   printHelp();
@@ -38,18 +39,35 @@ async function main() {
   const accountCheck = await verifyLoggedInAccount(baseUrl, cookie);
   if (!accountCheck.ok) {
     console.error(`Cookie validation failed: ${accountCheck.reason}`);
-    console.error("Cookie is invalid or still anonymous.");
-    process.exit(4);
+    if (accountCheck.kind === "authentication") {
+      console.error("Cookie is invalid or still anonymous.");
+      process.exit(4);
+    }
+    console.error("NCM API or the upstream NetEase service is temporarily unavailable.");
+    process.exit(3);
   }
 
-  const likeList = await requestJsonSafe(
-    `${baseUrl}/likelist?uid=${accountCheck.userId}&timestamp=${Date.now()}`,
-    {
-      Cookie: cookie
+  let likeList;
+  for (let attempt = 1; attempt <= LIKE_LIST_RETRY_COUNT; attempt += 1) {
+    likeList = await requestJsonSafe(
+      `${baseUrl}/likelist?uid=${accountCheck.userId}&timestamp=${Date.now()}`,
+      {
+        Cookie: cookie
+      }
+    );
+    if (likeList.ok) {
+      break;
     }
-  );
-  if (!likeList.ok) {
-    console.error(`likelist fetch failed: ${likeList.errorMessage}`);
+    if (attempt < LIKE_LIST_RETRY_COUNT) {
+      console.warn(
+        `likelist request failed (${attempt}/${LIKE_LIST_RETRY_COUNT}); retrying...`
+      );
+      await sleep(VERIFY_RETRY_INTERVAL_MS);
+    }
+  }
+
+  if (!likeList?.ok) {
+    console.error(`likelist fetch failed: ${likeList?.errorMessage ?? "unknown error"}`);
     process.exit(5);
   }
 
@@ -134,6 +152,7 @@ function normalizeCookieHeader(cookieText) {
 
 async function verifyLoggedInAccount(baseUrl, cookie) {
   let lastReason = "unknown";
+  let receivedAccountPayload = false;
 
   for (let attempt = 1; attempt <= VERIFY_RETRY_COUNT; attempt += 1) {
     const [statusResult, accountResult] = await Promise.all([
@@ -146,6 +165,7 @@ async function verifyLoggedInAccount(baseUrl, cookie) {
     ]);
 
     if (statusResult.ok) {
+      receivedAccountPayload = true;
       const statusPayload = unwrapLoginStatusPayload(statusResult.payload);
       const statusCheck = validateAccountPayload(statusPayload);
       if (statusCheck.ok) {
@@ -157,6 +177,7 @@ async function verifyLoggedInAccount(baseUrl, cookie) {
     }
 
     if (accountResult.ok) {
+      receivedAccountPayload = true;
       const accountCheck = validateAccountPayload(accountResult.payload);
       if (accountCheck.ok) {
         return { ok: true, userId: accountCheck.userId, source: "/user/account" };
@@ -171,7 +192,11 @@ async function verifyLoggedInAccount(baseUrl, cookie) {
     }
   }
 
-  return { ok: false, reason: lastReason };
+  return {
+    ok: false,
+    reason: lastReason,
+    kind: receivedAccountPayload ? "authentication" : "transport"
+  };
 }
 
 async function requestJsonSafe(url, headers = undefined) {
@@ -188,6 +213,16 @@ async function requestJsonSafe(url, headers = undefined) {
         ok: false,
         errorMessage:
           (typeof payload === "object" && payload?.msg) || `Request failed (${response.status})`
+      };
+    }
+    if (
+      typeof payload === "object" &&
+      typeof payload?.code === "number" &&
+      payload.code >= 300
+    ) {
+      return {
+        ok: false,
+        errorMessage: payload.msg || payload.message || `NCM code ${payload.code}`
       };
     }
 

@@ -8,11 +8,12 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev:server\" \"npm run dev:web\"",
+    "dev": "npm run dev:full",
+    "dev:app": "concurrently -n server,web -c cyan,magenta \"npm run dev:server\" \"npm run dev:web\"",
     "dev:ncm": "node scripts/start-ncm.mjs",
     "ncm:cookie": "node scripts/setup-ncm-cookie.mjs",
     "ncm:check": "node scripts/check-ncm-cookie.mjs",
-    "dev:full": "concurrently -n ncm,server,web -c green,cyan,magenta \"npm run dev:ncm\" \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:full": "concurrently --kill-others -n ncm,server,web -c green,cyan,magenta \"npm run dev:ncm\" \"node scripts/wait-for-ncm.mjs && node scripts/ensure-ncm-login.mjs && npm run dev:server\" \"node scripts/wait-for-server.mjs && npm run dev:web\"",
     "dev:server": "npm run dev -w @musicgpt/server",
     "dev:web": "npm run dev -w @musicgpt/web",
     "build": "npm run build -w @musicgpt/server && npm run build -w @musicgpt/web",
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^22.15.3",
     "concurrently": "^9.2.1",
+    "NeteaseCloudMusicApi": "4.32.0",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

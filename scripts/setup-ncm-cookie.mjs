@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -51,6 +52,7 @@ async function main() {
     const base64 = qrImg.slice("data:image/png;base64,".length);
     fs.writeFileSync(qrImagePath, Buffer.from(base64, "base64"));
     console.log(`QR image saved: ${qrImagePath}`);
+    openQrImage(qrImagePath);
   }
 
   if (qrUrl) {
@@ -78,6 +80,26 @@ async function main() {
   console.log(
     `Account check passed via ${accountCheck.source} (uid=${accountCheck.userId}). NCM cookie is ready.`
   );
+}
+
+function openQrImage(targetPath) {
+  const command =
+    process.platform === "win32"
+      ? { executable: "cmd.exe", args: ["/d", "/c", "start", "", targetPath] }
+      : process.platform === "darwin"
+        ? { executable: "open", args: [targetPath] }
+        : { executable: "xdg-open", args: [targetPath] };
+
+  try {
+    const opener = spawn(command.executable, command.args, {
+      detached: true,
+      stdio: "ignore"
+    });
+    opener.once("error", () => undefined);
+    opener.unref();
+  } catch {
+    console.warn(`Could not open the QR image automatically: ${targetPath}`);
+  }
 }
 
 async function pollQrLoginCookie(baseUrl, qrKey) {

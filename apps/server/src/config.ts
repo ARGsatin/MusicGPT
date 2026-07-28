@@ -4,6 +4,8 @@ import path from "node:path";
 import dotenv from "dotenv";
 import { z } from "zod";
 
+let loadedEnvPath: string | undefined;
+
 function loadEnvFiles(): void {
   if (process.env.MUSICGPT_SKIP_DOTENV === "true") {
     return;
@@ -18,6 +20,7 @@ function loadEnvFiles(): void {
   for (const candidate of candidates) {
     if (fs.existsSync(candidate)) {
       dotenv.config({ path: candidate, override: true });
+      loadedEnvPath = candidate;
     }
   }
 }
@@ -101,3 +104,12 @@ export const config = {
   djBroadcastInterval: parsed.DJ_BROADCAST_INTERVAL,
   serverPort: parsed.SERVER_PORT
 };
+
+export function readCurrentNcmCookie(): string | undefined {
+  if (!loadedEnvPath || !fs.existsSync(loadedEnvPath)) {
+    return process.env.NCM_COOKIE?.trim() || undefined;
+  }
+
+  const values = dotenv.parse(fs.readFileSync(loadedEnvPath, "utf8"));
+  return values.NCM_COOKIE?.trim() || undefined;
+}

@@ -8,6 +8,25 @@ import { NcmConnector } from "../src/ncmConnector.js";
 import { StateRepository } from "../src/stateRepository.js";
 
 describe("NcmConnector integration", () => {
+  it("reads the current cookie for every request so QR recovery needs no server restart", async () => {
+    let cookie = "MUSIC_U=old";
+    const seenCookies: string[] = [];
+    const connector = new NcmConnector(
+      "http://mock-ncm",
+      () => cookie,
+      async (_input, init) => {
+        seenCookies.push(new Headers(init?.headers).get("Cookie") ?? "");
+        return json({});
+      }
+    );
+
+    await connector.isReachable();
+    cookie = "MUSIC_U=new";
+    await connector.isReachable();
+
+    expect(seenCookies).toEqual(["MUSIC_U=old", "MUSIC_U=new"]);
+  });
+
   it("imports user data and persists into repository", async () => {
     const mockFetch: typeof fetch = async (input) => {
       const url = input.toString();
@@ -44,7 +63,71 @@ describe("NcmConnector integration", () => {
     expect(repo.getTrackStats(10)[0]?.playCount).toBe(66);
   });
 
-  it("returns empty data for anonymous account payload", async () => {
+  it("reports an unreachable NCM API instead of treating it as an empty library", async () => {
+    const connector = new NcmConnector(
+      "http://mock-ncm",
+      "MUSIC_U=test",
+      async () => {
+        throw new TypeError("fetch failed");
+      }
+    );
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_unreachable"
+    });
+  });
+
+  it("classifies a local request timeout separately from an unreachable API", async () => {
+    const connector = new NcmConnector(
+      "http://mock-ncm",
+      "MUSIC_U=test",
+      async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+    );
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_request_failed",
+      message: expect.stringContaining("超时")
+    });
+  });
+
+  it("retries a transient upstream failure during import", async () => {
+    let likeListAttempts = 0;
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/login/status")) {
+        return json({
+          account: { id: 9527, anonimousUser: false, status: 0 },
+          profile: { userId: 9527 }
+        });
+      }
+      if (url.includes("/likelist")) {
+        likeListAttempts += 1;
+        if (likeListAttempts === 1) {
+          return json({ code: 502, msg: "upstream timeout" }, 502);
+        }
+        return json({ ids: [1] });
+      }
+      if (url.includes("/song/detail")) {
+        return json({
+          songs: [{ id: 1, name: "Recovered", ar: [{ name: "NCM" }] }]
+        });
+      }
+      if (url.includes("/user/record")) {
+        return json({ allData: [] });
+      }
+      return json({});
+    };
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
+
+    const stats = await connector.fetchUserMusicData();
+
+    expect(stats).toHaveLength(1);
+    expect(likeListAttempts).toBe(2);
+  });
+
+  it("reports an expired login instead of treating it as an empty library", async () => {
     const mockFetch: typeof fetch = async (input) => {
       const url = input.toString();
       if (url.includes("/user/account")) {
@@ -56,10 +139,99 @@ describe("NcmConnector integration", () => {
       return json({});
     };
 
-    const connector = new NcmConnector("http://mock-ncm", "cookie=abc", mockFetch);
-    const stats = await connector.fetchUserMusicData();
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
 
-    expect(stats).toEqual([]);
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_not_logged_in"
+    });
+  });
+
+  it("keeps an explicit login failure even if the fallback account request times out", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/login/status")) {
+        return json({ code: 301, msg: "需要登录" });
+      }
+      throw new TypeError("fetch failed");
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_not_logged_in"
+    });
+  });
+
+  it("reports an empty liked-song list explicitly", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/user/account")) {
+        return json({
+          account: { id: 9527, anonimousUser: false, status: 0 },
+          profile: { userId: 9527 }
+        });
+      }
+      if (url.includes("/likelist")) {
+        return json({ ids: [] });
+      }
+      return json({});
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_likes_empty"
+    });
+  });
+
+  it("reports a malformed liked-song response as an API compatibility failure", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/login/status")) {
+        return json({
+          account: { id: 9527, anonimousUser: false, status: 0 },
+          profile: { userId: 9527 }
+        });
+      }
+      if (url.includes("/likelist")) {
+        return json({ code: 200 });
+      }
+      return json({});
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_request_failed"
+    });
+  });
+
+  it("reports incompatible song-detail data explicitly", async () => {
+    const mockFetch: typeof fetch = async (input) => {
+      const url = input.toString();
+      if (url.includes("/user/account")) {
+        return json({
+          account: { id: 9527, anonimousUser: false, status: 0 },
+          profile: { userId: 9527 }
+        });
+      }
+      if (url.includes("/likelist")) {
+        return json({ ids: [1] });
+      }
+      if (url.includes("/song/detail")) {
+        return json({ songs: [] });
+      }
+      if (url.includes("/user/record")) {
+        return json({ allData: [] });
+      }
+      return json({});
+    };
+
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", mockFetch);
+
+    await expect(connector.fetchUserMusicData()).rejects.toMatchObject({
+      code: "ncm_track_details_empty"
+    });
   });
 
   it("parses timed lyrics and merges matching translated lines", async () => {
@@ -113,9 +285,9 @@ describe("NcmConnector integration", () => {
   });
 });
 
-function json(payload: unknown): Response {
+function json(payload: unknown, status = 200): Response {
   return new Response(JSON.stringify(payload), {
-    status: 200,
+    status,
     headers: { "content-type": "application/json" }
   });
 }

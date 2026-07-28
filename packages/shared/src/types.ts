@@ -189,6 +189,15 @@ export interface PlayTrackResponse {
   now: NowPlayingState;
 }
 
+export type NcmImportErrorCode =
+  | "ncm_unreachable"
+  | "ncm_cookie_missing"
+  | "ncm_not_logged_in"
+  | "ncm_likes_empty"
+  | "ncm_track_details_empty"
+  | "ncm_request_failed"
+  | "ncm_import_in_progress";
+
 export interface SystemStatus {
   runningRoot: string;
   ncmReachable: boolean;
@@ -201,6 +210,7 @@ export interface SystemStatus {
   queueLength: number;
   lastImportAt?: string;
   lastImportError?: string;
+  lastImportErrorCode?: NcmImportErrorCode;
   environment?: EnvironmentContext;
   djSettings?: DjSettings;
 }
@@ -210,6 +220,7 @@ export interface ImportNcmResponse {
   importedCount: number;
   systemStatus: SystemStatus;
   error?: string;
+  errorCode?: NcmImportErrorCode;
 }
 
 export interface WsPayload {

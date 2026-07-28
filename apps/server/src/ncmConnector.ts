@@ -1,8 +1,14 @@
 import { inferMood } from "./moodClassifier.js";
 
-import type { LyricLine, Track, TrackLyrics, TrackStat } from "@musicgpt/shared";
+import type {
+  LyricLine,
+  NcmImportErrorCode,
+  Track,
+  TrackLyrics,
+  TrackStat
+} from "@musicgpt/shared";
 
-interface NcmAccountResponse {
+interface NcmAccountPayload {
   account?: {
     id?: number;
     anonimousUser?: boolean;
@@ -12,6 +18,10 @@ interface NcmAccountResponse {
   profile?: {
     userId?: number;
   };
+}
+
+interface NcmAccountResponse extends NcmAccountPayload {
+  data?: NcmAccountPayload;
 }
 
 interface NcmLikeListResponse {
@@ -68,11 +78,32 @@ interface NcmLyricResponse {
 
 const METADATA_LINE_PATTERN =
   /^(作词|作曲|编曲|制作人|监制|出品|发行|混音|录音|母带|吉他|贝斯|鼓|和声|词|曲|OP|SP)\s*[:：]/i;
+const NCM_REQUEST_TIMEOUT_MS = 12_000;
+const NCM_REQUEST_MAX_ATTEMPTS = 3;
+const NCM_RETRY_BASE_DELAY_MS = 400;
+
+interface NcmImportErrorOptions extends ErrorOptions {
+  retryable?: boolean;
+}
+
+export class NcmImportError extends Error {
+  readonly retryable: boolean;
+
+  constructor(
+    readonly code: NcmImportErrorCode,
+    message: string,
+    options?: NcmImportErrorOptions
+  ) {
+    super(message, options);
+    this.name = "NcmImportError";
+    this.retryable = options?.retryable ?? false;
+  }
+}
 
 export class NcmConnector {
   constructor(
     private readonly baseUrl: string,
-    private readonly cookie?: string,
+    private readonly cookie: string | (() => string | undefined) | undefined,
     private readonly fetchImpl: typeof fetch = fetch
   ) {}
 
@@ -81,51 +112,151 @@ export class NcmConnector {
   }
 
   private async getJson<T>(path: string): Promise<T> {
-    const response = await this.fetchImpl(this.makeUrl(path), {
-      headers: this.cookie ? { Cookie: this.cookie } : {}
-    });
-    if (!response.ok) {
-      throw new Error(`NCM request failed: ${response.status} ${path}`);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= NCM_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.requestJsonOnce<T>(path);
+      } catch (error) {
+        lastError = error;
+        if (
+          !(error instanceof NcmImportError) ||
+          !error.retryable ||
+          attempt === NCM_REQUEST_MAX_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await delay(NCM_RETRY_BASE_DELAY_MS * attempt);
+      }
     }
-    return (await response.json()) as T;
+    throw lastError;
   }
 
-  async getUserId(): Promise<number | undefined> {
+  private async requestJsonOnce<T>(path: string): Promise<T> {
+    const cookie = this.currentCookie();
+    let response: Response;
     try {
-      const payload = await this.getJson<NcmAccountResponse>("/user/account");
-      const profileUserId = payload.profile?.userId;
-      const accountId = payload.account?.id;
-      const userId = profileUserId ?? accountId;
-      const isAnonymous = payload.account?.anonimousUser ?? payload.account?.anonymousUser;
-      const status = payload.account?.status;
-
-      if (!profileUserId) {
-        console.warn("[NCM] /user/account missing profile.userId. Cookie may be invalid.");
-        return undefined;
+      response = await this.fetchImpl(this.makeUrl(path), {
+        headers: cookie ? { Cookie: cookie } : {},
+        signal: AbortSignal.timeout(NCM_REQUEST_TIMEOUT_MS)
+      });
+    } catch (cause) {
+      const causeName =
+        cause && typeof cause === "object" && "name" in cause
+          ? String(cause.name)
+          : "";
+      if (causeName === "TimeoutError" || causeName === "AbortError") {
+        throw new NcmImportError(
+          "ncm_request_failed",
+          `网易云上游请求超时（${path}）。系统已自动重试，请稍后再试。`,
+          { cause, retryable: true }
+        );
       }
-      if (isAnonymous === true || status === -10) {
-        console.warn("[NCM] /user/account is anonymous or invalid session. Please refresh NCM_COOKIE.");
-        return undefined;
-      }
-      if (!userId) {
-        console.warn("[NCM] /user/account missing user id. Please refresh NCM_COOKIE.");
-        return undefined;
-      }
-
-      return userId;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      console.warn(`[NCM] Failed to fetch /user/account: ${message}`);
-      return undefined;
+      throw new NcmImportError(
+        "ncm_unreachable",
+        `网易云 API 自动重试后仍无法连接（${this.baseUrl}）。请使用“一键启动.cmd”重新启动，或运行 npm run dev:ncm。`,
+        { cause, retryable: true }
+      );
     }
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw this.notLoggedInError();
+      }
+      const retryable =
+        response.status === 408 ||
+        response.status === 425 ||
+        response.status === 429 ||
+        response.status >= 500;
+      throw new NcmImportError(
+        "ncm_request_failed",
+        retryable
+          ? `网易云上游暂时异常（HTTP ${response.status}，${path}）。系统已自动重试，请稍后再试。`
+          : `网易云 API 请求失败（HTTP ${response.status}，${path}）。请重启 NCM API 后重试。`,
+        { retryable }
+      );
+    }
+
+    let payload: T;
+    try {
+      payload = (await response.json()) as T;
+    } catch (cause) {
+      throw new NcmImportError(
+        "ncm_request_failed",
+        `网易云 API 返回了无法解析的数据（${path}）。请重启 NCM API 后重试。`,
+        { cause, retryable: true }
+      );
+    }
+
+    const envelope = payload as { code?: number; msg?: string; message?: string };
+    if (envelope.code === 301 || envelope.code === 302) {
+      throw this.notLoggedInError();
+    }
+    if (typeof envelope.code === "number" && envelope.code >= 400) {
+      const detail = envelope.msg ?? envelope.message;
+      const retryable =
+        envelope.code === 408 ||
+        envelope.code === 429 ||
+        envelope.code >= 500;
+      throw new NcmImportError(
+        "ncm_request_failed",
+        `网易云 API 拒绝了请求（code=${envelope.code}${detail ? `，${detail}` : ""}）。`,
+        { retryable }
+      );
+    }
+
+    return payload;
+  }
+
+  async getUserId(): Promise<number> {
+    const paths = [
+      `/login/status?timestamp=${Date.now()}`,
+      `/user/account?timestamp=${Date.now()}`
+    ];
+    let lastRequestError: NcmImportError | undefined;
+    let authenticationError: NcmImportError | undefined;
+    let receivedAccountPayload = false;
+
+    for (const path of paths) {
+      try {
+        const response = await this.getJson<NcmAccountResponse>(path);
+        const payload = response.data ?? response;
+        receivedAccountPayload = true;
+        const profileUserId = payload.profile?.userId;
+        const isAnonymous =
+          payload.account?.anonimousUser ?? payload.account?.anonymousUser;
+        const status = payload.account?.status;
+
+        if (profileUserId && isAnonymous !== true && status !== -10) {
+          return profileUserId;
+        }
+      } catch (error) {
+        if (error instanceof NcmImportError) {
+          if (error.code === "ncm_not_logged_in") {
+            authenticationError = error;
+          }
+          if (error.code === "ncm_unreachable") {
+            throw authenticationError ?? error;
+          }
+          lastRequestError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (receivedAccountPayload || authenticationError) {
+      throw authenticationError ?? this.notLoggedInError();
+    }
+    throw lastRequestError ?? this.notLoggedInError();
   }
 
   async isReachable(): Promise<boolean> {
     try {
+      const cookie = this.currentCookie();
       const response = await this.fetchImpl(
         this.makeUrl(`/login/status?timestamp=${Date.now()}`),
         {
-          headers: this.cookie ? { Cookie: this.cookie } : {},
+          headers: cookie ? { Cookie: cookie } : {},
           signal: AbortSignal.timeout(5000)
         }
       );
@@ -136,15 +267,26 @@ export class NcmConnector {
   }
 
   async fetchUserMusicData(): Promise<TrackStat[]> {
-    const uid = await this.getUserId();
-    if (!uid) {
-      return [];
+    const cookie = this.currentCookie();
+    if (!cookie?.trim() || /^PASTE_/i.test(cookie.trim())) {
+      throw new NcmImportError(
+        "ncm_cookie_missing",
+        "尚未配置网易云登录 Cookie。请运行 npm run ncm:cookie，使用网易云音乐扫码登录。"
+      );
     }
+
+    const uid = await this.getUserId();
 
     const likes = await this.getJson<NcmLikeListResponse>(
       `/likelist?uid=${uid}&timestamp=${Date.now()}`
     );
-    const likedIds = likes.ids ?? [];
+    if (!Array.isArray(likes.ids)) {
+      throw new NcmImportError(
+        "ncm_request_failed",
+        "网易云喜欢列表响应缺少 ids 字段。请重启固定版本的 NCM API 后重试。"
+      );
+    }
+    const likedIds = likes.ids;
     const likedAtById = new Map<number, string>();
     const normalizedLikedIds: number[] = [];
 
@@ -159,8 +301,27 @@ export class NcmConnector {
       }
     }
 
+    if (normalizedLikedIds.length === 0) {
+      throw new NcmImportError(
+        "ncm_likes_empty",
+        "网易云账号的“我喜欢的音乐”列表为空，当前没有可导入的曲目。"
+      );
+    }
+
     const details = await this.fetchSongDetails(normalizedLikedIds.slice(0, 1000));
-    const record = await this.getJson<NcmUserRecordResponse>(`/user/record?uid=${uid}&type=0`);
+    if (details.length === 0) {
+      throw new NcmImportError(
+        "ncm_track_details_empty",
+        `网易云返回了 ${normalizedLikedIds.length} 个喜欢记录，但没有返回任何曲目详情。请重启 NCM API 后重试。`
+      );
+    }
+
+    const record = await this.getJson<NcmUserRecordResponse>(
+      `/user/record?uid=${uid}&type=0`
+    ).catch(() => {
+      console.warn("[NCM] Playback history unavailable; importing liked songs without play counts.");
+      return { allData: [] };
+    });
     const recordMap = new Map<number, UserRecordItem>();
 
     for (const row of record.allData ?? []) {
@@ -184,6 +345,17 @@ export class NcmConnector {
       }
       return stat;
     });
+  }
+
+  private notLoggedInError(): NcmImportError {
+    return new NcmImportError(
+      "ncm_not_logged_in",
+      "网易云登录已失效或仍是匿名会话。请运行 npm run ncm:cookie，使用网易云音乐重新扫码登录。"
+    );
+  }
+
+  private currentCookie(): string | undefined {
+    return typeof this.cookie === "function" ? this.cookie() : this.cookie;
   }
 
   private async fetchSongDetails(ids: number[]): Promise<Track[]> {
@@ -329,4 +501,8 @@ function parseLrc(raw: string | undefined): LyricLine[] {
   }
 
   return lines.sort((a, b) => a.timeMs - b.timeMs);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

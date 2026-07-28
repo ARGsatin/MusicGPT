@@ -9,6 +9,7 @@ import type {
   ImportNcmResponse,
   RecommendationImportResponse,
   NowPlayingState,
+  NcmImportErrorCode,
   PlayEvent,
   RadioPlanItem,
   SystemStatus,
@@ -21,7 +22,7 @@ import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./a
 import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
 import { EnvironmentService } from "./environmentService.js";
-import { NcmConnector } from "./ncmConnector.js";
+import { NcmConnector, NcmImportError } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
@@ -33,7 +34,6 @@ const PLAN_WINDOW_SIZE = 10;
 const QUEUE_TARGET_SIZE = 10;
 const QUEUE_REFILL_THRESHOLD = 6;
 const IMPORT_RETRY_INTERVAL_MS = 60_000;
-const EMPTY_IMPORT_ERROR = "未导入到有效曲目，请检查 NCM API 与登录 Cookie。";
 export const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
@@ -50,6 +50,7 @@ export class RadioOrchestrator {
   private importInFlight = false;
   private lastImportAt: string | undefined;
   private lastImportError: string | undefined;
+  private lastImportErrorCode: NcmImportErrorCode | undefined;
 
   constructor(
     private readonly repo: StateRepository,
@@ -114,7 +115,8 @@ export class RadioOrchestrator {
     return {
       ok: false,
       importedCount,
-      error: this.lastImportError ?? EMPTY_IMPORT_ERROR,
+      error: this.lastImportError ?? "网易云导入失败。",
+      ...(this.lastImportErrorCode ? { errorCode: this.lastImportErrorCode } : {}),
       systemStatus
     };
   }
@@ -183,6 +185,9 @@ export class RadioOrchestrator {
     }
     if (this.lastImportError) {
       status.lastImportError = this.lastImportError;
+    }
+    if (this.lastImportErrorCode) {
+      status.lastImportErrorCode = this.lastImportErrorCode;
     }
     status.environment = this.getEnvironment();
     status.djSettings = this.getDjSettings();
@@ -494,6 +499,7 @@ export class RadioOrchestrator {
   private async runNcmImport(): Promise<number> {
     if (this.importInFlight) {
       this.lastImportError = "导入任务正在进行中。";
+      this.lastImportErrorCode = "ncm_import_in_progress";
       return 0;
     }
 
@@ -502,14 +508,18 @@ export class RadioOrchestrator {
     try {
       const stats = await this.ncm.fetchUserMusicData();
       if (stats.length === 0) {
-        this.lastImportError = EMPTY_IMPORT_ERROR;
+        this.lastImportError = "网易云导入完成，但连接器没有返回曲目。";
+        this.lastImportErrorCode = "ncm_track_details_empty";
         return 0;
       }
       this.repo.upsertTrackStats(stats);
       this.lastImportError = undefined;
+      this.lastImportErrorCode = undefined;
       return stats.length;
     } catch (error) {
       this.lastImportError = error instanceof Error ? error.message : String(error);
+      this.lastImportErrorCode =
+        error instanceof NcmImportError ? error.code : "ncm_request_failed";
       return 0;
     } finally {
       this.importInFlight = false;

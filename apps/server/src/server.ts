@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import { z } from "zod";
 
-import { config } from "./config.js";
+import { config, readCurrentNcmCookie } from "./config.js";
 import type { Track } from "@musicgpt/shared";
 import type { AiDjAssistant } from "./aiDjAssistant.js";
 import { OpenAiDjAssistant } from "./aiDjAssistant.js";
@@ -92,7 +92,9 @@ export async function createServer(options: CreateServerOptions = {}) {
   fs.mkdirSync(config.ttsCacheDir, { recursive: true });
 
   const repo = options.repo ?? new StateRepository(config.dbPath);
-  const ncm = options.ncm ?? new NcmConnector(config.ncmBaseUrl, config.ncmCookie);
+  const ncm =
+    options.ncm ??
+    new NcmConnector(config.ncmBaseUrl, () => readCurrentNcmCookie());
   const wsHub = options.wsHub ?? new WsHub();
   const environmentService = options.environmentService ?? new OpenMeteoEnvironmentService();
   const orchestrator = new RadioOrchestrator(

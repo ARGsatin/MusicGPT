@@ -21,6 +21,36 @@ afterEach(async () => {
 });
 
 describe("API integration", () => {
+  it("returns an actionable NCM diagnostic when the dependency is unreachable", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-ncm-failure-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const ncm = new NcmConnector(
+      "http://mock-ncm",
+      "MUSIC_U=test",
+      async () => {
+        throw new TypeError("fetch failed");
+      }
+    );
+    const app = await createServer({
+      repo,
+      ncm,
+      importRetryIntervalMs: 60_000
+    });
+    servers.push(app);
+    const base = await app.listen({ port: 0, host: "127.0.0.1" });
+
+    const response = await fetch(`${base}/api/import/ncm`, {
+      method: "POST"
+    });
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      importedCount: 0,
+      errorCode: "ncm_unreachable",
+      error: expect.stringContaining("无法连接")
+    });
+  });
+
   it("syncs chat replan with now endpoint and ws stream", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));

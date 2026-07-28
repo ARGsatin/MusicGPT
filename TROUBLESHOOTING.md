@@ -35,8 +35,8 @@ Notes:
 - Port `3001` is already occupied (often by an existing NCM API process).
 
 ### Fix
-- Current script already handles this:
-  - If a healthy NCM API is already on `http://127.0.0.1:3001`, it reuses it and exits normally.
+- Current supervisor already handles this:
+  - If a healthy NCM API is already on `http://127.0.0.1:3001`, it reuses and monitors it.
 - If port is occupied by another process:
   1. stop the conflicting process, or
   2. set a different `NCM_PORT` and `NCM_BASE_URL`.
@@ -65,10 +65,20 @@ Notes:
 ## 4) Quick health checklist
 
 Run these checks in order:
-1. `npm run dev:ncm`
-2. `npm run ncm:check`
-3. `npm run dev:full`
+1. On Windows, double-click `一键启动.cmd` (recommended).
+2. Or run `npm run dev:full`; it performs ordered readiness and login checks.
+3. For isolated diagnosis, run `npm run dev:ncm`, then `npm run ncm:check`.
 4. Health endpoints:
    - `http://127.0.0.1:3001/login/status`
    - `http://127.0.0.1:8787/health`
+
+## 5) NCM import error meanings
+
+- `ncm_unreachable`: the local NCM API is down or unreachable; the one-click launcher repairs this state.
+- `ncm_cookie_missing`: `.env` has no usable Cookie; QR login starts during full startup.
+- `ncm_not_logged_in`: the account is anonymous or the login expired; refresh it with `npm run ncm:cookie`.
+- `ncm_likes_empty`: login works, but the account has no liked songs to import.
+- `ncm_track_details_empty`: liked IDs were returned but NCM returned no track metadata; restart the pinned API and retry.
+
+Transient `/likelist` failures are retried and never replace a valid Cookie. QR recovery is reserved for explicit authentication failures.
 
