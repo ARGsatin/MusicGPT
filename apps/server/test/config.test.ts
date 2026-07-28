@@ -1,10 +1,24 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const originalEnv = { ...process.env };
 const originalCwd = process.cwd();
+
+beforeEach(() => {
+  process.env = { ...originalEnv };
+  for (const name of [
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_MODEL"
+  ]) {
+    delete process.env[name];
+  }
+});
 
 afterEach(() => {
   process.chdir(originalCwd);

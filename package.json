@@ -16,7 +16,7 @@
     "dev:server": "npm run dev -w @musicgpt/server",
     "dev:web": "npm run dev -w @musicgpt/web",
     "build": "npm run build -w @musicgpt/server && npm run build -w @musicgpt/web",
-    "test": "npm run test -w @musicgpt/shared && npm run test -w @musicgpt/server",
+    "test": "npm run test -w @musicgpt/shared && npm run test -w @musicgpt/server && npm run test -w @musicgpt/web",
     "typecheck": "npm run typecheck -w @musicgpt/shared && npm run typecheck -w @musicgpt/server && npm run typecheck -w @musicgpt/web"
   },
   "devDependencies": {

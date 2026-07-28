@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import type {
@@ -8,6 +8,7 @@ import type {
   NowPlayingState,
   SystemStatus,
   TasteProfile,
+  TrackLyrics,
   WsPayload
 } from "@musicgpt/shared";
 import {
@@ -27,6 +28,7 @@ import {
   updateEnvironmentLocation
 } from "./api";
 import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
+import { findActiveLyricIndex } from "./lyrics";
 import { useWsStream } from "./useWsStream";
 
 function formatArtists(artists: string[] | undefined): string {
@@ -91,6 +93,336 @@ function formatDuration(value: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+const EMPTY_LYRIC_LINES: TrackLyrics["lines"] = [];
+
+const WeatherParticles = memo(function WeatherParticles() {
+  return (
+    <div className="weather-particles" aria-hidden="true">
+      {Array.from({ length: 24 }, (_, index) => (
+        <span key={index} />
+      ))}
+    </div>
+  );
+});
+
+const StationClock = memo(function StationClock({ isLive }: { isLive: boolean }) {
+  const [clock, setClock] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(new Date()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <section className="clock-stage" aria-label="On air status">
+      <div className="clock-card">
+        <p className="micro-label">Station time</p>
+        <h1>{formatClock(clock)}</h1>
+        <p className="date-line">{formatDate(clock)}</p>
+      </div>
+      <div className={isLive ? "live-signal is-live" : "live-signal"}>
+        <span aria-hidden="true" />
+        {isLive ? "ON AIR" : "OFFLINE"}
+      </div>
+    </section>
+  );
+});
+
+interface LyricsWindowProps {
+  activeIndex: number;
+  lyrics: TrackLyrics | undefined;
+}
+
+interface LyricLineRowProps {
+  isActive: boolean;
+  line: TrackLyrics["lines"][number];
+  pulse: number | undefined;
+}
+
+const LyricLineRow = memo(function LyricLineRow({ isActive, line, pulse }: LyricLineRowProps) {
+  return (
+    <div
+      className={isActive ? `lyric-line is-active pulse-${pulse ?? 0}` : "lyric-line"}
+      aria-current={isActive ? "true" : undefined}
+    >
+      <p className="lyric-original">{line.text}</p>
+      {line.translation ? <span className="lyric-translation">{line.translation}</span> : null}
+    </div>
+  );
+});
+
+const LyricsWindow = memo(function LyricsWindow({ activeIndex, lyrics }: LyricsWindowProps) {
+  const [pulseKey, setPulseKey] = useState(0);
+  const lyricsWindowRef = useRef<HTMLDivElement | null>(null);
+  const lines = lyrics?.lines ?? EMPTY_LYRIC_LINES;
+
+  useEffect(() => {
+    if (activeIndex < 0) {
+      return undefined;
+    }
+    setPulseKey((key) => key + 1);
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        lyricsWindowRef.current?.querySelector('[aria-current="true"]')?.scrollIntoView({
+          block: "center",
+          behavior: "smooth"
+        });
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeIndex, lyrics?.trackId]);
+
+  if (lyrics?.pureMusic) {
+    return (
+      <div className="lyrics-window">
+        <div className="lyric-line pure-music is-active">Pure music, please enjoy</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="lyrics-window" ref={lyricsWindowRef}>
+      {lines.length > 0 ? (
+        lines.map((line, index) => {
+          const isActive = index === activeIndex;
+          return (
+            <LyricLineRow
+              key={`${line.timeMs}-${line.text}`}
+              isActive={isActive}
+              line={line}
+              pulse={isActive ? pulseKey % 2 : undefined}
+            />
+          );
+        })
+      ) : (
+        <div className="lyric-line pure-music">Waiting for lyrics</div>
+      )}
+    </div>
+  );
+});
+
+interface MessageListProps {
+  chatLoading: boolean;
+  messages: ChatMessage[];
+  onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => Promise<void>;
+  suggestionLoadingId: string | null;
+}
+
+const MessageList = memo(function MessageList({
+  chatLoading,
+  messages,
+  onPlaySuggestion,
+  suggestionLoadingId
+}: MessageListProps) {
+  const messageThreadRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const thread = messageThreadRef.current;
+    if (!thread) {
+      return;
+    }
+    thread.scrollTop = thread.scrollHeight;
+  }, [messages.length, chatLoading]);
+
+  return (
+    <div className="message-thread" ref={messageThreadRef}>
+      {messages.map((message, index) => (
+        <div
+          className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
+          key={`${message.at}-${index}`}
+        >
+          {message.role === "assistant" ? (
+            <div className="avatar small dj-avatar" aria-hidden="true">
+              <img alt="" src={aiDjAvatarUrl} />
+            </div>
+          ) : null}
+          <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
+            <p>{message.text}</p>
+            {message.role === "assistant" && message.trackSuggestion ? (
+              <button
+                className="track-suggestion"
+                type="button"
+                onClick={() => void onPlaySuggestion(message.trackSuggestion!)}
+                disabled={Boolean(suggestionLoadingId)}
+              >
+                <span className="suggestion-cover" aria-hidden="true">
+                  {message.trackSuggestion.track.coverUrl ? (
+                    <img alt="" src={message.trackSuggestion.track.coverUrl} />
+                  ) : (
+                    "♪"
+                  )}
+                </span>
+                <span className="suggestion-copy">
+                  <strong>{message.trackSuggestion.track.title}</strong>
+                  <em>{formatArtists(message.trackSuggestion.track.artists)}</em>
+                  <small>{message.trackSuggestion.reason}</small>
+                </span>
+                <span className="suggestion-action">
+                  {suggestionLoadingId === message.trackSuggestion.id ? "切换中" : "切到这首"}
+                </span>
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+interface PlayerStackProps {
+  now: NowPlayingState;
+  onFeedback: (type: "skip" | "like" | "replay" | "complete") => Promise<void>;
+  onPlaybackStateChange: (paused: boolean) => void;
+  onRequestNext: (recordSkip?: boolean) => Promise<void>;
+  onTrackEnded: () => Promise<void>;
+}
+
+const PlayerStack = memo(function PlayerStack({
+  now,
+  onFeedback,
+  onPlaybackStateChange,
+  onRequestNext,
+  onTrackEnded
+}: PlayerStackProps) {
+  const [playbackPaused, setPlaybackPaused] = useState(true);
+  const [audioTime, setAudioTime] = useState(0);
+  const [audioDuration, setAudioDuration] = useState(0);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const lyricLines = now.lyrics?.lines ?? EMPTY_LYRIC_LINES;
+  const activeLyricIndex = useMemo(
+    () => findActiveLyricIndex(lyricLines, audioTime * 1000),
+    [audioTime, lyricLines]
+  );
+
+  useEffect(() => {
+    setAudioTime(0);
+    setAudioDuration(0);
+  }, [now.track]);
+
+  const onTogglePlayback = async () => {
+    if (!audioRef.current) {
+      return;
+    }
+    if (playbackPaused) {
+      try {
+        await audioRef.current.play();
+        setPlaybackPaused(false);
+        onPlaybackStateChange(false);
+      } catch {
+        setPlaybackPaused(true);
+      }
+      return;
+    }
+    audioRef.current.pause();
+    setPlaybackPaused(true);
+    onPlaybackStateChange(true);
+  };
+
+  const onSeek = (value: number) => {
+    if (!audioRef.current) {
+      return;
+    }
+    audioRef.current.currentTime = value;
+    setAudioTime(value);
+  };
+
+  const onReplay = async () => {
+    await onFeedback("replay");
+    if (!audioRef.current) {
+      return;
+    }
+    audioRef.current.currentTime = 0;
+    await audioRef.current.play().catch(() => undefined);
+  };
+
+  return (
+    <section className="player-stack" aria-label="Audio and lyrics">
+      <article className="player-card">
+        <header className="card-header">
+          <div>
+            <p className="micro-label">Now playing</p>
+            <h2>{now.track?.title ?? "等待开播"}</h2>
+          </div>
+          <span className="status-chip">{playbackPaused ? "PAUSED" : "PLAYING"}</span>
+        </header>
+        <div className="player-body">
+          <div className="cover-frame" aria-hidden="true">
+            {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>NW</span>}
+          </div>
+          <div className="track-deck">
+            <p className="artist-line">{formatArtists(now.track?.artists)}</p>
+            <div className="equalizer" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+              <i />
+              <i />
+            </div>
+            <div className="controls" aria-label="Playback controls">
+              <button type="button" aria-label="Replay" onClick={() => void onReplay()}>
+                <span aria-hidden="true">|&lt;</span>
+              </button>
+              <button
+                type="button"
+                aria-label="Play or pause"
+                className="control-primary"
+                onClick={() => void onTogglePlayback()}
+              >
+                <span aria-hidden="true">{playbackPaused ? ">" : "||"}</span>
+              </button>
+              <button type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
+                <span aria-hidden="true">&gt;|</span>
+              </button>
+              <button type="button" aria-label="Like" onClick={() => void onFeedback("like")}>
+                <span aria-hidden="true">♡</span>
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="progress-row">
+          <span>{formatDuration(audioTime)}</span>
+          <input
+            type="range"
+            min={0}
+            max={audioDuration || 0}
+            value={Math.min(audioTime, audioDuration || 0)}
+            step={1}
+            onChange={(event) => onSeek(Number(event.currentTarget.value))}
+            aria-label="Seek current track"
+          />
+          <span>{formatDuration(audioDuration)}</span>
+        </div>
+        <audio
+          ref={audioRef}
+          autoPlay
+          src={now.track?.songUrl}
+          onEnded={() => void onTrackEnded()}
+          onPlay={() => setPlaybackPaused(false)}
+          onPause={() => setPlaybackPaused(true)}
+          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+          onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
+          className="audio"
+        />
+      </article>
+
+      <article className="lyrics-card" aria-label="Lyrics preview">
+        <header className="card-header compact">
+          <div>
+            <p className="micro-label">Lyrics</p>
+            <h2>Scrolling window</h2>
+          </div>
+          <span className="status-chip muted">{now.lyrics?.pureMusic ? "PURE" : "SYNC"}</span>
+        </header>
+        <LyricsWindow activeIndex={activeLyricIndex} lyrics={now.lyrics} />
+      </article>
+    </section>
+  );
+});
+
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
   const [taste, setTaste] = useState<TasteProfile | null>(null);
@@ -108,15 +440,7 @@ export default function App() {
   const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [v15Error, setV15Error] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [clock, setClock] = useState(() => new Date());
-  const [playbackPaused, setPlaybackPaused] = useState(true);
-  const [audioTime, setAudioTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
   const [queueOpen, setQueueOpen] = useState(false);
-  const [lyricPulseKey, setLyricPulseKey] = useState(0);
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const activeLyricRef = useRef<HTMLDivElement | null>(null);
-  const messageThreadRef = useRef<HTMLDivElement>(null);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
 
@@ -148,14 +472,7 @@ export default function App() {
   }, [refresh]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setClock(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     currentTrackRef.current = now.track;
-    setAudioTime(0);
-    setAudioDuration(0);
   }, [now.track]);
 
   const onWsPayload = useCallback((payload: WsPayload) => {
@@ -211,7 +528,7 @@ export default function App() {
     }
   };
 
-  const onPlaySuggestion = async (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => {
+  const onPlaySuggestion = useCallback(async (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => {
     if (suggestionLoadingId) {
       return;
     }
@@ -226,7 +543,7 @@ export default function App() {
     } finally {
       setSuggestionLoadingId(null);
     }
-  };
+  }, [refreshTaste, suggestionLoadingId]);
 
   const runWithAdvanceLock = useCallback(async (job: () => Promise<void>) => {
     if (advanceInFlightRef.current) {
@@ -240,7 +557,7 @@ export default function App() {
     }
   }, []);
 
-  const onRequestNext = async (recordSkip = false) => {
+  const onRequestNext = useCallback(async (recordSkip = false) => {
     await runWithAdvanceLock(async () => {
       const currentTrack = currentTrackRef.current;
       if (recordSkip && currentTrack) {
@@ -250,9 +567,9 @@ export default function App() {
       setNow(response.now);
       await refreshTaste();
     });
-  };
+  }, [refreshTaste, runWithAdvanceLock]);
 
-  const onTrackEnded = async () => {
+  const onTrackEnded = useCallback(async () => {
     await runWithAdvanceLock(async () => {
       const currentTrack = currentTrackRef.current;
       if (!currentTrack) {
@@ -263,50 +580,24 @@ export default function App() {
       setNow(response.now);
       await refreshTaste();
     });
-  };
+  }, [refreshTaste, runWithAdvanceLock]);
 
-  const onFeedback = async (type: "skip" | "like" | "replay" | "complete") => {
-    if (!now.track) {
+  const onFeedback = useCallback(async (type: "skip" | "like" | "replay" | "complete") => {
+    const currentTrack = currentTrackRef.current;
+    if (!currentTrack) {
       return;
     }
-    await sendFeedback({ type, trackId: now.track.id });
+    await sendFeedback({ type, trackId: currentTrack.id });
     if (type === "skip") {
       await onRequestNext();
       return;
     }
-    if (type === "replay" && audioRef.current) {
-      audioRef.current.currentTime = 0;
-      await audioRef.current.play().catch(() => undefined);
-    }
     await refreshTaste();
-  };
+  }, [onRequestNext, refreshTaste]);
 
-  const onTogglePlayback = async () => {
-    if (!audioRef.current) {
-      return;
-    }
-    if (playbackPaused) {
-      try {
-        await audioRef.current.play();
-        setPlaybackPaused(false);
-        setNow((current) => ({ ...current, paused: false }));
-      } catch {
-        setPlaybackPaused(true);
-      }
-      return;
-    }
-    audioRef.current.pause();
-    setPlaybackPaused(true);
-    setNow((current) => ({ ...current, paused: true }));
-  };
-
-  const onSeek = (value: number) => {
-    if (!audioRef.current) {
-      return;
-    }
-    audioRef.current.currentTime = value;
-    setAudioTime(value);
-  };
+  const onPlaybackStateChange = useCallback((paused: boolean) => {
+    setNow((current) => (current.paused === paused ? current : { ...current, paused }));
+  }, []);
 
   const onImportNcm = async () => {
     setImporting(true);
@@ -381,78 +672,29 @@ export default function App() {
   );
 
   const trackTitle = now.track?.title ?? "等待开播";
-  const artists = formatArtists(now.track?.artists);
   const isLive = Boolean(systemStatus?.ncmReachable);
   const queuePreview = now.queue.slice(0, 10);
   const nextTrack = now.queue[0]?.track;
-  const lyricLines = now.lyrics?.lines ?? [];
-  const activeLyricIndex = useMemo(() => {
-    if (lyricLines.length === 0) {
-      return -1;
-    }
-    const currentMs = audioTime * 1000;
-    let activeIndex = 0;
-    for (let index = 0; index < lyricLines.length; index += 1) {
-      const line = lyricLines[index];
-      if (!line) {
-        continue;
-      }
-      if (line.timeMs <= currentMs + 120) {
-        activeIndex = index;
-      } else {
-        break;
-      }
-    }
-    return activeIndex;
-  }, [audioTime, lyricLines]);
-
-  useEffect(() => {
-    if (activeLyricIndex < 0) {
-      return undefined;
-    }
-    setLyricPulseKey((key) => key + 1);
-    let secondFrame = 0;
-    const firstFrame = window.requestAnimationFrame(() => {
-      secondFrame = window.requestAnimationFrame(() => {
-        activeLyricRef.current?.scrollIntoView({
-          block: "center",
-          behavior: "smooth"
-        });
-      });
-    });
-    return () => {
-      window.cancelAnimationFrame(firstFrame);
-      window.cancelAnimationFrame(secondFrame);
-    };
-  }, [activeLyricIndex, now.lyrics?.trackId]);
-
-  const visibleMessages =
-    messages.length > 0
-      ? messages
-      : [
-          {
-            role: "assistant" as const,
-            text: now.djScript?.text ?? "Neonwave is live. Describe a mood, a scene, or ask me to dissect the current track.",
-            at: new Date().toISOString()
-          }
-        ];
-
-  useEffect(() => {
-    const thread = messageThreadRef.current;
-    if (!thread) {
-      return;
-    }
-    thread.scrollTop = thread.scrollHeight;
-  }, [visibleMessages.length, chatLoading]);
+  const visibleMessages = useMemo(
+    () =>
+      messages.length > 0
+        ? messages
+        : [
+            {
+              role: "assistant" as const,
+              text:
+                now.djScript?.text ??
+                "Neonwave is live. Describe a mood, a scene, or ask me to dissect the current track.",
+              at: "station-intro"
+            }
+          ],
+    [messages, now.djScript?.text]
+  );
 
   return (
     <main className={`radio-shell weather-${environment?.weather ?? "unknown"}`}>
       <div className="breathing-light" aria-hidden="true" />
-      <div className="weather-particles" aria-hidden="true">
-        {Array.from({ length: 24 }, (_, index) => (
-          <span key={index} />
-        ))}
-      </div>
+      <WeatherParticles />
       <header className="topbar" aria-label="Neonwave FM station header">
         <div className="brand">
           <div className="avatar brand-avatar" aria-hidden="true">
@@ -487,124 +729,16 @@ export default function App() {
         </nav>
       </header>
 
-      <section className="clock-stage" aria-label="On air status">
-        <div className="clock-card">
-          <p className="micro-label">Station time</p>
-          <h1>{formatClock(clock)}</h1>
-          <p className="date-line">{formatDate(clock)}</p>
-        </div>
-        <div className={isLive ? "live-signal is-live" : "live-signal"}>
-          <span aria-hidden="true" />
-          {isLive ? "ON AIR" : "OFFLINE"}
-        </div>
-      </section>
+      <StationClock isLive={isLive} />
 
       <section className="console-grid" aria-label="Neonwave main console">
-        <section className="player-stack" aria-label="Audio and lyrics">
-          <article className="player-card">
-            <header className="card-header">
-              <div>
-                <p className="micro-label">Now playing</p>
-                <h2>{trackTitle}</h2>
-              </div>
-              <span className="status-chip">{playbackPaused ? "PAUSED" : "PLAYING"}</span>
-            </header>
-            <div className="player-body">
-              <div className="cover-frame" aria-hidden="true">
-                {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>NW</span>}
-              </div>
-              <div className="track-deck">
-                <p className="artist-line">{artists}</p>
-                <div className="equalizer" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                </div>
-                <div className="controls" aria-label="Playback controls">
-                  <button type="button" aria-label="Replay" onClick={() => void onFeedback("replay")}>
-                    <span aria-hidden="true">|&lt;</span>
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Play or pause"
-                    className="control-primary"
-                    onClick={() => void onTogglePlayback()}
-                  >
-                    <span aria-hidden="true">{playbackPaused ? ">" : "||"}</span>
-                  </button>
-                  <button type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
-                    <span aria-hidden="true">&gt;|</span>
-                  </button>
-                  <button type="button" aria-label="Like" onClick={() => void onFeedback("like")}>
-                    <span aria-hidden="true">♡</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <div className="progress-row">
-              <span>{formatDuration(audioTime)}</span>
-              <input
-                type="range"
-                min={0}
-                max={audioDuration || 0}
-                value={Math.min(audioTime, audioDuration || 0)}
-                step={1}
-                onChange={(event) => onSeek(Number(event.currentTarget.value))}
-                aria-label="Seek current track"
-              />
-              <span>{formatDuration(audioDuration)}</span>
-            </div>
-            <audio
-              ref={audioRef}
-              autoPlay
-              src={now.track?.songUrl}
-              onEnded={() => void onTrackEnded()}
-              onPlay={() => setPlaybackPaused(false)}
-              onPause={() => setPlaybackPaused(true)}
-              onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
-              onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
-              className="audio"
-            />
-          </article>
-
-          <article className="lyrics-card" aria-label="Lyrics preview">
-            <header className="card-header compact">
-              <div>
-                <p className="micro-label">Lyrics</p>
-                <h2>Scrolling window</h2>
-              </div>
-              <span className="status-chip muted">{now.lyrics?.pureMusic ? "PURE" : "SYNC"}</span>
-            </header>
-            <div className="lyrics-window">
-              {now.lyrics?.pureMusic ? (
-                <div className="lyric-line pure-music is-active">Pure music, please enjoy</div>
-              ) : lyricLines.length > 0 ? (
-                lyricLines.map((line, index) => {
-                  const isActive = index === activeLyricIndex;
-                  return (
-                    <div
-                      key={`${line.timeMs}-${line.text}`}
-                      ref={isActive ? activeLyricRef : undefined}
-                      className={
-                        isActive
-                          ? `lyric-line is-active pulse-${lyricPulseKey % 2}`
-                          : "lyric-line"
-                      }
-                      aria-current={isActive ? "true" : undefined}
-                    >
-                      <p className="lyric-original">{line.text}</p>
-                      {line.translation ? <span className="lyric-translation">{line.translation}</span> : null}
-                    </div>
-                  );
-                })
-              ) : (
-                <div className="lyric-line pure-music">Waiting for lyrics</div>
-              )}
-            </div>
-          </article>
-        </section>
+        <PlayerStack
+          now={now}
+          onFeedback={onFeedback}
+          onPlaybackStateChange={onPlaybackStateChange}
+          onRequestNext={onRequestNext}
+          onTrackEnded={onTrackEnded}
+        />
 
         <article className="dj-console" aria-label="GPT DJ conversation">
           <header className="card-header">
@@ -625,47 +759,12 @@ export default function App() {
               <span className="context-chip">女声</span>
             </div>
           </header>
-          <div className="message-thread" ref={messageThreadRef}>
-            {visibleMessages.map((message, index) => (
-              <div
-                className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
-                key={`${message.at}-${index}`}
-              >
-                {message.role === "assistant" ? (
-                  <div className="avatar small dj-avatar" aria-hidden="true">
-                    <img alt="" src={aiDjAvatarUrl} />
-                  </div>
-                ) : null}
-                <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
-                  <p>{message.text}</p>
-                  {message.role === "assistant" && message.trackSuggestion ? (
-                    <button
-                      className="track-suggestion"
-                      type="button"
-                      onClick={() => void onPlaySuggestion(message.trackSuggestion!)}
-                      disabled={Boolean(suggestionLoadingId)}
-                    >
-                      <span className="suggestion-cover" aria-hidden="true">
-                        {message.trackSuggestion.track.coverUrl ? (
-                          <img alt="" src={message.trackSuggestion.track.coverUrl} />
-                        ) : (
-                          "♪"
-                        )}
-                      </span>
-                      <span className="suggestion-copy">
-                        <strong>{message.trackSuggestion.track.title}</strong>
-                        <em>{formatArtists(message.trackSuggestion.track.artists)}</em>
-                        <small>{message.trackSuggestion.reason}</small>
-                      </span>
-                      <span className="suggestion-action">
-                        {suggestionLoadingId === message.trackSuggestion.id ? "切换中" : "切到这首"}
-                      </span>
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
+          <MessageList
+            chatLoading={chatLoading}
+            messages={visibleMessages}
+            onPlaySuggestion={onPlaySuggestion}
+            suggestionLoadingId={suggestionLoadingId}
+          />
           <p className="now-caption">Now playing: {trackTitle}</p>
           {now.djScript?.audioUrl ? <audio controls src={now.djScript.audioUrl} className="dj-audio" /> : null}
           <div className="chat-actions" aria-label="GPT DJ quick actions">
