@@ -1,12 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pixel AI DJ avatar">
-  <rect width="64" height="64" fill="#050607"/>
-  <path fill="#101318" d="M8 12h48v40H8z"/>
-  <path fill="#202832" d="M12 8h40v8h4v36h-8v4H16v-4H8V16h4z"/>
-  <path fill="#31efb2" d="M16 16h32v4h4v24h-4v4H16v-4h-4V20h4z"/>
-  <path fill="#07100d" d="M20 20h24v4h4v16h-4v4H20v-4h-4V24h4z"/>
-  <path fill="#f4f1ea" d="M24 28h8v8h-8zm16 0h4v8h-8v-8z"/>
-  <path fill="#31efb2" d="M28 40h8v4h-8zm-8-16h4v4h-4zm24 0h4v4h-4z"/>
-  <path fill="#d8c88c" d="M12 28H8v12h4zm44 0h-4v12h4z"/>
-  <path fill="#615cff" d="M20 52h24v4H20z"/>
-  <path fill="#f4f1ea" d="M28 8h8v4h-8z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="MusicGPT AI DJ">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#6d7bff"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#eef1ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#bg)"/>
+  <circle cx="32" cy="10" r="2.6" fill="#ffffff"/>
+  <rect x="31" y="11.5" width="2" height="6" rx="1" fill="#ffffff" opacity="0.9"/>
+  <rect x="15" y="18" width="34" height="28" rx="12" fill="url(#face)"/>
+  <rect x="9" y="26" width="7" height="14" rx="3.5" fill="#ffffff" opacity="0.92"/>
+  <rect x="48" y="26" width="7" height="14" rx="3.5" fill="#ffffff" opacity="0.92"/>
+  <circle cx="25" cy="31" r="3.6" fill="#5b6cff"/>
+  <circle cx="39" cy="31" r="3.6" fill="#5b6cff"/>
+  <circle cx="26.1" cy="29.9" r="1.1" fill="#ffffff"/>
+  <circle cx="40.1" cy="29.9" r="1.1" fill="#ffffff"/>
+  <path d="M25 38 q7 5 14 0" fill="none" stroke="#8b5cf6" stroke-width="2.4" stroke-linecap="round"/>
 </svg>
