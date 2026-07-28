@@ -161,6 +161,32 @@ export class RadioOrchestrator {
     return { messages: this.repo.getRecentMessages(this.chatHistoryLimit()) };
   }
 
+  async synthesizeChatMessage(messageId: number): Promise<
+    | { status: "ok"; messageId: number; audioUrl: string }
+    | { status: "not_found" | "not_assistant" | "unavailable" }
+  > {
+    const message = this.repo.getChatMessage(messageId);
+    if (!message) {
+      return { status: "not_found" };
+    }
+    if (message.role !== "assistant") {
+      return { status: "not_assistant" };
+    }
+    const speech = await this.ttsPipeline.synthesizeText(message.text);
+    if (!speech.audioUrl) {
+      return { status: "unavailable" };
+    }
+    this.repo.saveChatSpeech(messageId, {
+      audioUrl: speech.audioUrl,
+      profileKey: speech.profileKey
+    });
+    return {
+      status: "ok",
+      messageId,
+      audioUrl: speech.audioUrl
+    };
+  }
+
   clearChatHistory(): { ok: true; messages: [] } {
     this.repo.clearChatMessages();
     return { ok: true, messages: [] };
@@ -292,12 +318,12 @@ export class RadioOrchestrator {
         if (this.state.track) {
           await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
         }
-        return this.reply("skip", "收到，切到下一首。", await this.nextTrack());
+        return this.reply("skip", "好呀，下一首来啦～", await this.nextTrack());
       case "pause":
         this.state.paused = true;
         this.repo.saveNowPlaying(this.state);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("pause", "已暂停。你说继续，我就把夜色重新推上轨道。", this.state);
+        return this.reply("pause", "好哦，先帮你暂停啦，想继续时喊我一声就好～", this.state);
       case "resume":
         this.state.paused = false;
         if (!this.state.track) {
@@ -305,12 +331,12 @@ export class RadioOrchestrator {
         }
         this.repo.saveNowPlaying(this.state);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("resume", "继续播放。唱针已回到它该去的地方。", this.state);
+        return this.reply("resume", "继续播放啦，接着听吧～", this.state);
       case "replan":
         this.desiredMood = intent.desiredMood;
         await this.nextTrack(true);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("replan", `已切到 ${intent.desiredMood} 风格，我继续按这个方向播。`, this.state);
+        return this.reply("replan", `好呀，已经换成 ${intent.desiredMood} 风格啦，我继续按这个方向放歌～`, this.state);
       case "comment_current":
         return this.commentCurrentTrack(context);
       case "play_specific":
@@ -357,7 +383,11 @@ export class RadioOrchestrator {
 
   private buildAiContext(): AiDjContext {
     return {
-      messages: this.repo.getRecentMessages(this.chatHistoryLimit()),
+      messages: this.repo.getRecentMessages(this.chatHistoryLimit()).map(({ role, text, at }) => ({
+        role,
+        text,
+        at
+      })),
       nowTrack: this.state.track,
       queue: this.state.queue.slice(0, 10),
       taste: this.repo.getTasteProfile()
@@ -373,14 +403,14 @@ export class RadioOrchestrator {
     const matches = await this.ncm.searchSongs(query);
     const target = matches[0];
     if (!target) {
-      return this.reply("noop", `我没搜到《${query}》。换个歌名或歌手，我再找。`, this.state);
+      return this.reply("noop", `唔，这次没搜到《${query}》～换个歌名或歌手告诉我，我再帮你找找！`, this.state);
     }
     const comment = await this.aiDjAssistant
       .commentTrack(target, this.buildAiContext(), `direct song request: ${query}`)
       .catch(() => fallbackComment(target));
     return this.reply(
       "play_specific",
-      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n${comment}`,
       this.state,
       this.createTrackSuggestion(target, `direct song request: ${query}`)
     );
@@ -400,7 +430,11 @@ export class RadioOrchestrator {
     }
 
     if (candidates.length === 0) {
-      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，比如年代、声线、节奏或情绪深浅。", this.state);
+      return this.reply(
+        "noop",
+        "这次还没找到特别合适的歌呀。再给我一点关键词吧，比如年代、声线、节奏或心情～",
+        this.state
+      );
     }
 
     const selection = await this.aiDjAssistant
@@ -408,7 +442,7 @@ export class RadioOrchestrator {
       .catch((): TrackSelection => ({ trackId: candidates[0]?.id, reason: "候选里它最贴近这次描述。" }));
     const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
     if (!target) {
-      return this.reply("noop", "我暂时没找到够贴的候选。再给我一点关键词，我继续调频。", this.state);
+      return this.reply("noop", "这次还没找到特别合适的歌呀～再给我一点关键词，我继续帮你挑！", this.state);
     }
 
     const comment = await this.aiDjAssistant
@@ -420,7 +454,7 @@ export class RadioOrchestrator {
       .catch(() => fallbackComment(target));
     return this.reply(
       "play_by_description",
-      `我会选《${target.title}》- ${target.artists.join(" / ")}。想听就点这张卡。\n${comment}`,
+      `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n${comment}`,
       this.state,
       this.createTrackSuggestion(target, selection.reason || `request description: ${intent.description}`)
     );
@@ -428,7 +462,7 @@ export class RadioOrchestrator {
 
   private async commentCurrentTrack(context: AiDjContext): Promise<ChatResponse> {
     if (!this.state.track) {
-      return this.reply("comment_current", "现在还没有正在播放的歌。先点一首，我们再认真拆它的骨相。", this.state);
+      return this.reply("comment_current", "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！", this.state);
     }
     const reply = await this.aiDjAssistant.commentCurrent(context).catch(() => fallbackComment(this.state.track!));
     return this.reply("comment_current", reply, this.state);
@@ -663,12 +697,12 @@ function scoreTrackForDescription(entry: { track: Track; playCount: number }, de
 }
 
 function aiNotConfiguredNotice(fallback: string): string {
-  return `DeepSeek 还没有接入：未检测到 DEEPSEEK_API_KEY 或 OPENAI_API_KEY。现在先用本地 DJ 模式回复。\n${fallback}`;
+  return `DeepSeek 还没连接好（未检测到 DEEPSEEK_API_KEY 或 OPENAI_API_KEY），我先用本地 DJ 模式陪你聊～\n${fallback}`;
 }
 
 function aiFallbackNotice(provider: string, error: unknown, fallback: string): string {
   const label = provider === "deepseek" ? "DeepSeek" : "AI";
-  return `${label} 调用失败，已临时切到本地 DJ 模式：${summarizeAiError(error)}\n${fallback}`;
+  return `${label} 刚刚开了个小差，已经切到本地 DJ 模式啦：${summarizeAiError(error)}\n${fallback}`;
 }
 
 function summarizeAiError(error: unknown): string {

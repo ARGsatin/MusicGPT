@@ -26,6 +26,10 @@ const chatSchema = z.object({
   message: z.string().min(1)
 });
 
+const chatSpeechParamsSchema = z.object({
+  messageId: z.coerce.number().int().positive()
+});
+
 const nextSchema = z
   .object({
     forceReplan: z.boolean().optional()
@@ -162,6 +166,27 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.get("/api/chat/history", async () => orchestrator.getChatHistory());
+
+  app.post("/api/chat/:messageId/speech", async (request, reply) => {
+    const parsed = chatSpeechParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const result = await orchestrator.synthesizeChatMessage(parsed.data.messageId);
+    switch (result.status) {
+      case "ok":
+        return {
+          messageId: result.messageId,
+          audioUrl: result.audioUrl
+        };
+      case "not_found":
+        return reply.status(404).send({ error: "chat_message_not_found" });
+      case "not_assistant":
+        return reply.status(422).send({ error: "chat_message_not_assistant" });
+      case "unavailable":
+        return reply.status(503).send({ error: "speech_unavailable" });
+    }
+  });
 
   app.delete("/api/chat/history", async () => orchestrator.clearChatHistory());
 

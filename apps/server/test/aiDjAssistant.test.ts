@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { OpenAiDjAssistant, fallbackChatReply, fallbackClassify, fallbackComment } from "../src/aiDjAssistant.js";
+import {
+  AI_DJ_PERSONA_STYLE,
+  OpenAiDjAssistant,
+  fallbackChatReply,
+  fallbackClassify,
+  fallbackComment
+} from "../src/aiDjAssistant.js";
 
 describe("AI DJ assistant fallback comments", () => {
   it("uses visibly different fallback reviews for different moods", () => {
@@ -30,6 +36,25 @@ describe("AI DJ assistant fallback comments", () => {
     expect(first).not.toBe(second);
     expect(first.length).toBeLessThan(80);
     expect(second.length).toBeLessThan(80);
+  });
+
+  it("keeps the assistant lively, gentle, and cute without brooding clichés", () => {
+    const comments = [
+      fallbackComment({ id: 11, title: "Soft Steps", artists: ["Mori"], moodTag: "calm" }),
+      fallbackComment({ id: 12, title: "Sunny Side", artists: ["Lumi"], moodTag: "energy" }),
+      fallbackComment({ id: 13, title: "Warm Hug", artists: ["Nana"], moodTag: "warm" })
+    ];
+    const chats = [
+      fallbackChatReply("陪我聊聊", { messages: [], queue: [] }),
+      fallbackChatReply("我想听冷一点", { messages: [], queue: [] })
+    ];
+    const replies = [...comments, ...chats].join("\n");
+
+    expect(AI_DJ_PERSONA_STYLE).toContain("活泼、温柔、可爱");
+    expect(AI_DJ_PERSONA_STYLE).toContain("邻家女孩");
+    expect(AI_DJ_PERSONA_STYLE).toContain("不要故作深沉");
+    expect(replies).toMatch(/[呀啦诶～]/);
+    expect(replies).not.toMatch(/深沉|灵魂|夜色|唱针|灰质|骨相/);
   });
 
   it("does not treat explicit no-playback chat as a song request", () => {

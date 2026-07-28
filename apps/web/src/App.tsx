@@ -21,6 +21,7 @@ import {
   fetchTaste,
   importRecommendations,
   importFromNcm,
+  generateChatSpeech,
   playSuggestedTrack,
   requestNext,
   sendChat,
@@ -38,6 +39,12 @@ import {
   normalizeVolumeLevel,
   savePlayerVolume
 } from "./volume";
+import {
+  getDuckedPlayerVolume,
+  loadAutoSpeak,
+  saveAutoSpeak,
+  SpeechPlaybackController
+} from "./speech";
 
 function formatArtists(artists: string[] | undefined): string {
   if (!artists || artists.length === 0) {
@@ -216,16 +223,24 @@ const LyricsWindow = memo(function LyricsWindow({ activeIndex, lyrics }: LyricsW
 });
 
 interface MessageListProps {
+  activeSpeechKey: string | undefined;
   chatLoading: boolean;
+  failedSpeechId: number | null;
+  loadingSpeechId: number | null;
   messages: ChatMessage[];
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => Promise<void>;
+  onSpeakMessage: (message: ChatMessage) => Promise<void>;
   suggestionLoadingId: string | null;
 }
 
 const MessageList = memo(function MessageList({
+  activeSpeechKey,
   chatLoading,
+  failedSpeechId,
+  loadingSpeechId,
   messages,
   onPlaySuggestion,
+  onSpeakMessage,
   suggestionLoadingId
 }: MessageListProps) {
   const messageThreadRef = useRef<HTMLDivElement>(null);
@@ -251,7 +266,33 @@ const MessageList = memo(function MessageList({
             </div>
           ) : null}
           <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
-            <p>{message.text}</p>
+            <div className="message-copy-row">
+              <p>{message.text}</p>
+              {message.role === "assistant" && message.id ? (
+                <button
+                  className="speech-button"
+                  type="button"
+                  aria-label={
+                    activeSpeechKey === `chat:${message.id}`
+                      ? "停止朗读"
+                      : failedSpeechId === message.id
+                        ? "重试朗读"
+                        : "朗读这条回复"
+                  }
+                  aria-pressed={activeSpeechKey === `chat:${message.id}`}
+                  onClick={() => void onSpeakMessage(message)}
+                  disabled={loadingSpeechId === message.id}
+                >
+                  {loadingSpeechId === message.id
+                    ? "…"
+                    : activeSpeechKey === `chat:${message.id}`
+                      ? "■"
+                      : failedSpeechId === message.id
+                        ? "↻"
+                        : "▶"}
+                </button>
+              ) : null}
+            </div>
             {message.role === "assistant" && message.trackSuggestion ? (
               <button
                 className="track-suggestion"
@@ -289,6 +330,7 @@ interface PlayerStackProps {
   onPlaybackStateChange: (paused: boolean) => void;
   onRequestNext: (recordSkip?: boolean) => Promise<void>;
   onTrackEnded: () => Promise<void>;
+  speechActive: boolean;
 }
 
 const PlayerStack = memo(function PlayerStack({
@@ -296,7 +338,8 @@ const PlayerStack = memo(function PlayerStack({
   onFeedback,
   onPlaybackStateChange,
   onRequestNext,
-  onTrackEnded
+  onTrackEnded,
+  speechActive
 }: PlayerStackProps) {
   const [playbackPaused, setPlaybackPaused] = useState(true);
   const [audioTime, setAudioTime] = useState(0);
@@ -319,10 +362,10 @@ const PlayerStack = memo(function PlayerStack({
 
   useEffect(() => {
     if (audioRef.current) {
-      applyPlayerVolume(audioRef.current, playerVolume);
+      applyPlayerVolume(audioRef.current, getDuckedPlayerVolume(playerVolume, speechActive));
     }
     savePlayerVolume(getBrowserStorage(), playerVolume);
-  }, [playerVolume]);
+  }, [playerVolume, speechActive]);
 
   const onTogglePlayback = async () => {
     if (!audioRef.current) {
@@ -499,6 +542,12 @@ export default function App() {
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatClearing, setChatClearing] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState(() => loadAutoSpeak(getBrowserStorage()));
+  const [speechActive, setSpeechActive] = useState(false);
+  const [activeSpeechKey, setActiveSpeechKey] = useState<string | undefined>(undefined);
+  const [loadingSpeechId, setLoadingSpeechId] = useState<number | null>(null);
+  const [failedSpeechId, setFailedSpeechId] = useState<number | null>(null);
+  const [speechNotice, setSpeechNotice] = useState<string | null>(null);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -509,6 +558,10 @@ export default function App() {
   const [queueOpen, setQueueOpen] = useState(false);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
+  const speechAudioRef = useRef<HTMLAudioElement>(null);
+  const speechControllerRef = useRef<SpeechPlaybackController | null>(null);
+  const speechRequestTokenRef = useRef(0);
+  const autoSpeakRef = useRef(autoSpeak);
 
   const refresh = useCallback(async () => {
     const [nowState, tasteProfile, status, chatHistory, environmentContext, settings] = await Promise.all([
@@ -541,6 +594,100 @@ export default function App() {
     currentTrackRef.current = now.track;
   }, [now.track]);
 
+  useEffect(() => {
+    const audio = speechAudioRef.current;
+    if (!audio) {
+      return;
+    }
+    const controller = new SpeechPlaybackController(audio, {
+      onActiveChange: setSpeechActive,
+      onPlayingKeyChange: setActiveSpeechKey,
+      onPlaybackError: (job) => {
+        if (job.kind === "chat") {
+          const messageId = Number(job.key.split(":")[1]);
+          setFailedSpeechId(Number.isFinite(messageId) ? messageId : null);
+        }
+        setSpeechNotice("浏览器没有让语音自动播放，点一下回复旁的小喇叭就好啦～");
+      }
+    });
+    speechControllerRef.current = controller;
+    return () => {
+      controller.dispose();
+      speechControllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    autoSpeakRef.current = autoSpeak;
+    saveAutoSpeak(getBrowserStorage(), autoSpeak);
+  }, [autoSpeak]);
+
+  const playAssistantMessage = useCallback(async (message: ChatMessage, manual = false) => {
+    if (!message.id) {
+      return;
+    }
+    const controller = speechControllerRef.current;
+    if (!controller) {
+      return;
+    }
+    const key = `chat:${message.id}`;
+    if (manual && controller.isPlaying(key)) {
+      controller.stop();
+      return;
+    }
+    if (manual) {
+      controller.stop();
+    }
+    const requestToken = ++speechRequestTokenRef.current;
+    setLoadingSpeechId(message.id);
+    setFailedSpeechId(null);
+    setSpeechNotice(null);
+    try {
+      const speech = await generateChatSpeech(message.id);
+      if (requestToken !== speechRequestTokenRef.current) {
+        return;
+      }
+      const played = await controller.playNow({
+        key,
+        audioUrl: speech.audioUrl,
+        kind: "chat"
+      });
+      if (!played) {
+        setFailedSpeechId(message.id);
+      }
+    } catch {
+      if (requestToken === speechRequestTokenRef.current) {
+        setFailedSpeechId(message.id);
+        setSpeechNotice("语音刚刚没准备好，文字还在，等会儿再点一次试试呀～");
+      }
+    } finally {
+      if (requestToken === speechRequestTokenRef.current) {
+        setLoadingSpeechId((current) => (current === message.id ? null : current));
+      }
+    }
+  }, []);
+
+  const playDjScript = useCallback(async (script: NonNullable<NowPlayingState["djScript"]>, manual = false) => {
+    if (!script.audioUrl) {
+      return;
+    }
+    const controller = speechControllerRef.current;
+    if (!controller) {
+      return;
+    }
+    const job = {
+      key: `dj:${script.id}`,
+      audioUrl: script.audioUrl,
+      kind: "dj" as const
+    };
+    setSpeechNotice(null);
+    if (manual) {
+      await controller.playNow(job);
+      return;
+    }
+    controller.enqueueDj(job);
+  }, []);
+
   const onWsPayload = useCallback((payload: WsPayload) => {
     if (payload.event === "now_playing_updated") {
       setNow(payload.data as NowPlayingState);
@@ -549,6 +696,9 @@ export default function App() {
     } else if (payload.event === "dj_tts_ready") {
       const script = payload.data as NowPlayingState["djScript"];
       setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
+      if (script?.audioUrl && autoSpeakRef.current) {
+        void playDjScript(script);
+      }
     } else if (payload.event === "system_status") {
       const status = payload.data as SystemStatus;
       setSystemStatus(status);
@@ -559,7 +709,7 @@ export default function App() {
         setDjSettings(status.djSettings);
       }
     }
-  }, []);
+  }, [playDjScript]);
 
   useWsStream(onWsPayload);
 
@@ -585,6 +735,10 @@ export default function App() {
       const response = await sendChat(message);
       setMessages(response.messages);
       setNow(response.now);
+      const assistantMessage = response.messages.at(-1);
+      if (assistantMessage?.role === "assistant" && autoSpeakRef.current) {
+        void playAssistantMessage(assistantMessage);
+      }
       await refreshTaste();
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "GPT DJ 暂时掉线了。");
@@ -624,6 +778,8 @@ export default function App() {
     setChatError(null);
     try {
       await clearChatHistory();
+      speechRequestTokenRef.current += 1;
+      speechControllerRef.current?.stop(true);
       setMessages([]);
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "聊天记录清空失败，请稍后再试。");
@@ -753,6 +909,15 @@ export default function App() {
     }
   };
 
+  const onToggleAutoSpeak = (enabled: boolean) => {
+    setAutoSpeak(enabled);
+    if (!enabled) {
+      speechRequestTokenRef.current += 1;
+      speechControllerRef.current?.stop(true);
+      setLoadingSpeechId(null);
+    }
+  };
+
   const favoritePeriod = useMemo(
     () => taste?.favoritePeriods[0]?.period ?? "night",
     [taste?.favoritePeriods]
@@ -771,7 +936,7 @@ export default function App() {
               role: "assistant" as const,
               text:
                 now.djScript?.text ??
-                "Neonwave is live. Describe a mood, a scene, or ask me to dissect the current track.",
+                "嗨，我在这儿呀～告诉我你现在的心情或想听的感觉，我来陪你挑首合适的歌！",
               at: "station-intro"
             }
           ],
@@ -825,6 +990,7 @@ export default function App() {
           onPlaybackStateChange={onPlaybackStateChange}
           onRequestNext={onRequestNext}
           onTrackEnded={onTrackEnded}
+          speechActive={speechActive}
         />
 
         <article className="dj-console" aria-label="GPT DJ conversation">
@@ -843,17 +1009,28 @@ export default function App() {
                 <option value="calm">温和</option>
                 <option value="professional">专业</option>
               </select>
-              <span className="context-chip">女声</span>
+              <label className="speech-toggle">
+                <input
+                  type="checkbox"
+                  checked={autoSpeak}
+                  onChange={(event) => onToggleAutoSpeak(event.currentTarget.checked)}
+                />
+                自动朗读
+              </label>
+              <span className="context-chip">小晓女声</span>
             </div>
           </header>
           <MessageList
+            activeSpeechKey={activeSpeechKey}
             chatLoading={chatLoading}
+            failedSpeechId={failedSpeechId}
+            loadingSpeechId={loadingSpeechId}
             messages={visibleMessages}
             onPlaySuggestion={onPlaySuggestion}
+            onSpeakMessage={(message) => playAssistantMessage(message, true)}
             suggestionLoadingId={suggestionLoadingId}
           />
           <p className="now-caption">Now playing: {trackTitle}</p>
-          {now.djScript?.audioUrl ? <audio controls src={now.djScript.audioUrl} className="dj-audio" /> : null}
           <div className="chat-actions" aria-label="GPT DJ quick actions">
             <button type="button" onClick={() => void submitChat("点评当前这首")} disabled={chatLoading || !now.track}>
               点评当前
@@ -861,6 +1038,11 @@ export default function App() {
             <button type="button" onClick={() => void submitChat("来点适合现在氛围的歌")} disabled={chatLoading}>
               氛围点歌
             </button>
+            {now.djScript?.audioUrl ? (
+              <button type="button" onClick={() => void playDjScript(now.djScript!, true)}>
+                重播最近播报
+              </button>
+            ) : null}
             <button
               className="clear-chat-button"
               type="button"
@@ -871,6 +1053,7 @@ export default function App() {
             </button>
           </div>
           {chatError ? <p className="chat-error">{chatError}</p> : null}
+          {speechNotice ? <p className="speech-notice">{speechNotice}</p> : null}
           <form onSubmit={onSubmitChat} className="chat-form">
             <input
               value={input}
@@ -883,6 +1066,7 @@ export default function App() {
               {chatLoading ? "..." : "→"}
             </button>
           </form>
+          <audio ref={speechAudioRef} className="speech-audio" preload="none" />
         </article>
       </section>
 

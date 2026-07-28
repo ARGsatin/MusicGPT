@@ -50,6 +50,10 @@ describe("contracts", () => {
     expect(API_ROUTES.djSettings).toBe("/api/dj/settings");
   });
 
+  it("builds the chat speech route for a persisted assistant message", () => {
+    expect(API_ROUTES.chatSpeech(42)).toBe("/api/chat/42/speech");
+  });
+
   it("validates environment location payload", () => {
     expect(isEnvironmentLocationRequest({ latitude: 31.23, longitude: 121.47 })).toBe(true);
     expect(isEnvironmentLocationRequest({ latitude: 120, longitude: 121.47 })).toBe(false);

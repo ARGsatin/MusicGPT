@@ -1,6 +1,7 @@
 import type {
   ChatMessage,
   ChatResponse,
+  ChatSpeechResponse,
   DjSettings,
   EnvironmentContext,
   EnvironmentLocationRequest,
@@ -14,6 +15,7 @@ import type {
   TasteProfile,
   Track
 } from "@musicgpt/shared";
+import { API_ROUTES } from "@musicgpt/shared";
 
 export async function fetchNowPlaying(): Promise<NowPlayingState> {
   const response = await fetch("/api/now");
@@ -53,6 +55,16 @@ export async function fetchChatHistory(): Promise<ChatMessage[]> {
   }
   const payload = (await response.json()) as { messages: ChatMessage[] };
   return payload.messages;
+}
+
+export async function generateChatSpeech(messageId: number): Promise<ChatSpeechResponse> {
+  const response = await fetch(API_ROUTES.chatSpeech(messageId), {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error("Speech synthesis failed");
+  }
+  return (await response.json()) as ChatSpeechResponse;
 }
 
 export async function clearChatHistory(): Promise<void> {

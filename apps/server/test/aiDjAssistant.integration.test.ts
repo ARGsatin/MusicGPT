@@ -41,6 +41,7 @@ describe("AI DJ assistant chat", () => {
     expect(response.now.track).toBeUndefined();
     expect(response.now.queue).toHaveLength(0);
     expect(response.reply).toContain("Rain Walk");
+    expect(response.reply).toContain("给你～");
     expect(response.messages.at(-1)?.role).toBe("assistant");
     const suggestion = response.messages.at(-1)?.trackSuggestion;
     expect(suggestion?.track.id).toBe(102);
@@ -91,6 +92,21 @@ describe("AI DJ assistant chat", () => {
     expect(fixture.ncmSearches).toEqual(["低频 电子"]);
   });
 
+  it("uses warm, lively wording for built-in operation replies", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "pause" }
+      })
+    });
+
+    const response = await postChat(fixture.base, "先暂停一下");
+
+    expect(response.action).toBe("pause");
+    expect(response.reply).toContain("暂停啦");
+    expect(response.reply).toMatch(/[呀啦～]/);
+    expect(response.reply).not.toMatch(/夜色|唱针|灵魂|骨相/);
+  });
+
   it("comments on the current track without changing playback", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
@@ -126,6 +142,84 @@ describe("AI DJ assistant chat", () => {
     const history = (await historyRes.json()) as { messages: ChatMessage[] };
     expect(history.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(history.messages[0]?.text).toContain("冷一点");
+  });
+
+  it("generates and persists speech for an assistant message on demand", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatReply: "好呀，今天想听点轻松又亮晶晶的歌～"
+      })
+    });
+
+    const response = await postChat(fixture.base, "陪我聊聊");
+    const assistantMessage = response.messages.at(-1) as
+      | (ChatMessage & {
+          id?: number;
+          speech?: { audioUrl: string; profileKey: string };
+        })
+      | undefined;
+
+    expect(assistantMessage?.id).toEqual(expect.any(Number));
+    const speechResponse = await fetch(`${fixture.base}/api/chat/${assistantMessage!.id}/speech`, {
+      method: "POST"
+    });
+    expect(speechResponse.ok).toBe(true);
+    const speech = (await speechResponse.json()) as { messageId: number; audioUrl: string };
+    expect(speech).toEqual({
+      messageId: assistantMessage!.id,
+      audioUrl: expect.stringMatching(/^\/tts-cache\/[a-f0-9]{40}\.mp3$/)
+    });
+
+    const historyRes = await fetch(`${fixture.base}/api/chat/history`);
+    const history = (await historyRes.json()) as {
+      messages: Array<ChatMessage & { id?: number; speech?: { audioUrl: string; profileKey: string } }>;
+    };
+    expect(history.messages.at(-1)?.speech).toEqual({
+      audioUrl: speech.audioUrl,
+      profileKey: "zh-CN-XiaoxiaoNeural|+6%|+2Hz|+0%"
+    });
+  });
+
+  it("rejects speech generation for a user message", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatReply: "我只朗读自己的回复呀～"
+      })
+    });
+
+    const response = await postChat(fixture.base, "请朗读这句话");
+    const userMessage = response.messages.find((message) => message.role === "user");
+    const speechResponse = await fetch(`${fixture.base}/api/chat/${userMessage!.id}/speech`, {
+      method: "POST"
+    });
+
+    expect(speechResponse.status).toBe(422);
+  });
+
+  it("keeps chat available when on-demand speech synthesis fails", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatReply: "文字已经先到啦，语音晚点再试也没关系～"
+      }),
+      ttsSave: async () => {
+        throw new Error("tts unavailable");
+      }
+    });
+
+    const response = await postChat(fixture.base, "语音还好吗");
+    expect(response.reply).toContain("文字已经先到");
+    const assistantMessage = response.messages.at(-1);
+    const speechResponse = await fetch(`${fixture.base}/api/chat/${assistantMessage!.id}/speech`, {
+      method: "POST"
+    });
+
+    expect(speechResponse.status).toBe(503);
+    const historyRes = await fetch(`${fixture.base}/api/chat/history`);
+    const history = (await historyRes.json()) as { messages: ChatMessage[] };
+    expect(history.messages.at(-1)?.speech).toBeUndefined();
   });
 
   it("adds a free DJ comment after a described song selection", async () => {
@@ -214,12 +308,21 @@ class FakeAssistant implements AiDjAssistant {
   }
 }
 
-async function createFixture(options: { assistant: AiDjAssistant; searchTracks?: Track[] }) {
+async function createFixture(options: {
+  assistant: AiDjAssistant;
+  searchTracks?: Track[];
+  ttsSave?: (text: string, filePath: string) => Promise<void>;
+}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-aidj-"));
   const repo = new StateRepository(path.join(tmp, "state.db"));
-  const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-    fs.writeFileSync(filePath, "audio");
-  });
+  const tts = new TtsPipeline(
+    path.join(tmp, "tts"),
+    "zh-CN-XiaoxiaoNeural",
+    options.ttsSave ??
+      (async (_text, filePath) => {
+        fs.writeFileSync(filePath, "audio");
+      })
+  );
   const ncmSearches: string[] = [];
   const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", async (input) => {
     const url = input.toString();

@@ -139,10 +139,22 @@ export interface ChatRequest {
 }
 
 export interface ChatMessage {
+  id?: number;
   role: "user" | "assistant";
   text: string;
   at: string;
   trackSuggestion?: TrackSuggestion;
+  speech?: ChatSpeech;
+}
+
+export interface ChatSpeech {
+  audioUrl: string;
+  profileKey: string;
+}
+
+export interface ChatSpeechResponse {
+  messageId: number;
+  audioUrl: string;
 }
 
 export interface TrackSuggestion {

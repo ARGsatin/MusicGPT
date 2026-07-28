@@ -363,6 +363,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
 }
 
@@ -382,6 +383,26 @@ button {
 .dj-settings-bar select:focus {
   border-color: var(--brand);
   box-shadow: 0 0 0 4px var(--brand-soft);
+}
+
+.speech-toggle {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0 12px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.speech-toggle input {
+  accent-color: var(--brand);
 }
 
 .status-chip {
@@ -777,6 +798,43 @@ button {
   line-height: 1.6;
 }
 
+.message-copy-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.message-copy-row p {
+  min-width: 0;
+  flex: 1;
+}
+
+.speech-button {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(109, 123, 255, 0.22);
+  border-radius: 50%;
+  padding: 0;
+  color: var(--brand);
+  background: #fff;
+  cursor: pointer;
+  font-size: 11px;
+  transition: transform 0.16s ease, background 0.16s ease;
+}
+
+.speech-button:hover:not(:disabled) {
+  background: var(--brand-soft);
+  transform: scale(1.05);
+}
+
+.speech-button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .message-bubble.is-thinking {
   color: var(--muted);
 }
@@ -885,12 +943,6 @@ button {
   font-weight: 500;
 }
 
-.dj-audio {
-  width: 100%;
-  margin-top: 12px;
-  opacity: 0.85;
-}
-
 .chat-actions {
   display: flex;
   gap: 8px;
@@ -935,6 +987,17 @@ button {
   color: var(--danger);
   font-size: 13px;
   font-weight: 500;
+}
+
+.speech-notice {
+  margin: 10px 0 0;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.speech-audio {
+  display: none;
 }
 
 .chat-form {

@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import type {
   ChatMessage,
+  ChatSpeech,
   DjSettings,
   DjScript,
   EnvironmentContext,
@@ -275,40 +276,93 @@ export class StateRepository {
     return row ? parseJson<DjScript | undefined>(row.script_json, undefined) : undefined;
   }
 
-  addChatMessage(message: ChatMessage): void {
-    this.db
+  addChatMessage(message: ChatMessage): ChatMessage {
+    const result = this.db
       .prepare("INSERT INTO chat_messages(role, text, at, metadata_json) VALUES(?, ?, ?, ?)")
       .run(
         message.role,
         message.text,
         message.at,
-        JSON.stringify({ trackSuggestion: message.trackSuggestion })
+        JSON.stringify({
+          trackSuggestion: message.trackSuggestion,
+          speech: message.speech
+        })
       );
+    return { ...message, id: Number(result.lastInsertRowid) };
   }
 
   getRecentMessages(limit = 30): ChatMessage[] {
     const rows = this.db
-      .prepare("SELECT role, text, at, metadata_json FROM chat_messages ORDER BY id DESC LIMIT ?")
-      .all(limit) as Array<{ role: ChatMessage["role"]; text: string; at: string; metadata_json?: string | null }>;
+      .prepare("SELECT id, role, text, at, metadata_json FROM chat_messages ORDER BY id DESC LIMIT ?")
+      .all(limit) as Array<{
+        id: number;
+        role: ChatMessage["role"];
+        text: string;
+        at: string;
+        metadata_json?: string | null;
+      }>;
     return rows
       .slice()
       .reverse()
-      .map((row) => {
-        const metadata = parseJson<{ trackSuggestion?: ChatMessage["trackSuggestion"] }>(row.metadata_json ?? null, {});
-        const message: ChatMessage = {
-          role: row.role,
-          text: row.text,
-          at: row.at
-        };
-        if (metadata.trackSuggestion) {
-          message.trackSuggestion = metadata.trackSuggestion;
+      .map((row) => this.mapChatMessage(row));
+  }
+
+  getChatMessage(id: number): ChatMessage | undefined {
+    const row = this.db
+      .prepare("SELECT id, role, text, at, metadata_json FROM chat_messages WHERE id = ?")
+      .get(id) as
+      | {
+          id: number;
+          role: ChatMessage["role"];
+          text: string;
+          at: string;
+          metadata_json?: string | null;
         }
-        return message;
-      });
+      | undefined;
+    return row ? this.mapChatMessage(row) : undefined;
+  }
+
+  saveChatSpeech(id: number, speech: ChatSpeech): ChatMessage | undefined {
+    const message = this.getChatMessage(id);
+    if (!message) {
+      return undefined;
+    }
+    const metadata = {
+      trackSuggestion: message.trackSuggestion,
+      speech
+    };
+    this.db.prepare("UPDATE chat_messages SET metadata_json = ? WHERE id = ?").run(JSON.stringify(metadata), id);
+    return { ...message, speech };
   }
 
   clearChatMessages(): void {
     this.db.prepare("DELETE FROM chat_messages").run();
+  }
+
+  private mapChatMessage(row: {
+    id: number;
+    role: ChatMessage["role"];
+    text: string;
+    at: string;
+    metadata_json?: string | null;
+  }): ChatMessage {
+    const metadata = parseJson<{
+      trackSuggestion?: ChatMessage["trackSuggestion"];
+      speech?: ChatSpeech;
+    }>(row.metadata_json ?? null, {});
+    const message: ChatMessage = {
+      id: row.id,
+      role: row.role,
+      text: row.text,
+      at: row.at
+    };
+    if (metadata.trackSuggestion) {
+      message.trackSuggestion = metadata.trackSuggestion;
+    }
+    if (metadata.speech) {
+      message.speech = metadata.speech;
+    }
+    return message;
   }
 
   private saveAppState<T>(key: string, value: T): void {
