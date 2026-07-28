@@ -54,7 +54,8 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     if (options.apiKey) {
       this.client = new OpenAI({
         apiKey: options.apiKey,
-        baseURL: options.baseUrl
+        baseURL: options.baseUrl,
+        timeout: 20_000
       });
     }
   }

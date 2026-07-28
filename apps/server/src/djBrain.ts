@@ -17,7 +17,7 @@ export class DjBrain {
 
   constructor(apiKey?: string) {
     if (apiKey) {
-      this.client = new OpenAI({ apiKey });
+      this.client = new OpenAI({ apiKey, timeout: 20_000 });
     }
   }
 
