@@ -13,6 +13,7 @@ import type {
   WsPayload
 } from "@musicgpt/shared";
 import {
+  ChatStreamInterruptedError,
   clearChatHistory,
   fetchDjSettings,
   fetchEnvironment,
@@ -793,13 +794,30 @@ export default function App() {
     } catch (error) {
       const aborted = error instanceof DOMException && error.name === "AbortError";
       if (!aborted && chatStreamTokenRef.current === streamToken) {
-        setChatError(error instanceof Error ? error.message : "GPT DJ 暂时掉线了。");
+        const interrupted = error instanceof ChatStreamInterruptedError;
+        setChatError(
+          interrupted
+            ? "连接刚刚抖了一下，已经收到的回复还在，再发一次就好啦～"
+            : error instanceof Error
+              ? error.message
+              : "GPT DJ 暂时掉线了。"
+        );
         if (!resultReceived) {
           const history = await fetchChatHistory().catch(() => undefined);
-          if (history) {
+          if (history?.at(-1)?.role === "assistant") {
             setMessages(history);
+          } else if (!interrupted) {
+            if (history) {
+              setMessages(history);
+            } else {
+              setMessages((current) => current.filter((item) => item.at !== streamAt));
+            }
           } else {
-            setMessages((current) => current.filter((item) => item.at !== streamAt));
+            setMessages((current) =>
+              current.some((item) => item.at === streamAt && item.text.trim())
+                ? current
+                : current.filter((item) => item.at !== streamAt)
+            );
           }
         }
       }

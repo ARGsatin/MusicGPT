@@ -43,4 +43,23 @@ describe("chat event stream", () => {
       "chat_stream_failed"
     );
   });
+
+  it("reports an interrupted stream without leaking a JSON.parse error", async () => {
+    const response = new Response(
+      [
+        '{"type":"text_delta","delta":"好呀"}\n',
+        '{"type":"result","response":'
+      ].join(""),
+      {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" }
+      }
+    );
+    const events: ChatStreamEvent[] = [];
+
+    await expect(
+      readChatEventStream(response, (event) => events.push(event))
+    ).rejects.toThrow("Chat stream was interrupted");
+    expect(events).toEqual([{ type: "text_delta", delta: "好呀" }]);
+  });
 });

@@ -18,6 +18,13 @@ import type {
 } from "@musicgpt/shared";
 import { API_ROUTES } from "@musicgpt/shared";
 
+export class ChatStreamInterruptedError extends Error {
+  constructor() {
+    super("Chat stream was interrupted");
+    this.name = "ChatStreamInterruptedError";
+  }
+}
+
 export async function fetchNowPlaying(): Promise<NowPlayingState> {
   const response = await fetch("/api/now");
   if (!response.ok) {
@@ -86,7 +93,12 @@ export async function readChatEventStream(
     if (!line.trim()) {
       return;
     }
-    const event = JSON.parse(line) as ChatStreamEvent;
+    let event: ChatStreamEvent;
+    try {
+      event = JSON.parse(line) as ChatStreamEvent;
+    } catch {
+      throw new ChatStreamInterruptedError();
+    }
     onEvent(event);
     if (event.type === "error") {
       throw new Error(event.message);
@@ -97,7 +109,15 @@ export async function readChatEventStream(
   };
 
   while (true) {
-    const chunk = await reader.read();
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error;
+      }
+      throw new ChatStreamInterruptedError();
+    }
     buffer += decoder.decode(chunk.value, { stream: !chunk.done });
     let newline = buffer.indexOf("\n");
     while (newline >= 0) {
@@ -112,7 +132,7 @@ export async function readChatEventStream(
   consumeLine(buffer);
 
   if (!result) {
-    throw new Error("Chat stream ended before returning a result");
+    throw new ChatStreamInterruptedError();
   }
   return result;
 }
