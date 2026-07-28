@@ -59,27 +59,30 @@ interface SpeechPlaybackCallbacks {
 
 export class SpeechPlaybackController {
   private current: SpeechPlaybackJob | undefined;
+  private readonly chatQueue: SpeechPlaybackJob[] = [];
   private readonly djQueue: SpeechPlaybackJob[] = [];
   private readonly seenDjKeys = new Set<string>();
+  private streamingChatKey: string | undefined;
+  private blockedChatStreamKey: string | undefined;
+  private chatStreamFinished = false;
+  private active = false;
   private disposed = false;
 
   private readonly onEnded = () => {
-    const next = this.djQueue.shift();
     this.current = undefined;
-    if (next) {
-      void this.start(next, true);
-      return;
-    }
-    this.callbacks.onPlayingKeyChange?.(undefined);
-    this.callbacks.onActiveChange?.(false);
+    this.advance();
   };
 
   private readonly onError = () => {
     const failed = this.current;
     this.current = undefined;
+    this.chatQueue.length = 0;
     this.djQueue.length = 0;
+    this.streamingChatKey = undefined;
+    this.blockedChatStreamKey = undefined;
+    this.chatStreamFinished = false;
     this.callbacks.onPlayingKeyChange?.(undefined);
-    this.callbacks.onActiveChange?.(false);
+    this.setActive(false);
     if (failed) {
       this.callbacks.onPlaybackError?.(failed, new Error("speech_playback_failed"));
     }
@@ -98,13 +101,54 @@ export class SpeechPlaybackController {
   }
 
   async playNow(job: SpeechPlaybackJob): Promise<boolean> {
-    const replacingActiveSpeech = Boolean(this.current);
+    this.chatQueue.length = 0;
+    this.streamingChatKey = undefined;
+    this.blockedChatStreamKey = undefined;
+    this.chatStreamFinished = false;
     if (this.current) {
       this.audio.pause();
       this.audio.currentTime = 0;
       this.current = undefined;
     }
-    return this.start(job, replacingActiveSpeech);
+    return this.start(job);
+  }
+
+  enqueueChatSegment(streamKey: string, job: SpeechPlaybackJob): void {
+    if (this.disposed || this.blockedChatStreamKey === streamKey) {
+      return;
+    }
+    if (this.streamingChatKey !== streamKey) {
+      this.chatQueue.length = 0;
+      this.blockedChatStreamKey = undefined;
+      this.streamingChatKey = streamKey;
+      this.chatStreamFinished = false;
+      if (this.current) {
+        this.audio.pause();
+        this.audio.currentTime = 0;
+        this.current = undefined;
+      }
+    }
+    this.chatQueue.push(job);
+    if (!this.current) {
+      const next = this.chatQueue.shift();
+      if (next) {
+        void this.start(next);
+      }
+    }
+  }
+
+  finishChatStream(streamKey: string): void {
+    if (this.blockedChatStreamKey === streamKey) {
+      this.blockedChatStreamKey = undefined;
+      return;
+    }
+    if (this.streamingChatKey !== streamKey) {
+      return;
+    }
+    this.chatStreamFinished = true;
+    if (!this.current && this.chatQueue.length === 0) {
+      this.advance();
+    }
   }
 
   enqueueDj(job: SpeechPlaybackJob): void {
@@ -123,25 +167,28 @@ export class SpeechPlaybackController {
         this.seenDjKeys.delete(oldestKey);
       }
     }
-    if (this.current) {
+    if (this.current || this.streamingChatKey) {
       this.djQueue.push(job);
       return;
     }
-    void this.start(job, false);
+    void this.start(job);
   }
 
   stop(clearQueue = false): void {
     if (clearQueue) {
       this.djQueue.length = 0;
     }
-    if (!this.current) {
-      return;
+    this.chatQueue.length = 0;
+    this.streamingChatKey = undefined;
+    this.blockedChatStreamKey = undefined;
+    this.chatStreamFinished = false;
+    if (this.current) {
+      this.audio.pause();
+      this.audio.currentTime = 0;
+      this.current = undefined;
     }
-    this.audio.pause();
-    this.audio.currentTime = 0;
-    this.current = undefined;
     this.callbacks.onPlayingKeyChange?.(undefined);
-    this.callbacks.onActiveChange?.(false);
+    this.setActive(false);
   }
 
   dispose(): void {
@@ -154,7 +201,36 @@ export class SpeechPlaybackController {
     this.audio.removeEventListener("error", this.onError);
   }
 
-  private async start(job: SpeechPlaybackJob, alreadyActive: boolean): Promise<boolean> {
+  private advance(): void {
+    const nextChat = this.chatQueue.shift();
+    if (nextChat) {
+      void this.start(nextChat);
+      return;
+    }
+    if (this.streamingChatKey && !this.chatStreamFinished) {
+      this.callbacks.onPlayingKeyChange?.(undefined);
+      return;
+    }
+    this.streamingChatKey = undefined;
+    this.chatStreamFinished = false;
+    const nextDj = this.djQueue.shift();
+    if (nextDj) {
+      void this.start(nextDj);
+      return;
+    }
+    this.callbacks.onPlayingKeyChange?.(undefined);
+    this.setActive(false);
+  }
+
+  private setActive(active: boolean): void {
+    if (this.active === active) {
+      return;
+    }
+    this.active = active;
+    this.callbacks.onActiveChange?.(active);
+  }
+
+  private async start(job: SpeechPlaybackJob): Promise<boolean> {
     if (this.disposed) {
       return false;
     }
@@ -162,18 +238,21 @@ export class SpeechPlaybackController {
     this.audio.src = job.audioUrl;
     this.audio.currentTime = 0;
     this.callbacks.onPlayingKeyChange?.(job.key);
-    if (!alreadyActive) {
-      this.callbacks.onActiveChange?.(true);
-    }
+    this.setActive(true);
+    const chatStreamKey = this.streamingChatKey;
     try {
       await this.audio.play();
       return true;
     } catch (error) {
+      this.chatQueue.length = 0;
       this.djQueue.length = 0;
+      this.streamingChatKey = undefined;
+      this.blockedChatStreamKey = chatStreamKey;
+      this.chatStreamFinished = false;
       if (this.current?.key === job.key) {
         this.current = undefined;
         this.callbacks.onPlayingKeyChange?.(undefined);
-        this.callbacks.onActiveChange?.(false);
+        this.setActive(false);
       }
       this.callbacks.onPlaybackError?.(job, error);
       return false;

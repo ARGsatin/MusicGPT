@@ -4,7 +4,7 @@
 
 - 网易云历史偏好建模（收藏 + 播放行为）
 - 自动电台续播（10 首窗口规划）
-- AI DJ 少女声语音（聊天默认自动朗读；每 4 首一次轻播报）
+- AI DJ 流式对话 + 小晓女声（文字边生成边显示；语音按短句紧跟播放；每 4 首一次轻播报）
 - PWA 播放器 + 聊天控制 + 偏好面板
 
 ## 目录结构
@@ -58,6 +58,7 @@ npm run dev
 ## API 概览
 
 - `POST /api/chat`
+- `POST /api/chat/stream`（NDJSON：文本增量、短句语音与最终持久化结果）
 - `POST /api/chat/:messageId/speech`
 - `GET /api/now`
 - `POST /api/next`

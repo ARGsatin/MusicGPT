@@ -26,8 +26,9 @@ import { NcmConnector, NcmImportError } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
+import { SpeechTextSegmenter } from "./speechSegmenter.js";
 import { TasteEngine } from "./tasteEngine.js";
-import { TtsPipeline } from "./ttsPipeline.js";
+import { prepareSpeechText, TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
 const PLAN_WINDOW_SIZE = 10;
@@ -41,6 +42,13 @@ export const DEFAULT_DJ_SETTINGS: DjSettings = {
 };
 
 type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation">;
+
+export interface ChatStreamCallbacks {
+  synthesizeSpeech: boolean;
+  onTextDelta(delta: string): void;
+  onSpeech(segment: { sequence: number; text: string; audioUrl: string }): void;
+  onResult(response: ChatResponse): void;
+}
 
 export class RadioOrchestrator {
   private state: NowPlayingState = { queue: [], paused: false };
@@ -312,7 +320,199 @@ export class RadioOrchestrator {
     this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
     const context = this.buildAiContext();
     const intent = await this.classifySafely(message, context);
+    return this.handleChatIntent(message, context, intent);
+  }
 
+  async handleChatStream(message: string, callbacks: ChatStreamCallbacks): Promise<ChatResponse> {
+    this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
+    const context = this.buildAiContext();
+    const intent = await this.classifySafely(message, context);
+    const segmenter = new SpeechTextSegmenter();
+    let speechSequence = 0;
+    let speechWork = Promise.resolve();
+
+    const queueSpeech = (segments: string[]) => {
+      if (!callbacks.synthesizeSpeech) {
+        return;
+      }
+      for (const segment of segments) {
+        speechWork = speechWork.then(async () => {
+          const speech = await this.ttsPipeline.synthesizeText(segment);
+          if (speech.audioUrl) {
+            callbacks.onSpeech({
+              sequence: speechSequence,
+              text: segment,
+              audioUrl: speech.audioUrl
+            });
+            speechSequence += 1;
+          }
+        }).catch(() => undefined);
+      }
+    };
+
+    const emitText = (delta: string) => {
+      if (!delta) {
+        return;
+      }
+      callbacks.onTextDelta(delta);
+      queueSpeech(segmenter.push(delta));
+    };
+
+    const streamReply = async (
+      stream: AsyncIterable<string>,
+      fallback: string,
+      action: ChatResponse["action"],
+      initialText = "",
+      trackSuggestion?: TrackSuggestion
+    ): Promise<ChatResponse> => {
+      let generatedText = "";
+      if (initialText) {
+        emitText(initialText);
+      }
+      try {
+        for await (const delta of stream) {
+          generatedText += delta;
+          emitText(delta);
+        }
+      } catch (error) {
+        if (!generatedText) {
+          const notice = aiFallbackNotice(this.aiDjAssistant.status().provider, error, fallback);
+          callbacks.onTextDelta(notice);
+          queueSpeech(segmenter.push(fallback));
+          generatedText = notice;
+        }
+      }
+      if (!generatedText) {
+        generatedText = fallback;
+        emitText(generatedText);
+      }
+      queueSpeech(segmenter.finish());
+      return this.reply(
+        action,
+        `${initialText}${generatedText}`,
+        this.state,
+        trackSuggestion
+      );
+    };
+
+    let response: ChatResponse;
+    const aiConfigured = this.aiDjAssistant.status().configured;
+    if (intent.type === "chat" && aiConfigured && this.aiDjAssistant.chatStream) {
+      response = await streamReply(
+        this.aiDjAssistant.chatStream(message, context),
+        fallbackChatReply(message, context),
+        "noop"
+      );
+    } else if (
+      intent.type === "comment_current" &&
+      this.state.track &&
+      aiConfigured &&
+      this.aiDjAssistant.commentCurrentStream
+    ) {
+      response = await streamReply(
+        this.aiDjAssistant.commentCurrentStream(context),
+        fallbackComment(this.state.track),
+        "comment_current"
+      );
+    } else if (
+      intent.type === "play_specific" &&
+      aiConfigured &&
+      this.aiDjAssistant.commentTrackStream
+    ) {
+      const query = intent.searchQuery?.trim() || intent.query.trim();
+      const target = (await this.ncm.searchSongs(query))[0];
+      if (!target) {
+        response = this.reply(
+          "noop",
+          `唔，这次没搜到《${query}》～换个歌名或歌手告诉我，我再帮你找找！`,
+          this.state
+        );
+        callbacks.onTextDelta(response.reply);
+        queueSpeech(segmenter.push(response.reply));
+        queueSpeech(segmenter.finish());
+      } else {
+        const purpose = `direct song request: ${query}`;
+        const prefix = `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n`;
+        response = await streamReply(
+          this.aiDjAssistant.commentTrackStream(target, context, purpose),
+          fallbackComment(target),
+          "play_specific",
+          prefix,
+          this.createTrackSuggestion(target, purpose)
+        );
+      }
+    } else if (
+      intent.type === "play_by_description" &&
+      aiConfigured &&
+      this.aiDjAssistant.commentTrackStream
+    ) {
+      const local = this.findLocalCandidates(intent.description);
+      let candidates = local.map((candidate) => candidate.track);
+      if ((local[0]?.score ?? 0) < 0.35) {
+        const searchQuery = intent.searchQuery?.trim() || intent.description;
+        const remote = await this.ncm.searchSongs(searchQuery).catch(() => []);
+        candidates = dedupeTracks([...candidates, ...remote]).slice(0, 12);
+      }
+      if (candidates.length === 0) {
+        response = this.reply(
+          "noop",
+          "这次还没找到特别合适的歌呀。再给我一点关键词吧，比如年代、声线、节奏或心情～",
+          this.state
+        );
+        callbacks.onTextDelta(response.reply);
+        queueSpeech(segmenter.push(response.reply));
+        queueSpeech(segmenter.finish());
+      } else {
+        const selection = await this.aiDjAssistant
+          .selectTrack(intent.description, candidates, context)
+          .catch((): TrackSelection => ({
+            trackId: candidates[0]?.id,
+            reason: "候选里它最贴近这次描述。"
+          }));
+        const target =
+          candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
+        if (!target) {
+          response = this.reply(
+            "noop",
+            "这次还没找到特别合适的歌呀～再给我一点关键词，我继续帮你挑！",
+            this.state
+          );
+          callbacks.onTextDelta(response.reply);
+          queueSpeech(segmenter.push(response.reply));
+          queueSpeech(segmenter.finish());
+        } else {
+          const purpose =
+            `request description: ${intent.description}; selection reason: ${selection.reason}`;
+          const suggestionReason =
+            selection.reason || `request description: ${intent.description}`;
+          const prefix =
+            `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n`;
+          response = await streamReply(
+            this.aiDjAssistant.commentTrackStream(target, context, purpose),
+            fallbackComment(target),
+            "play_by_description",
+            prefix,
+            this.createTrackSuggestion(target, suggestionReason)
+          );
+        }
+      }
+    } else {
+      response = await this.handleChatIntent(message, context, intent);
+      callbacks.onTextDelta(response.reply);
+      queueSpeech(segmenter.push(prepareSpeechText(response.reply)));
+      queueSpeech(segmenter.finish());
+    }
+
+    callbacks.onResult(response);
+    await speechWork;
+    return response;
+  }
+
+  private async handleChatIntent(
+    message: string,
+    context: AiDjContext,
+    intent: AiDjIntent
+  ): Promise<ChatResponse> {
     switch (intent.type) {
       case "skip":
         if (this.state.track) {

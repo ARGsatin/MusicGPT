@@ -8,7 +8,8 @@ describe("speech controls", () => {
     const html = renderToStaticMarkup(<App />);
 
     expect(html).toContain("自动朗读");
-    expect(html).toContain("小晓女声");
+    expect(html).toContain("全程小晓声线");
+    expect(html).not.toContain("Sonia");
     expect(html).toContain('class="speech-audio"');
     expect(html).not.toContain('class="dj-audio"');
   });

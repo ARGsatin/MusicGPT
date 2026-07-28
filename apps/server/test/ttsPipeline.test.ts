@@ -33,6 +33,61 @@ describe("TtsPipeline", () => {
     ]);
   });
 
+  it("keeps Xiaoxiao's voice for an English reply", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-xiaoxiao-english-"));
+    const voices: string[] = [];
+    const saveFn = vi.fn(async (_text: string, filePath: string, options) => {
+      voices.push(options?.voice ?? "");
+      fs.writeFileSync(filePath, "audio");
+    });
+    const pipeline = new TtsPipeline(
+      dir,
+      "zh-CN-XiaoxiaoNeural",
+      saveFn
+    );
+
+    const result = await pipeline.synthesizeText(
+      "What a lovely choice. This one sounds perfect for a quiet evening."
+    );
+
+    expect(voices).toEqual(["zh-CN-XiaoxiaoNeural"]);
+    expect(result.profileKey).toBe(
+      "zh-CN-XiaoxiaoNeural|+6%|+2Hz|+0%"
+    );
+  });
+
+  it("uses one Xiaoxiao voice for a mixed Chinese and English reply", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-code-switch-"));
+    const requests: Array<{ text: string; voice: string }> = [];
+    const saveFn = vi.fn(async (text: string, filePath: string, options) => {
+      const voice = options?.voice ?? "";
+      requests.push({ text, voice });
+      fs.writeFileSync(filePath, "ONE");
+    });
+    const pipeline = new TtsPipeline(
+      dir,
+      "zh-CN-XiaoxiaoNeural",
+      saveFn
+    );
+
+    const result = await pipeline.synthesizeText(
+      "这首歌叫 What a Wonderful World，真的很温柔。"
+    );
+
+    expect(requests).toEqual([
+      {
+        text: "这首歌叫 What a Wonderful World，真的很温柔。",
+        voice: "zh-CN-XiaoxiaoNeural"
+      }
+    ]);
+    expect(result.profileKey).toBe(
+      "zh-CN-XiaoxiaoNeural|+6%|+2Hz|+0%"
+    );
+    expect(
+      fs.readFileSync(path.join(dir, path.basename(result.audioUrl!)), "utf8")
+    ).toBe("ONE");
+  });
+
   it("speaks the friendly fallback without reading technical provider diagnostics", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-friendly-"));
     const spoken: string[] = [];
@@ -128,7 +183,7 @@ describe("TtsPipeline", () => {
     });
     const pipeline = new TtsPipeline(dir, "zh-CN-XiaoxiaoNeural", saveFn);
 
-    const result = await pipeline.synthesizeText("不要留下半截音频");
+    const result = await pipeline.synthesizeText("不要留下 partial audio 半截音频");
 
     expect(result.audioUrl).toBeUndefined();
     expect(fs.readdirSync(dir)).toEqual([]);

@@ -39,6 +39,62 @@ describe("chat speech preferences", () => {
 });
 
 describe("speech playback queue", () => {
+  it("plays streamed chat segments in order and keeps music ducked between segments", async () => {
+    const audio = new FakeSpeechAudio();
+    const activeStates: boolean[] = [];
+    const controller = new SpeechPlaybackController(audio, {
+      onActiveChange: (active) => activeStates.push(active)
+    });
+
+    controller.enqueueChatSegment("stream:1", {
+      key: "stream:1:0",
+      audioUrl: "/part-0.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+    audio.emit("ended");
+    expect(activeStates).toEqual([true]);
+
+    controller.enqueueChatSegment("stream:1", {
+      key: "stream:1:1",
+      audioUrl: "/part-1.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+    controller.finishChatStream("stream:1");
+    audio.emit("ended");
+
+    expect(audio.playedSources).toEqual(["/part-0.mp3", "/part-1.mp3"]);
+    expect(activeStates).toEqual([true, false]);
+    controller.dispose();
+  });
+
+  it("does not retry later segments after autoplay blocks a chat stream", async () => {
+    const audio = new FakeSpeechAudio();
+    const activeStates: boolean[] = [];
+    audio.rejectNextPlay = true;
+    const controller = new SpeechPlaybackController(audio, {
+      onActiveChange: (active) => activeStates.push(active)
+    });
+
+    controller.enqueueChatSegment("stream:blocked", {
+      key: "stream:blocked:0",
+      audioUrl: "/blocked-0.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+    controller.enqueueChatSegment("stream:blocked", {
+      key: "stream:blocked:1",
+      audioUrl: "/blocked-1.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+
+    expect(audio.playedSources).toEqual(["/blocked-0.mp3"]);
+    expect(activeStates.at(-1)).toBe(false);
+    controller.dispose();
+  });
+
   it("queues a DJ broadcast behind chat speech without overlapping audio", async () => {
     const audio = new FakeSpeechAudio();
     const activeStates: boolean[] = [];

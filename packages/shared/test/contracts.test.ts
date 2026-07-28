@@ -51,6 +51,7 @@ describe("contracts", () => {
   });
 
   it("builds the chat speech route for a persisted assistant message", () => {
+    expect(API_ROUTES.chatStream).toBe("/api/chat/stream");
     expect(API_ROUTES.chatSpeech(42)).toBe("/api/chat/42/speech");
   });
 

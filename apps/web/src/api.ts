@@ -2,6 +2,7 @@ import type {
   ChatMessage,
   ChatResponse,
   ChatSpeechResponse,
+  ChatStreamEvent,
   DjSettings,
   EnvironmentContext,
   EnvironmentLocationRequest,
@@ -46,6 +47,74 @@ export async function sendChat(message: string): Promise<ChatResponse> {
     throw new Error("Chat failed");
   }
   return (await response.json()) as ChatResponse;
+}
+
+export async function sendChatStream(
+  message: string,
+  options: {
+    synthesizeSpeech: boolean;
+    signal?: AbortSignal;
+    onEvent: (event: ChatStreamEvent) => void;
+  }
+): Promise<ChatResponse> {
+  const response = await fetch(API_ROUTES.chatStream, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message,
+      synthesizeSpeech: options.synthesizeSpeech
+    }),
+    ...(options.signal ? { signal: options.signal } : {})
+  });
+  return readChatEventStream(response, options.onEvent);
+}
+
+export async function readChatEventStream(
+  response: Response,
+  onEvent: (event: ChatStreamEvent) => void
+): Promise<ChatResponse> {
+  if (!response.ok || !response.body) {
+    throw new Error("Chat stream failed");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let result: ChatResponse | undefined;
+
+  const consumeLine = (line: string) => {
+    if (!line.trim()) {
+      return;
+    }
+    const event = JSON.parse(line) as ChatStreamEvent;
+    onEvent(event);
+    if (event.type === "error") {
+      throw new Error(event.message);
+    }
+    if (event.type === "result") {
+      result = event.response;
+    }
+  };
+
+  while (true) {
+    const chunk = await reader.read();
+    buffer += decoder.decode(chunk.value, { stream: !chunk.done });
+    let newline = buffer.indexOf("\n");
+    while (newline >= 0) {
+      consumeLine(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+      newline = buffer.indexOf("\n");
+    }
+    if (chunk.done) {
+      break;
+    }
+  }
+  consumeLine(buffer);
+
+  if (!result) {
+    throw new Error("Chat stream ended before returning a result");
+  }
+  return result;
 }
 
 export async function fetchChatHistory(): Promise<ChatMessage[]> {

@@ -26,6 +26,10 @@ const chatSchema = z.object({
   message: z.string().min(1)
 });
 
+const chatStreamSchema = chatSchema.extend({
+  synthesizeSpeech: z.boolean().optional()
+});
+
 const chatSpeechParamsSchema = z.object({
   messageId: z.coerce.number().int().positive()
 });
@@ -163,6 +167,42 @@ export async function createServer(options: CreateServerOptions = {}) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     return orchestrator.handleChat(parsed.data.message);
+  });
+
+  app.post("/api/chat/stream", async (request, reply) => {
+    const parsed = chatStreamSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no"
+    });
+    reply.raw.flushHeaders();
+    const writeEvent = (event: unknown) => {
+      if (!reply.raw.destroyed && !reply.raw.writableEnded) {
+        reply.raw.write(`${JSON.stringify(event)}\n`);
+      }
+    };
+
+    try {
+      await orchestrator.handleChatStream(parsed.data.message, {
+        synthesizeSpeech: parsed.data.synthesizeSpeech ?? true,
+        onTextDelta: (delta) => writeEvent({ type: "text_delta", delta }),
+        onSpeech: (segment) => writeEvent({ type: "speech", ...segment }),
+        onResult: (response) => writeEvent({ type: "result", response })
+      });
+    } catch {
+      writeEvent({ type: "error", message: "chat_stream_failed" });
+    } finally {
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    }
+    return reply;
   });
 
   app.get("/api/chat/history", async () => orchestrator.getChatHistory());

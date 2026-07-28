@@ -809,6 +809,29 @@ button {
   flex: 1;
 }
 
+.streaming-caret {
+  display: inline-block;
+  width: 0.55em;
+  height: 1.05em;
+  margin-left: 3px;
+  vertical-align: -0.12em;
+  border-radius: 2px;
+  background: var(--brand);
+  animation: streaming-caret-blink 0.82s steps(1, end) infinite;
+}
+
+@keyframes streaming-caret-blink {
+  50% {
+    opacity: 0.18;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-caret {
+    animation: none;
+  }
+}
+
 .speech-button {
   width: 30px;
   height: 30px;

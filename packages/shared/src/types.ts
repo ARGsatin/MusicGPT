@@ -157,6 +157,12 @@ export interface ChatSpeechResponse {
   audioUrl: string;
 }
 
+export type ChatStreamEvent =
+  | { type: "text_delta"; delta: string }
+  | { type: "speech"; sequence: number; text: string; audioUrl: string }
+  | { type: "result"; response: ChatResponse }
+  | { type: "error"; message: string };
+
 export interface TrackSuggestion {
   id: string;
   track: Track;

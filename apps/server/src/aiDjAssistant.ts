@@ -29,8 +29,11 @@ export interface AiDjAssistant {
   classify(message: string, context: AiDjContext): Promise<AiDjIntent>;
   selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection>;
   commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string>;
+  commentTrackStream?(track: Track, context: AiDjContext, purpose: string): AsyncIterable<string>;
   commentCurrent(context: AiDjContext): Promise<string>;
+  commentCurrentStream?(context: AiDjContext): AsyncIterable<string>;
   chat(message: string, context: AiDjContext): Promise<string>;
+  chatStream?(message: string, context: AiDjContext): AsyncIterable<string>;
 }
 
 interface OpenAiDjAssistantOptions {
@@ -42,6 +45,20 @@ interface OpenAiDjAssistantOptions {
 
 export const AI_DJ_PERSONA_STYLE =
   "整体语言风格要像一位活泼、温柔、可爱的邻家女孩：自然亲切、轻快有精神，也能细心接住用户的感受。可以偶尔用“呀”“啦”“诶”或一个波浪号增添一点俏皮，但不要句句都用。可爱来自真诚和松弛，不要幼儿化、过度撒娇、刻意卖萌或堆表情。不要故作深沉，不要堆砌夜色、灵魂、命运之类的文艺意象，也不要教育用户。";
+
+const REMOTE_INTENT_HINT =
+  /点歌|推荐|来一首|来点|想听|播放|暂停|继续|下一首|切歌|换歌|点评|评论|当前这首|风格|适合|歌曲|歌手|专辑|\b(play|pause|resume|skip|next|song|track|recommend|calm|focus|warm|night|energy|nostalgia|mood)\b/iu;
+
+export function canFastPathChat(message: string): boolean {
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return false;
+  }
+  if (blocksPlayback(trimmed)) {
+    return true;
+  }
+  return !REMOTE_INTENT_HINT.test(trimmed);
+}
 
 export class OpenAiDjAssistant implements AiDjAssistant {
   private readonly client?: OpenAI;
@@ -77,6 +94,9 @@ export class OpenAiDjAssistant implements AiDjAssistant {
   }
 
   async classify(message: string, context: AiDjContext): Promise<AiDjIntent> {
+    if (canFastPathChat(message)) {
+      return { type: "chat" };
+    }
     if (!this.client) {
       return fallbackClassify(message);
     }
@@ -149,6 +169,14 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     return this.commentTrack(context.nowTrack, context, "comment_current");
   }
 
+  async *commentCurrentStream(context: AiDjContext): AsyncIterable<string> {
+    if (!context.nowTrack) {
+      yield "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！";
+      return;
+    }
+    yield* this.commentTrackStream(context.nowTrack, context, "comment_current");
+  }
+
   async commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string> {
     if (!this.client) {
       return fallbackComment(track);
@@ -159,28 +187,7 @@ export class OpenAiDjAssistant implements AiDjAssistant {
         model: this.model,
         temperature: 0.9,
         max_tokens: 180,
-        messages: [
-          {
-            role: "system",
-            content:
-              "回复必须像聊天，不像长评。最多 1-3 句，总长尽量控制在 80 字以内；只挑一个具体听感说，别展开成文章。"
-          },
-          {
-            role: "system",
-            content: `你是 MusicGPT 的 GPT DJ。${AI_DJ_PERSONA_STYLE} 用中文随手聊聊指定歌曲，像在和熟悉的朋友分享刚听到的小惊喜，同时保留一点音乐判断。必须根据歌曲标题、艺人、专辑、moodTag、用户意图和最近对话改变角度；可以聊编曲、声音质感、节奏、旋律或适合的场景。避免套话，不营销，不机械。`
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              purpose,
-              track,
-              nowTrack: context.nowTrack,
-              queue: context.queue.slice(0, 3),
-              tasteSummary: context.taste?.summary,
-              recentMessages: context.messages.slice(-10)
-            })
-          }
-        ]
+        messages: this.buildCommentMessages(track, context, purpose)
       });
       this.lastError = undefined;
       return response.choices[0]?.message.content?.trim() || fallbackComment(track);
@@ -229,6 +236,92 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     }
   }
 
+  async *chatStream(message: string, context: AiDjContext): AsyncIterable<string> {
+    if (!this.client) {
+      yield fallbackChatReply(message, context);
+      return;
+    }
+
+    try {
+      const stream = await this.client.chat.completions.create({
+        model: this.model,
+        temperature: 0.92,
+        max_tokens: 140,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content:
+              "回复必须短，像朋友在聊天。最多 1-3 句，总长尽量控制在 80 字以内；不要分点，不要长段分析。"
+          },
+          {
+            role: "system",
+            content: `你是 MusicGPT 的 GPT DJ，不是客服机器人。${AI_DJ_PERSONA_STYLE} 用中文回复，会自然接话，也有自己的音乐审美。你可以聊音乐、帮用户把模糊感受翻译成点歌方向、解释当前播放。不要复读固定开场白；不要说“我在，你可以描述一个场景”这类模板句；不要假装已经执行未执行的播放动作。`
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              message,
+              nowTrack: context.nowTrack,
+              tasteSummary: context.taste?.summary,
+              recentMessages: context.messages.slice(-12)
+            })
+          }
+        ]
+      });
+      let producedText = false;
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta.content;
+        if (delta) {
+          producedText = true;
+          yield delta;
+        }
+      }
+      this.lastError = undefined;
+      if (!producedText) {
+        yield fallbackChatReply(message, context);
+      }
+    } catch (error) {
+      this.lastError = summarizeOpenAiError(error);
+      throw error;
+    }
+  }
+
+  async *commentTrackStream(
+    track: Track,
+    context: AiDjContext,
+    purpose: string
+  ): AsyncIterable<string> {
+    if (!this.client) {
+      yield fallbackComment(track);
+      return;
+    }
+    try {
+      const stream = await this.client.chat.completions.create({
+        model: this.model,
+        temperature: 0.9,
+        max_tokens: 180,
+        stream: true,
+        messages: this.buildCommentMessages(track, context, purpose)
+      });
+      let producedText = false;
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta.content;
+        if (delta) {
+          producedText = true;
+          yield delta;
+        }
+      }
+      this.lastError = undefined;
+      if (!producedText) {
+        yield fallbackComment(track);
+      }
+    } catch (error) {
+      this.lastError = summarizeOpenAiError(error);
+      throw error;
+    }
+  }
+
   private async askJson<T>(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): Promise<T> {
     if (!this.client) {
       throw new Error("OpenAI client is not configured");
@@ -247,6 +340,35 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       this.lastError = summarizeOpenAiError(error);
       throw error;
     }
+  }
+
+  private buildCommentMessages(
+    track: Track,
+    context: AiDjContext,
+    purpose: string
+  ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+    return [
+      {
+        role: "system",
+        content:
+          "回复必须像聊天，不像长评。最多 1-3 句，总长尽量控制在 80 字以内；只挑一个具体听感说，别展开成文章。"
+      },
+      {
+        role: "system",
+        content: `你是 MusicGPT 的 GPT DJ。${AI_DJ_PERSONA_STYLE} 用中文随手聊聊指定歌曲，像在和熟悉的朋友分享刚听到的小惊喜，同时保留一点音乐判断。必须根据歌曲标题、艺人、专辑、moodTag、用户意图和最近对话改变角度；可以聊编曲、声音质感、节奏、旋律或适合的场景。避免套话，不营销，不机械。`
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          purpose,
+          track,
+          nowTrack: context.nowTrack,
+          queue: context.queue.slice(0, 3),
+          tasteSummary: context.taste?.summary,
+          recentMessages: context.messages.slice(-10)
+        })
+      }
+    ];
   }
 }
 

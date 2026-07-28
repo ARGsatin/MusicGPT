@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 
 import type {
   ChatMessage,
+  ChatStreamEvent,
   DjSettings,
   EnvironmentContext,
   NowPlayingState,
@@ -24,7 +25,7 @@ import {
   generateChatSpeech,
   playSuggestedTrack,
   requestNext,
-  sendChat,
+  sendChatStream,
   sendFeedback,
   updateDjSettings,
   updateEnvironmentLocation
@@ -230,6 +231,7 @@ interface MessageListProps {
   messages: ChatMessage[];
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => Promise<void>;
   onSpeakMessage: (message: ChatMessage) => Promise<void>;
+  streamingMessageAt: string | null;
   suggestionLoadingId: string | null;
 }
 
@@ -241,6 +243,7 @@ const MessageList = memo(function MessageList({
   messages,
   onPlaySuggestion,
   onSpeakMessage,
+  streamingMessageAt,
   suggestionLoadingId
 }: MessageListProps) {
   const messageThreadRef = useRef<HTMLDivElement>(null);
@@ -251,11 +254,13 @@ const MessageList = memo(function MessageList({
       return;
     }
     thread.scrollTop = thread.scrollHeight;
-  }, [messages.length, chatLoading]);
+  }, [messages.length, messages.at(-1)?.text, chatLoading]);
 
   return (
     <div className="message-thread" ref={messageThreadRef}>
-      {messages.map((message, index) => (
+      {messages.map((message, index) => {
+        const isStreaming = message.at === streamingMessageAt;
+        return (
         <div
           className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
           key={`${message.at}-${index}`}
@@ -267,7 +272,10 @@ const MessageList = memo(function MessageList({
           ) : null}
           <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
             <div className="message-copy-row">
-              <p>{message.text}</p>
+              <p>
+                {message.text}
+                {isStreaming ? <span className="streaming-caret" aria-label="正在生成回复" /> : null}
+              </p>
               {message.role === "assistant" && message.id ? (
                 <button
                   className="speech-button"
@@ -319,7 +327,8 @@ const MessageList = memo(function MessageList({
             ) : null}
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 });
@@ -548,6 +557,7 @@ export default function App() {
   const [loadingSpeechId, setLoadingSpeechId] = useState<number | null>(null);
   const [failedSpeechId, setFailedSpeechId] = useState<number | null>(null);
   const [speechNotice, setSpeechNotice] = useState<string | null>(null);
+  const [streamingMessageAt, setStreamingMessageAt] = useState<string | null>(null);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
@@ -561,6 +571,8 @@ export default function App() {
   const speechAudioRef = useRef<HTMLAudioElement>(null);
   const speechControllerRef = useRef<SpeechPlaybackController | null>(null);
   const speechRequestTokenRef = useRef(0);
+  const chatStreamAbortRef = useRef<AbortController | null>(null);
+  const chatStreamTokenRef = useRef(0);
   const autoSpeakRef = useRef(autoSpeak);
 
   const refresh = useCallback(async () => {
@@ -603,7 +615,7 @@ export default function App() {
       onActiveChange: setSpeechActive,
       onPlayingKeyChange: setActiveSpeechKey,
       onPlaybackError: (job) => {
-        if (job.kind === "chat") {
+        if (job.kind === "chat" && job.key.startsWith("chat:")) {
           const messageId = Number(job.key.split(":")[1]);
           setFailedSpeechId(Number.isFinite(messageId) ? messageId : null);
         }
@@ -612,6 +624,7 @@ export default function App() {
     });
     speechControllerRef.current = controller;
     return () => {
+      chatStreamAbortRef.current?.abort();
       controller.dispose();
       speechControllerRef.current = null;
     };
@@ -636,6 +649,8 @@ export default function App() {
       return;
     }
     if (manual) {
+      chatStreamAbortRef.current?.abort();
+      chatStreamAbortRef.current = null;
       controller.stop();
     }
     const requestToken = ++speechRequestTokenRef.current;
@@ -727,24 +742,76 @@ export default function App() {
     }
     const message = rawMessage.trim();
     const optimistic: ChatMessage = { role: "user", text: message, at: new Date().toISOString() };
+    const streamAt = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const streamingAssistant: ChatMessage = {
+      role: "assistant",
+      text: "",
+      at: streamAt
+    };
+    const streamKey = `chat-stream:${streamAt}`;
+    const streamToken = ++chatStreamTokenRef.current;
+    const abortController = new AbortController();
+    chatStreamAbortRef.current?.abort();
+    chatStreamAbortRef.current = abortController;
+    let resultReceived = false;
     setInput("");
     setChatError(null);
     setChatLoading(true);
-    setMessages((current) => [...current, optimistic]);
+    setStreamingMessageAt(streamAt);
+    setMessages((current) => [...current, optimistic, streamingAssistant]);
     try {
-      const response = await sendChat(message);
-      setMessages(response.messages);
-      setNow(response.now);
-      const assistantMessage = response.messages.at(-1);
-      if (assistantMessage?.role === "assistant" && autoSpeakRef.current) {
-        void playAssistantMessage(assistantMessage);
-      }
+      await sendChatStream(message, {
+        synthesizeSpeech: autoSpeakRef.current,
+        signal: abortController.signal,
+        onEvent: (event: ChatStreamEvent) => {
+          if (chatStreamTokenRef.current !== streamToken) {
+            return;
+          }
+          if (event.type === "text_delta") {
+            setMessages((current) =>
+              current.map((item) =>
+                item.at === streamAt
+                  ? { ...item, text: `${item.text}${event.delta}` }
+                  : item
+              )
+            );
+          } else if (event.type === "speech" && autoSpeakRef.current) {
+            speechControllerRef.current?.enqueueChatSegment(streamKey, {
+              key: `${streamKey}:${event.sequence}`,
+              audioUrl: event.audioUrl,
+              kind: "chat"
+            });
+          } else if (event.type === "result") {
+            resultReceived = true;
+            setMessages(event.response.messages);
+            setNow(event.response.now);
+            setStreamingMessageAt(null);
+          }
+        }
+      });
       await refreshTaste();
     } catch (error) {
-      setChatError(error instanceof Error ? error.message : "GPT DJ 暂时掉线了。");
-      setMessages((current) => current.filter((item) => item !== optimistic));
+      const aborted = error instanceof DOMException && error.name === "AbortError";
+      if (!aborted && chatStreamTokenRef.current === streamToken) {
+        setChatError(error instanceof Error ? error.message : "GPT DJ 暂时掉线了。");
+        if (!resultReceived) {
+          const history = await fetchChatHistory().catch(() => undefined);
+          if (history) {
+            setMessages(history);
+          } else {
+            setMessages((current) => current.filter((item) => item.at !== streamAt));
+          }
+        }
+      }
     } finally {
-      setChatLoading(false);
+      speechControllerRef.current?.finishChatStream(streamKey);
+      if (chatStreamAbortRef.current === abortController) {
+        chatStreamAbortRef.current = null;
+      }
+      if (chatStreamTokenRef.current === streamToken) {
+        setStreamingMessageAt(null);
+        setChatLoading(false);
+      }
     }
   };
 
@@ -910,6 +977,7 @@ export default function App() {
   };
 
   const onToggleAutoSpeak = (enabled: boolean) => {
+    autoSpeakRef.current = enabled;
     setAutoSpeak(enabled);
     if (!enabled) {
       speechRequestTokenRef.current += 1;
@@ -1017,7 +1085,7 @@ export default function App() {
                 />
                 自动朗读
               </label>
-              <span className="context-chip">小晓女声</span>
+              <span className="context-chip">全程小晓声线</span>
             </div>
           </header>
           <MessageList
@@ -1028,6 +1096,7 @@ export default function App() {
             messages={visibleMessages}
             onPlaySuggestion={onPlaySuggestion}
             onSpeakMessage={(message) => playAssistantMessage(message, true)}
+            streamingMessageAt={streamingMessageAt}
             suggestionLoadingId={suggestionLoadingId}
           />
           <p className="now-caption">Now playing: {trackTitle}</p>

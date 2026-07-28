@@ -27,6 +27,13 @@ interface TtsPipelineOptions {
   maxAgeMs?: number;
 }
 
+interface SpeechProfile {
+  voice: string;
+  rate: string;
+  pitch: string;
+  volume: string;
+}
+
 export class TtsPipeline {
   private readonly inFlight = new Map<string, Promise<SpeechSynthesisResult>>();
   private readonly maxFiles: number;
@@ -54,8 +61,9 @@ export class TtsPipeline {
   }
 
   async synthesizeText(text: string): Promise<SpeechSynthesisResult> {
-    const profileKey = `${this.voice}|${DEFAULT_RATE}|${DEFAULT_PITCH}|${DEFAULT_VOLUME}`;
     const preparedText = prepareSpeechText(text);
+    const profile = this.getSpeechProfile();
+    const profileKey = profileKeyFor(profile);
     if (!preparedText) {
       return { profileKey };
     }
@@ -78,12 +86,7 @@ export class TtsPipeline {
     const synthesis = (async (): Promise<SpeechSynthesisResult> => {
       const tempPath = `${targetPath}.${crypto.randomUUID()}.tmp`;
       try {
-        await this.saveFn(escapeSsmlText(preparedText), tempPath, {
-          voice: this.voice,
-          rate: DEFAULT_RATE,
-          pitch: DEFAULT_PITCH,
-          volume: DEFAULT_VOLUME
-        });
+        await this.saveFn(escapeSsmlText(preparedText), tempPath, profile);
         if (fs.existsSync(targetPath)) {
           safeRemove(tempPath);
         } else {
@@ -109,6 +112,15 @@ export class TtsPipeline {
     } finally {
       this.inFlight.delete(key);
     }
+  }
+
+  private getSpeechProfile(): SpeechProfile {
+    return {
+      voice: this.voice,
+      rate: DEFAULT_RATE,
+      pitch: DEFAULT_PITCH,
+      volume: DEFAULT_VOLUME
+    };
   }
 
   private isUsableCacheFile(filePath: string): boolean {
@@ -188,6 +200,10 @@ function escapeSsmlText(text: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function profileKeyFor(profile: SpeechProfile): string {
+  return `${profile.voice}|${profile.rate}|${profile.pitch}|${profile.volume}`;
 }
 
 function safeRemove(filePath: string): void {

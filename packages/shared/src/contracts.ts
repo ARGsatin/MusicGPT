@@ -10,6 +10,7 @@ import type {
 
 export const API_ROUTES = {
   chat: "/api/chat",
+  chatStream: "/api/chat/stream",
   chatHistory: "/api/chat/history",
   chatSpeech: (messageId: number) => `/api/chat/${messageId}/speech`,
   now: "/api/now",

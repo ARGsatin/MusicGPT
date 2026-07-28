@@ -23,6 +23,126 @@ afterEach(async () => {
 });
 
 describe("AI DJ assistant chat", () => {
+  it("streams model text and sentence audio before returning the persisted result", async () => {
+    const spoken: string[] = [];
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatDeltas: ["好呀，", "今天听点轻快的。", "再来一首！"]
+      }),
+      ttsSave: async (text, filePath) => {
+        spoken.push(text);
+        fs.writeFileSync(filePath, "audio");
+      }
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "陪我听歌", synthesizeSpeech: true })
+    });
+
+    expect(response.ok).toBe(true);
+    expect(response.headers.get("content-type")).toContain("application/x-ndjson");
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        delta?: string;
+        text?: string;
+        audioUrl?: string;
+        response?: { reply: string; messages: ChatMessage[] };
+      });
+
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
+      "好呀，",
+      "今天听点轻快的。",
+      "再来一首！"
+    ]);
+    expect(events.filter((event) => event.type === "speech").map((event) => event.text)).toEqual([
+      "好呀，今天听点轻快的。",
+      "再来一首！"
+    ]);
+    expect(events.filter((event) => event.type === "speech").every((event) => /^\/tts-cache\//.test(event.audioUrl!))).toBe(true);
+    expect(spoken).toEqual(["好呀，今天听点轻快的。", "再来一首！"]);
+    const result = events.find((event) => event.type === "result")?.response;
+    expect(result?.reply).toBe("好呀，今天听点轻快的。再来一首！");
+    expect(result?.messages.at(-1)).toMatchObject({
+      id: expect.any(Number),
+      role: "assistant",
+      text: "好呀，今天听点轻快的。再来一首！"
+    });
+  });
+
+  it("flushes the first text delta without waiting for speech synthesis", async () => {
+    let releaseSpeech: () => void = () => {};
+    const speechGate = new Promise<void>((resolve) => {
+      releaseSpeech = resolve;
+    });
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatDeltas: ["第一句马上显示。"]
+      }),
+      ttsSave: async (_text, filePath) => {
+        await speechGate;
+        fs.writeFileSync(filePath, "audio");
+      }
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "测试延迟", synthesizeSpeech: true })
+    });
+    const reader = response.body!.getReader();
+    let firstChunk: { done: boolean; value: Uint8Array | undefined };
+    try {
+      firstChunk = await Promise.race([
+        reader.read(),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(() => reject(new Error("first chat delta was buffered behind TTS")), 500);
+        })
+      ]);
+    } finally {
+      releaseSpeech();
+    }
+
+    expect(new TextDecoder().decode(firstChunk.value)).toContain(
+      '"type":"text_delta","delta":"第一句马上显示。"'
+    );
+    while (!(await reader.read()).done) {
+      // Drain the response so the request finishes before fixture cleanup.
+    }
+  });
+
+  it("shows a streaming provider diagnostic but only speaks the friendly fallback", async () => {
+    const spoken: string[] = [];
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        streamError: new Error("upstream stream broke")
+      }),
+      ttsSave: async (text, filePath) => {
+        spoken.push(text);
+        fs.writeFileSync(filePath, "audio");
+      }
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "还在吗", synthesizeSpeech: true })
+    });
+    const body = await response.text();
+
+    expect(body).toContain("upstream stream broke");
+    expect(spoken.join("")).not.toContain("upstream stream broke");
+    expect(spoken.join("")).not.toContain("刚刚开了个小差");
+    expect(spoken.join("")).toMatch(/[呀啦～]/);
+  });
+
   it("selects a described song from the local library without changing playback", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
@@ -125,6 +245,34 @@ describe("AI DJ assistant chat", () => {
     expect(response.now.track?.id).toBe(301);
     expect(response.reply).toContain("低频");
     expect(fixture.assistant.lastContext?.nowTrack?.title).toBe("Midnight Window");
+  });
+
+  it("streams a DeepSeek-style current-track comment instead of waiting for the full review", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "comment_current" },
+        commentDeltas: ["鼓点很轻，", "但弹性特别好呀。"]
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 302, title: "Soft Bounce", artists: ["Lumi"], moodTag: "warm", playCount: 8 })
+    ]);
+    await requestNext(fixture.base);
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "点评当前这首", synthesizeSpeech: false })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; delta?: string });
+
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
+      "鼓点很轻，",
+      "但弹性特别好呀。"
+    ]);
   });
 
   it("persists recent chat history through the history endpoint", async () => {
@@ -261,6 +409,71 @@ describe("AI DJ assistant chat", () => {
     expect(response.reply).toContain("Nevada");
     expect(response.reply).toContain("skyline");
   });
+
+  it("streams the generated comment after a direct song-search result", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_specific", query: "Nevada", searchQuery: "Nevada" },
+        selectedCommentDeltas: ["副歌很亮，", "人声又留了一点雨意呀。"]
+      }),
+      searchTracks: [{ id: 404, title: "Nevada", artists: ["Vicetone"], moodTag: "energy" }]
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "play Nevada", synthesizeSpeech: false })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        delta?: string;
+        response?: { messages: ChatMessage[] };
+      });
+    const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
+
+    expect(deltas[0]).toContain("我挑了《Nevada》");
+    expect(deltas.slice(1)).toEqual(["副歌很亮，", "人声又留了一点雨意呀。"]);
+    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(404);
+  });
+
+  it("streams the generated comment after a described-song selection", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: {
+          type: "play_by_description",
+          description: "适合下雨散步",
+          searchQuery: "下雨 散步"
+        },
+        selection: { trackId: 405, reason: "雨天步速很合适" },
+        selectedCommentDeltas: ["吉他很松弛，", "雨里走路正合适呀。"]
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 405, title: "Rainy Steps", artists: ["Mori"], moodTag: "calm", playCount: 20 })
+    ]);
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "点一首适合下雨散步的歌", synthesizeSpeech: false })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        delta?: string;
+        response?: { messages: ChatMessage[] };
+      });
+    const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
+
+    expect(deltas[0]).toContain("我挑了《Rainy Steps》");
+    expect(deltas.slice(1)).toEqual(["吉他很松弛，", "雨里走路正合适呀。"]);
+    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(405);
+  });
 });
 
 class FakeAssistant implements AiDjAssistant {
@@ -272,8 +485,12 @@ class FakeAssistant implements AiDjAssistant {
       intent: AiDjIntent;
       selection?: TrackSelection;
       comment?: string;
+      commentDeltas?: string[];
       selectedComment?: string;
+      selectedCommentDeltas?: string[];
       chatReply?: string;
+      chatDeltas?: string[];
+      streamError?: Error;
     }
   ) {}
 
@@ -305,6 +522,30 @@ class FakeAssistant implements AiDjAssistant {
   async chat(_message: string, context: AiDjContext): Promise<string> {
     this.lastContext = context;
     return this.options.chatReply ?? "我在，继续说你的听感。";
+  }
+
+  async *commentTrackStream(_track: Track, context: AiDjContext, _purpose: string): AsyncIterable<string> {
+    this.lastContext = context;
+    for (const delta of this.options.selectedCommentDeltas ?? [this.options.selectedComment ?? "A selected-track comment with its own pulse."]) {
+      yield delta;
+    }
+  }
+
+  async *commentCurrentStream(context: AiDjContext): AsyncIterable<string> {
+    this.lastContext = context;
+    for (const delta of this.options.commentDeltas ?? [this.options.comment ?? "这首歌有自己的阴影和光。"]) {
+      yield delta;
+    }
+  }
+
+  async *chatStream(_message: string, context: AiDjContext): AsyncIterable<string> {
+    this.lastContext = context;
+    if (this.options.streamError) {
+      throw this.options.streamError;
+    }
+    for (const delta of this.options.chatDeltas ?? [this.options.chatReply ?? "我在，继续说你的听感。"]) {
+      yield delta;
+    }
   }
 }
 
