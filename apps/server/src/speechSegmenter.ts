@@ -3,7 +3,7 @@ interface SpeechTextSegmenterOptions {
   maxChars?: number;
 }
 
-const STRONG_BREAKS = new Set(["。", "！", "？", "!", "?", "；", ";", "\n"]);
+const STRONG_BREAKS = new Set(["。", "！", "？", "!", "?", ".", "；", ";", "…", "\n"]);
 const SOFT_BREAKS = new Set(["，", ",", "：", ":"]);
 
 export class SpeechTextSegmenter {
@@ -12,8 +12,8 @@ export class SpeechTextSegmenter {
   private readonly maxChars: number;
 
   constructor(options: SpeechTextSegmenterOptions = {}) {
-    this.minSoftBreakChars = options.minSoftBreakChars ?? 12;
-    this.maxChars = options.maxChars ?? 28;
+    this.minSoftBreakChars = options.minSoftBreakChars ?? 16;
+    this.maxChars = options.maxChars ?? 80;
   }
 
   push(delta: string): string[] {
@@ -29,13 +29,14 @@ export class SpeechTextSegmenter {
     const ready: string[] = [];
     while (this.buffer) {
       const characters = [...this.buffer];
-      const strongBreak = characters.findIndex((character) => STRONG_BREAKS.has(character));
+      const boundedCharacters = characters.slice(0, this.maxChars);
+      const strongBreak = boundedCharacters.findIndex((character) => STRONG_BREAKS.has(character));
       if (strongBreak >= 0) {
         this.release(characters, strongBreak + 1, ready);
         continue;
       }
 
-      const softBreak = characters.findIndex(
+      const softBreak = boundedCharacters.findIndex(
         (character, index) =>
           index + 1 >= this.minSoftBreakChars && SOFT_BREAKS.has(character)
       );

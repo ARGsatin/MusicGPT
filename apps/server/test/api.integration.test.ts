@@ -99,6 +99,11 @@ describe("API integration", () => {
     const repo = new StateRepository(path.join(tmp, "state.db"));
     repo.addChatMessage({ role: "user", text: "keep this?", at: "2026-07-28T08:00:00.000Z" });
     repo.addChatMessage({ role: "assistant", text: "not after clearing", at: "2026-07-28T08:00:01.000Z" });
+    const memory = repo.upsertChatMemory({
+      category: "preference",
+      content: "用户喜欢轻爵士",
+      normalizedKey: "preference:jazz"
+    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch);
     const app = await createServer({
       repo,
@@ -120,6 +125,29 @@ describe("API integration", () => {
     const after = (await afterResponse.json()) as { messages: unknown[] };
     expect(after.messages).toEqual([]);
     expect(repo.getRecentMessages()).toEqual([]);
+
+    const memoriesResponse = await fetch(`${base}/api/chat/memories`);
+    await expect(memoriesResponse.json()).resolves.toMatchObject({
+      memories: [expect.objectContaining({ id: memory.id, content: "用户喜欢轻爵士" })]
+    });
+
+    const deleteMemoryResponse = await fetch(`${base}/api/chat/memories/${memory.id}`, {
+      method: "DELETE"
+    });
+    expect(deleteMemoryResponse.ok).toBe(true);
+    await expect(fetch(`${base}/api/chat/memories`).then((response) => response.json())).resolves.toEqual({
+      memories: []
+    });
+
+    repo.upsertChatMemory({
+      category: "habit",
+      content: "用户睡前听音乐",
+      normalizedKey: "habit:bedtime"
+    });
+    const clearMemoriesResponse = await fetch(`${base}/api/chat/memories`, {
+      method: "DELETE"
+    });
+    await expect(clearMemoriesResponse.json()).resolves.toEqual({ ok: true, memories: [] });
   });
 });
 

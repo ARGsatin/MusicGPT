@@ -34,6 +34,10 @@ const chatSpeechParamsSchema = z.object({
   messageId: z.coerce.number().int().positive()
 });
 
+const chatMemoryParamsSchema = z.object({
+  memoryId: z.coerce.number().int().positive()
+});
+
 const nextSchema = z
   .object({
     forceReplan: z.boolean().optional()
@@ -48,7 +52,11 @@ const trackSchema = z.object({
   durationMs: z.number().optional(),
   coverUrl: z.string().optional(),
   songUrl: z.string().optional(),
-  moodTag: z.enum(["calm", "focus", "warm", "night", "energy", "nostalgia", "unknown"]).optional()
+  moodTag: z.enum(["calm", "focus", "warm", "night", "energy", "nostalgia", "unknown"]).optional(),
+  tags: z.array(z.object({
+    category: z.enum(["artist", "mood", "style", "scene", "period", "weather"]),
+    value: z.string().min(1)
+  })).optional()
 });
 
 const playTrackSchema = z.object({
@@ -57,8 +65,16 @@ const playTrackSchema = z.object({
 });
 
 const feedbackSchema = z.object({
-  type: z.enum(["skip", "like", "replay", "complete"]),
+  type: z.enum(["skip", "like", "unlike", "replay", "complete"]),
   trackId: z.number().int()
+});
+
+const favoriteParamsSchema = z.object({
+  trackId: z.coerce.number().int()
+});
+
+const favoriteSchema = z.object({
+  favorite: z.boolean()
 });
 
 const environmentLocationSchema = z.object({
@@ -116,7 +132,8 @@ export async function createServer(options: CreateServerOptions = {}) {
         apiKey: config.openAiApiKey,
         baseUrl: config.openAiBaseUrl,
         model: config.openAiModel,
-        provider: config.aiProvider
+        provider: config.aiProvider,
+        chatMaxTokens: config.aiDjChatMaxTokens
       }),
     options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
@@ -128,7 +145,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   );
   await orchestrator.initialize();
   app.addHook("onClose", async () => {
-    orchestrator.close();
+    await orchestrator.close();
   });
 
   app.get("/health", async () => ({ ok: true }));
@@ -207,6 +224,21 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/api/chat/history", async () => orchestrator.getChatHistory());
 
+  app.get("/api/chat/memories", async () => orchestrator.getChatMemories());
+
+  app.delete("/api/chat/memories/:memoryId", async (request, reply) => {
+    const parsed = chatMemoryParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    if (!orchestrator.deleteChatMemory(parsed.data.memoryId)) {
+      return reply.status(404).send({ error: "chat_memory_not_found" });
+    }
+    return { ok: true };
+  });
+
+  app.delete("/api/chat/memories", async () => orchestrator.clearChatMemories());
+
   app.post("/api/chat/:messageId/speech", async (request, reply) => {
     const parsed = chatSpeechParamsSchema.safeParse(request.params);
     if (!parsed.success) {
@@ -217,7 +249,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       case "ok":
         return {
           messageId: result.messageId,
-          audioUrl: result.audioUrl
+          audioUrl: result.audioUrl,
+          segments: result.segments
         };
       case "not_found":
         return reply.status(404).send({ error: "chat_message_not_found" });
@@ -237,6 +270,18 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     await orchestrator.handleFeedback(parsed.data);
     return { ok: true };
+  });
+
+  app.put("/api/favorites/:trackId", async (request, reply) => {
+    const params = favoriteParamsSchema.safeParse(request.params);
+    const body = favoriteSchema.safeParse(request.body);
+    if (!params.success) {
+      return reply.status(400).send({ error: params.error.flatten() });
+    }
+    if (!body.success) {
+      return reply.status(400).send({ error: body.error.flatten() });
+    }
+    return orchestrator.setFavorite(params.data.trackId, body.data.favorite);
   });
 
   app.get("/api/system/status", async () => orchestrator.getSystemStatus());

@@ -39,6 +39,30 @@ describe("chat speech preferences", () => {
 });
 
 describe("speech playback queue", () => {
+  it("replays every cached segment in order as one chat speech group", async () => {
+    const audio = new FakeSpeechAudio();
+    const activeStates: boolean[] = [];
+    const controller = new SpeechPlaybackController(audio, {
+      onActiveChange: (active) => activeStates.push(active)
+    });
+
+    const started = await controller.playSequence([
+      { key: "chat:12", audioUrl: "/part-a.mp3", kind: "chat" },
+      { key: "chat:12", audioUrl: "/part-b.mp3", kind: "chat" },
+      { key: "chat:12", audioUrl: "/part-c.mp3", kind: "chat" }
+    ]);
+    expect(started).toBe(true);
+    audio.emit("ended");
+    await Promise.resolve();
+    audio.emit("ended");
+    await Promise.resolve();
+    audio.emit("ended");
+
+    expect(audio.playedSources).toEqual(["/part-a.mp3", "/part-b.mp3", "/part-c.mp3"]);
+    expect(activeStates).toEqual([true, false]);
+    controller.dispose();
+  });
+
   it("plays streamed chat segments in order and keeps music ducked between segments", async () => {
     const audio = new FakeSpeechAudio();
     const activeStates: boolean[] = [];
@@ -92,6 +116,55 @@ describe("speech playback queue", () => {
 
     expect(audio.playedSources).toEqual(["/blocked-0.mp3"]);
     expect(activeStates.at(-1)).toBe(false);
+    controller.dispose();
+  });
+
+  it("does not read later segments after streamed speech hits a media error", async () => {
+    const audio = new FakeSpeechAudio();
+    const failedKeys: string[] = [];
+    const controller = new SpeechPlaybackController(audio, {
+      onPlaybackError: (job) => failedKeys.push(job.key)
+    });
+
+    controller.enqueueChatSegment("stream:broken-audio", {
+      key: "stream:broken-audio:0",
+      audioUrl: "/broken-0.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+    audio.emit("error");
+    controller.enqueueChatSegment("stream:broken-audio", {
+      key: "stream:broken-audio:1",
+      audioUrl: "/broken-1.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+
+    expect(audio.playedSources).toEqual(["/broken-0.mp3"]);
+    expect(failedKeys).toEqual(["stream:broken-audio:0"]);
+    controller.dispose();
+  });
+
+  it("ignores a pending playback rejection after the user stops speech", async () => {
+    const audio = new FakeSpeechAudio();
+    const failedKeys: string[] = [];
+    audio.deferNextPlay = true;
+    const controller = new SpeechPlaybackController(audio, {
+      onPlaybackError: (job) => failedKeys.push(job.key)
+    });
+
+    controller.enqueueChatSegment("stream:stopped", {
+      key: "stream:stopped:0",
+      audioUrl: "/stopped-0.mp3",
+      kind: "chat"
+    });
+    await Promise.resolve();
+    controller.stop(true);
+    audio.rejectPendingPlay();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(failedKeys).toEqual([]);
     controller.dispose();
   });
 
@@ -152,10 +225,20 @@ class FakeSpeechAudio {
   readonly playedSources: string[] = [];
   pauseCount = 0;
   rejectNextPlay = false;
+  deferNextPlay = false;
+  private pendingPlay:
+    | { resolve: () => void; reject: (error: Error) => void }
+    | undefined;
   private readonly listeners = new Map<string, Set<() => void>>();
 
   async play(): Promise<void> {
     this.playedSources.push(this.src);
+    if (this.deferNextPlay) {
+      this.deferNextPlay = false;
+      return new Promise<void>((resolve, reject) => {
+        this.pendingPlay = { resolve, reject };
+      });
+    }
     if (this.rejectNextPlay) {
       this.rejectNextPlay = false;
       throw new Error("NotAllowedError");
@@ -164,6 +247,11 @@ class FakeSpeechAudio {
 
   pause(): void {
     this.pauseCount += 1;
+  }
+
+  rejectPendingPlay(): void {
+    this.pendingPlay?.reject(new Error("NotAllowedError"));
+    this.pendingPlay = undefined;
   }
 
   addEventListener(type: string, listener: () => void): void {

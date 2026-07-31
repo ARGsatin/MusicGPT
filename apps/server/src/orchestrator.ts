@@ -1,10 +1,12 @@
 import { createExtensionProviders } from "./providers.js";
 
 import type {
+  ChatMemory,
   ChatResponse,
   DjSettings,
   EnvironmentContext,
   EnvironmentLocationRequest,
+  FavoriteResponse,
   FeedbackRequest,
   ImportNcmResponse,
   RecommendationImportResponse,
@@ -20,14 +22,23 @@ import type {
 } from "@musicgpt/shared";
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
 import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
+import { ChatMemoryService } from "./chatMemoryService.js";
 import { DjBrain } from "./djBrain.js";
-import { EnvironmentService } from "./environmentService.js";
+import { EnvironmentService, isWeatherFresh } from "./environmentService.js";
 import { NcmConnector, NcmImportError } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
 import { SpeechTextSegmenter } from "./speechSegmenter.js";
 import { TasteEngine } from "./tasteEngine.js";
+import { currentPeriod } from "./time.js";
+import {
+  environmentTags,
+  inferTrackTags,
+  periodLabel,
+  tagsFromContextText,
+  weatherLabel
+} from "./trackTags.js";
 import { prepareSpeechText, TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
@@ -35,13 +46,16 @@ const PLAN_WINDOW_SIZE = 10;
 const QUEUE_TARGET_SIZE = 10;
 const QUEUE_REFILL_THRESHOLD = 6;
 const IMPORT_RETRY_INTERVAL_MS = 60_000;
+const CHAT_HISTORY_DISPLAY_LIMIT = 100;
 export const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
   voice: "zh-CN-XiaoxiaoNeural"
 };
 
-type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation">;
+type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation"> & {
+  refreshIfStale?(context?: EnvironmentContext): Promise<EnvironmentContext>;
+};
 
 export interface ChatStreamCallbacks {
   synthesizeSpeech: boolean;
@@ -59,6 +73,7 @@ export class RadioOrchestrator {
   private lastImportAt: string | undefined;
   private lastImportError: string | undefined;
   private lastImportErrorCode: NcmImportErrorCode | undefined;
+  private readonly chatMemoryService: ChatMemoryService;
 
   constructor(
     private readonly repo: StateRepository,
@@ -74,15 +89,34 @@ export class RadioOrchestrator {
     private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS,
     private readonly environmentService: EnvironmentRuntime = new EnvironmentService(),
     private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm)
-  ) {}
+  ) {
+    const extractor = aiDjAssistant.extractMemories
+      ? aiDjAssistant.extractMemories.bind(aiDjAssistant)
+      : undefined;
+    this.chatMemoryService = new ChatMemoryService(repo, extractor, (memories) => {
+      this.wsHub.broadcast({ event: "chat_memory_updated", data: { memories } });
+    });
+  }
 
   async initialize(): Promise<void> {
     this.state = this.repo.getNowPlaying() ?? { queue: [], paused: false };
     this.ensureDjSettings();
+    await this.refreshEnvironmentIfNeeded();
     if (this.repo.getTrackStatsCount() === 0) {
       await this.runNcmImport();
     }
     await this.refreshTasteProfile();
+    if (
+      this.lastImportErrorCode !== "ncm_unreachable" &&
+      this.lastImportErrorCode !== "ncm_request_failed" &&
+      this.lastImportErrorCode !== "ncm_not_logged_in"
+    ) {
+      await this.refreshRecommendationCandidates(false).catch(() => undefined);
+    }
+    if (this.state.track) {
+      this.repo.ensureTrack(this.state.track);
+      this.state.isFavorite = this.repo.isTrackFavorite(this.state.track.id);
+    }
     if (this.state.track && this.state.lyrics?.trackId !== this.state.track.id) {
       this.state.lyrics = await this.ncm.fetchLyrics(this.state.track.id);
       this.repo.saveNowPlaying(this.state);
@@ -99,8 +133,9 @@ export class RadioOrchestrator {
     await this.broadcastSystemStatus();
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.stopImportRetryLoop();
+    await this.chatMemoryService.waitForIdle();
   }
 
   async importFromNcm(): Promise<number> {
@@ -138,12 +173,19 @@ export class RadioOrchestrator {
   }
 
   getEnvironment(): EnvironmentContext {
-    return this.repo.getEnvironmentContext() ?? this.environmentService.getContext();
+    const context = this.repo.getEnvironmentContext() ?? this.environmentService.getContext();
+    const weatherIsUsable = context.weather === "unknown" || isWeatherFresh(context);
+    return {
+      ...context,
+      dayPeriod: currentPeriod(),
+      weather: weatherIsUsable ? context.weather : "unknown"
+    };
   }
 
   async updateEnvironmentLocation(location: EnvironmentLocationRequest): Promise<EnvironmentContext> {
     const context = await this.environmentService.updateLocation(location);
     this.repo.saveEnvironmentContext(context);
+    this.state.queue = [];
     await this.ensureQueue();
     await this.broadcastSystemStatus();
     return context;
@@ -166,11 +208,29 @@ export class RadioOrchestrator {
   }
 
   getChatHistory(): { messages: ChatResponse["messages"] } {
-    return { messages: this.repo.getRecentMessages(this.chatHistoryLimit()) };
+    return { messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT) };
+  }
+
+  getChatMemories(): { memories: ChatMemory[] } {
+    return { memories: this.chatMemoryService.list() };
+  }
+
+  deleteChatMemory(memoryId: number): boolean {
+    return this.chatMemoryService.delete(memoryId);
+  }
+
+  clearChatMemories(): { ok: true; memories: [] } {
+    this.chatMemoryService.clear();
+    return { ok: true, memories: [] };
   }
 
   async synthesizeChatMessage(messageId: number): Promise<
-    | { status: "ok"; messageId: number; audioUrl: string }
+    | {
+        status: "ok";
+        messageId: number;
+        audioUrl: string;
+        segments: NonNullable<ChatResponse["messages"][number]["speech"]>["segments"];
+      }
     | { status: "not_found" | "not_assistant" | "unavailable" }
   > {
     const message = this.repo.getChatMessage(messageId);
@@ -180,18 +240,20 @@ export class RadioOrchestrator {
     if (message.role !== "assistant") {
       return { status: "not_assistant" };
     }
-    const speech = await this.ttsPipeline.synthesizeText(message.text);
-    if (!speech.audioUrl) {
+    const speech = await this.ttsPipeline.synthesizeSegments(message.text);
+    if (!speech.audioUrl || speech.segments.length === 0) {
       return { status: "unavailable" };
     }
     this.repo.saveChatSpeech(messageId, {
       audioUrl: speech.audioUrl,
-      profileKey: speech.profileKey
+      profileKey: speech.profileKey,
+      segments: speech.segments
     });
     return {
       status: "ok",
       messageId,
-      audioUrl: speech.audioUrl
+      audioUrl: speech.audioUrl,
+      segments: speech.segments
     };
   }
 
@@ -248,8 +310,19 @@ export class RadioOrchestrator {
     }
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const planOptions = this.desiredMood
-      ? { windowSize: PLAN_WINDOW_SIZE, desiredMood: this.desiredMood, environment: this.getEnvironment() }
-      : { windowSize: PLAN_WINDOW_SIZE, environment: this.getEnvironment() };
+      ? {
+          windowSize: PLAN_WINDOW_SIZE,
+          desiredMood: this.desiredMood,
+          environment: this.getEnvironment(),
+          candidates: this.repo.getRecommendationCandidates(),
+          contextTags: this.buildRecommendationContextTags()
+        }
+      : {
+          windowSize: PLAN_WINDOW_SIZE,
+          environment: this.getEnvironment(),
+          candidates: this.repo.getRecommendationCandidates(),
+          contextTags: this.buildRecommendationContextTags()
+        };
     const planned = this.planner.plan(
       this.repo.getTrackStats(),
       profile,
@@ -270,11 +343,13 @@ export class RadioOrchestrator {
     if (!next) {
       return this.state;
     }
+    this.repo.ensureTrack(next.track);
     const resolved = await this.hydrateTrack(next);
     this.state.track = resolved.item.track;
     this.state.lyrics = resolved.lyrics;
     this.state.startedAt = new Date().toISOString();
     this.state.paused = false;
+    this.state.isFavorite = this.repo.isTrackFavorite(resolved.item.track.id);
 
     await this.ensureQueue();
 
@@ -284,23 +359,37 @@ export class RadioOrchestrator {
   }
 
   async playSuggestedTrack(track: Track, reason?: string): Promise<NowPlayingState> {
+    const normalizedTrack = {
+      ...track,
+      tags: inferTrackTags(track)
+    };
+    this.repo.ensureTrack(normalizedTrack);
     this.state.queue.unshift({
-      track,
+      track: normalizedTrack,
       score: 0.99,
-      reason: reason?.trim() || `Requested from GPT DJ: ${track.title}`
+      reason: reason?.trim() || `Requested from GPT DJ: ${normalizedTrack.title}`,
+      source: "chat_search",
+      bucket: "explore"
     });
     return this.nextTrack();
   }
 
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {
+    const environment = this.getEnvironment();
     const event: PlayEvent = {
       type: feedback.type,
       trackId: feedback.trackId,
-      at: new Date().toISOString()
+      at: new Date().toISOString(),
+      ...(feedback.type === "like" || feedback.type === "unlike"
+        ? { metadata: this.favoriteEventMetadata(environment) }
+        : {})
     };
     this.repo.addPlayEvent(event);
     if (feedback.type === "like") {
       this.repo.markTrackLiked(feedback.trackId, event.at);
+    }
+    if (feedback.type === "unlike") {
+      this.repo.setTrackFavorite(feedback.trackId, false, event.at);
     }
     if (feedback.type === "complete") {
       this.completedTracksSinceLastDj += 1;
@@ -313,21 +402,56 @@ export class RadioOrchestrator {
       this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
     }
     await this.refreshTasteProfile();
+    if (this.state.track?.id === feedback.trackId) {
+      this.state.isFavorite = this.repo.isTrackFavorite(feedback.trackId);
+      this.repo.saveNowPlaying(this.state);
+      this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+    }
     this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
+  }
+
+  async setFavorite(trackId: number, favorite: boolean): Promise<FavoriteResponse> {
+    if (this.state.track?.id === trackId) {
+      this.repo.ensureTrack({
+        ...this.state.track,
+        tags: inferTrackTags(this.state.track)
+      });
+    }
+    const wasFavorite = this.repo.isTrackFavorite(trackId);
+    if (wasFavorite !== favorite) {
+      const at = new Date().toISOString();
+      this.repo.setTrackFavorite(trackId, favorite, at);
+      this.repo.addPlayEvent({
+        type: favorite ? "like" : "unlike",
+        trackId,
+        at,
+        metadata: this.favoriteEventMetadata(this.getEnvironment())
+      });
+    }
+    const taste = await this.refreshTasteProfile();
+    if (this.state.track?.id === trackId) {
+      this.state.isFavorite = favorite;
+      this.repo.saveNowPlaying(this.state);
+      this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
+    }
+    this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
+    return { favorite: this.repo.isTrackFavorite(trackId), taste };
   }
 
   async handleChat(message: string): Promise<ChatResponse> {
     this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext();
+    const context = this.buildAiContext(message);
     const intent = await this.classifySafely(message, context);
-    return this.handleChatIntent(message, context, intent);
+    const response = await this.handleChatIntent(message, context, intent);
+    this.chatMemoryService.enqueueCapture(message, response.reply);
+    return response;
   }
 
   async handleChatStream(message: string, callbacks: ChatStreamCallbacks): Promise<ChatResponse> {
     this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext();
+    const context = this.buildAiContext(message);
     const intent = await this.classifySafely(message, context);
-    const segmenter = new SpeechTextSegmenter();
+    const segmenter = new SpeechTextSegmenter({ minSoftBreakChars: 16, maxChars: 80 });
     let speechSequence = 0;
     let speechWork = Promise.resolve();
 
@@ -504,6 +628,7 @@ export class RadioOrchestrator {
     }
 
     callbacks.onResult(response);
+    this.chatMemoryService.enqueueCapture(message, response.reply);
     await speechWork;
     return response;
   }
@@ -543,6 +668,8 @@ export class RadioOrchestrator {
         return this.suggestSpecific(intent);
       case "play_by_description":
         return this.suggestByDescription(intent, context);
+      case "play_atmosphere":
+        return this.suggestAtmosphere();
       case "chat":
       default: {
         const aiStatus = this.aiDjAssistant.status();
@@ -558,10 +685,14 @@ export class RadioOrchestrator {
 
   async importRecommendations(): Promise<RecommendationImportResponse> {
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
-    const environment = this.getEnvironment();
-    const result = await this.recommendationImporter.importRecommendations(profile, environment);
+    const environment = await this.refreshEnvironmentIfNeeded();
+    const result = await this.recommendationImporter.importRecommendations(
+      profile,
+      environment,
+      this.recentUserContextText(),
+      true
+    );
     if (result.importedCount > 0) {
-      await this.refreshTasteProfile();
       this.state.queue = [];
       await this.ensureQueue();
     }
@@ -581,20 +712,24 @@ export class RadioOrchestrator {
     }
   }
 
-  private buildAiContext(): AiDjContext {
+  private buildAiContext(message = ""): AiDjContext {
     return {
-      messages: this.repo.getRecentMessages(this.chatHistoryLimit()).map(({ role, text, at }) => ({
+      messages: this.repo.getRecentMessages(this.chatContextLimit()).map(({ role, text, at }) => ({
         role,
         text,
         at
       })),
+      memories: this.chatMemoryService.relevantTo(message),
       nowTrack: this.state.track,
       queue: this.state.queue.slice(0, 10),
-      taste: this.repo.getTasteProfile()
+      taste: this.repo.getTasteProfile(),
+      environment: this.getEnvironment(),
+      contextTags: this.buildRecommendationContextTags(),
+      recentFeedback: this.repo.getRecentPlayEvents(20)
     };
   }
 
-  private chatHistoryLimit(): number {
+  private chatContextLimit(): number {
     return Math.max(2, this.memoryTurns * 2);
   }
 
@@ -660,6 +795,55 @@ export class RadioOrchestrator {
     );
   }
 
+  private async suggestAtmosphere(): Promise<ChatResponse> {
+    const environment = await this.refreshEnvironmentIfNeeded();
+    await this.refreshRecommendationCandidates().catch(() => undefined);
+    const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
+    const context = this.buildAiContext();
+    const plan = this.planner.plan(
+      this.repo.getTrackStats(),
+      profile,
+      this.repo.getRecentPlayEvents(120),
+      {
+        windowSize: 12,
+        environment,
+        candidates: this.repo.getRecommendationCandidates(),
+        contextTags: this.buildRecommendationContextTags(),
+        ...(this.desiredMood ? { desiredMood: this.desiredMood } : {})
+      }
+    );
+    const candidates = plan.map((item) => item.track);
+    if (candidates.length === 0) {
+      return this.reply(
+        "noop",
+        "现在的候选池还没准备好，我先保留时间和口味线索；同步网易云后再点一次氛围点歌就好啦～",
+        this.state
+      );
+    }
+    const description = this.atmosphereDescription(environment);
+    const selection = await this.aiDjAssistant
+      .selectTrack(description, candidates, context)
+      .catch((): TrackSelection => ({
+        trackId: candidates[0]?.id,
+        reason: plan[0]?.reason ?? "最贴近当前氛围。"
+      }));
+    const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
+    if (!target) {
+      return this.reply("noop", "这次还没挑到合适的歌，我再换一批候选呀～", this.state);
+    }
+    const planItem = plan.find((item) => item.track.id === target.id);
+    const reason = [planItem?.reason, selection.reason].filter(Boolean).join("；");
+    const comment = await this.aiDjAssistant
+      .commentTrack(target, context, `current atmosphere: ${description}; ${reason}`)
+      .catch(() => fallbackComment(target));
+    return this.reply(
+      "play_atmosphere",
+      `现在是${description}，我挑了《${target.title}》- ${target.artists.join(" / ")}。\n${comment}`,
+      this.state,
+      this.createTrackSuggestion(target, reason || "匹配当前氛围")
+    );
+  }
+
   private async commentCurrentTrack(context: AiDjContext): Promise<ChatResponse> {
     if (!this.state.track) {
       return this.reply("comment_current", "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！", this.state);
@@ -669,8 +853,13 @@ export class RadioOrchestrator {
   }
 
   private findLocalCandidates(description: string): Array<{ track: Track; score: number }> {
-    return this.repo
-      .getTrackStats(800)
+    const stats = this.repo.getTrackStats(800);
+    const knownIds = new Set(stats.map((entry) => entry.track.id));
+    const exploration = this.repo
+      .getRecommendationCandidates(300)
+      .filter((candidate) => !knownIds.has(candidate.track.id))
+      .map((candidate) => ({ track: candidate.track, playCount: 0 }));
+    return [...stats, ...exploration]
       .map((entry) => ({
         track: entry.track,
         score: scoreTrackForDescription(entry, description)
@@ -678,6 +867,78 @@ export class RadioOrchestrator {
       .filter((entry) => entry.score > 0)
       .sort((left, right) => right.score - left.score)
       .slice(0, 10);
+  }
+
+  private async refreshEnvironmentIfNeeded(): Promise<EnvironmentContext> {
+    const stored = this.repo.getEnvironmentContext() ?? this.environmentService.getContext();
+    if (!this.environmentService.refreshIfStale) {
+      return this.getEnvironment();
+    }
+    const refreshed = await this.environmentService.refreshIfStale(stored).catch(() => ({
+      ...stored,
+      dayPeriod: currentPeriod(),
+      weather: "unknown" as const,
+      updatedAt: new Date().toISOString()
+    }));
+    this.repo.saveEnvironmentContext(refreshed);
+    return this.getEnvironment();
+  }
+
+  private async refreshRecommendationCandidates(includeSearch = true): Promise<void> {
+    const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
+    await this.recommendationImporter.importRecommendations(
+      profile,
+      this.getEnvironment(),
+      this.recentUserContextText(),
+      false,
+      includeSearch
+    );
+  }
+
+  private recentUserContextText(): string {
+    return this.repo
+      .getRecentMessages(30)
+      .filter((message) => message.role === "user")
+      .slice(-6)
+      .map((message) => message.text)
+      .join(" ");
+  }
+
+  private buildRecommendationContextTags() {
+    const tags = [
+      ...environmentTags(this.getEnvironment()),
+      ...tagsFromContextText(this.recentUserContextText())
+    ];
+    if (this.desiredMood) {
+      tags.push({ category: "mood" as const, value: this.desiredMood });
+    }
+    return tags;
+  }
+
+  private favoriteEventMetadata(
+    environment: EnvironmentContext
+  ): NonNullable<PlayEvent["metadata"]> {
+    const scenes = tagsFromContextText(this.recentUserContextText())
+      .filter((tag) => tag.category === "scene")
+      .map((tag) => tag.value);
+    return {
+      period: periodLabel(environment.dayPeriod),
+      weather: environment.weather === "unknown" ? "未知天气" : weatherLabel(environment.weather),
+      contextTags: scenes.join("|")
+    };
+  }
+
+  private atmosphereDescription(environment: EnvironmentContext): string {
+    const parts = [
+      environment.weather === "unknown" ? undefined : weatherLabel(environment.weather),
+      periodLabel(environment.dayPeriod),
+      ...tagsFromContextText(this.recentUserContextText())
+        .filter((tag) => tag.category === "scene" || tag.category === "style")
+        .slice(0, 3)
+        .map((tag) => tag.value),
+      this.desiredMood
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join("、") : "当前时段和最近口味";
   }
 
   private async maybeGenerateDj(): Promise<void> {
@@ -830,7 +1091,7 @@ export class RadioOrchestrator {
       action,
       reply,
       now,
-      messages: this.repo.getRecentMessages(this.chatHistoryLimit())
+      messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT)
     };
   }
 }
@@ -862,7 +1123,8 @@ function dedupeTracks(items: Track[]): Track[] {
 }
 
 function scoreTrackForDescription(entry: { track: Track; playCount: number }, description: string): number {
-  const text = `${entry.track.title} ${entry.track.artists.join(" ")} ${entry.track.album ?? ""}`.toLowerCase();
+  const tagText = inferTrackTags(entry.track).map((tag) => tag.value).join(" ");
+  const text = `${entry.track.title} ${entry.track.artists.join(" ")} ${entry.track.album ?? ""} ${tagText}`.toLowerCase();
   const desc = description.toLowerCase();
   let score = Math.min(0.2, entry.playCount / 500);
 

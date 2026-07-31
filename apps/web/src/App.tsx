@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
 import type {
+  ChatMemory,
   ChatMessage,
   ChatStreamEvent,
   DjSettings,
@@ -13,10 +14,12 @@ import type {
   WsPayload
 } from "@musicgpt/shared";
 import {
-  ChatStreamInterruptedError,
+  clearChatMemories,
   clearChatHistory,
+  deleteChatMemory,
   fetchDjSettings,
   fetchEnvironment,
+  fetchChatMemories,
   fetchChatHistory,
   fetchNowPlaying,
   fetchSystemStatus,
@@ -26,12 +29,19 @@ import {
   generateChatSpeech,
   playSuggestedTrack,
   requestNext,
+  setFavorite as updateFavorite,
   sendChatStream,
   sendFeedback,
   updateDjSettings,
   updateEnvironmentLocation
 } from "./api";
 import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
+import { ChatMemoryPanel } from "./ChatMemoryPanel";
+import { ChatStreamFeedbackNotice } from "./ChatStreamFeedbackNotice";
+import {
+  settleChatStreamFailure,
+  type ChatStreamFeedback
+} from "./chatStream";
 import { findActiveLyricIndex, selectLyricWindow } from "./lyrics";
 import { useWsStream } from "./useWsStream";
 import {
@@ -100,6 +110,14 @@ const DEFAULT_DJ_SETTINGS: DjSettings = {
   voiceGender: "female",
   voice: "zh-CN-XiaoxiaoNeural"
 };
+
+interface ActiveChatStream {
+  abortController: AbortController;
+  receivedText: string;
+  retryMessage: string;
+  streamAt: string;
+  token: number;
+}
 
 function formatDuration(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
@@ -337,15 +355,17 @@ const MessageList = memo(function MessageList({
 interface PlayerStackProps {
   now: NowPlayingState;
   onFeedback: (type: "skip" | "like" | "replay" | "complete") => Promise<void>;
+  onFavorite: (favorite: boolean) => Promise<void>;
   onPlaybackStateChange: (paused: boolean) => void;
   onRequestNext: (recordSkip?: boolean) => Promise<void>;
   onTrackEnded: () => Promise<void>;
   speechActive: boolean;
 }
 
-const PlayerStack = memo(function PlayerStack({
+export const PlayerStack = memo(function PlayerStack({
   now,
   onFeedback,
+  onFavorite,
   onPlaybackStateChange,
   onRequestNext,
   onTrackEnded,
@@ -354,6 +374,9 @@ const PlayerStack = memo(function PlayerStack({
   const [playbackPaused, setPlaybackPaused] = useState(true);
   const [audioTime, setAudioTime] = useState(0);
   const [audioDuration, setAudioDuration] = useState(0);
+  const [favorite, setFavorite] = useState(Boolean(now.isFavorite));
+  const [favoritePending, setFavoritePending] = useState(false);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [playerVolume, setPlayerVolume] = useState(() => loadPlayerVolume(getBrowserStorage()));
   const audioRef = useRef<HTMLAudioElement>(null);
   const lastAudibleVolumeRef = useRef(
@@ -368,7 +391,13 @@ const PlayerStack = memo(function PlayerStack({
   useEffect(() => {
     setAudioTime(0);
     setAudioDuration(0);
+    setFavorite(Boolean(now.isFavorite));
+    setFavoriteError(null);
   }, [now.track]);
+
+  useEffect(() => {
+    setFavorite(Boolean(now.isFavorite));
+  }, [now.isFavorite]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -411,6 +440,24 @@ const PlayerStack = memo(function PlayerStack({
     }
     audioRef.current.currentTime = 0;
     await audioRef.current.play().catch(() => undefined);
+  };
+
+  const onToggleFavorite = async () => {
+    if (!now.track || favoritePending) {
+      return;
+    }
+    const nextFavorite = !favorite;
+    setFavorite(nextFavorite);
+    setFavoritePending(true);
+    setFavoriteError(null);
+    try {
+      await onFavorite(nextFavorite);
+    } catch {
+      setFavorite(!nextFavorite);
+      setFavoriteError("收藏失败，请稍后重试");
+    } finally {
+      setFavoritePending(false);
+    }
   };
 
   const onChangeVolume = (percent: number) => {
@@ -473,10 +520,18 @@ const PlayerStack = memo(function PlayerStack({
               <button type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
                 <span aria-hidden="true">&gt;|</span>
               </button>
-              <button type="button" aria-label="Like" onClick={() => void onFeedback("like")}>
-                <span aria-hidden="true">♡</span>
+              <button
+                type="button"
+                className={favorite ? "control-favorite is-active" : "control-favorite"}
+                aria-label={favorite ? "取消收藏" : "收藏当前歌曲"}
+                aria-pressed={favorite}
+                disabled={!now.track || favoritePending}
+                onClick={() => void onToggleFavorite()}
+              >
+                <span aria-hidden="true">{favoritePending ? "…" : favorite ? "♥" : "♡"}</span>
               </button>
             </div>
+            {favoriteError ? <p className="favorite-error" role="status">{favoriteError}</p> : null}
             <div className="volume-control">
               <button
                 type="button"
@@ -548,8 +603,14 @@ export default function App() {
   const [djSettings, setDjSettings] = useState<DjSettings>(DEFAULT_DJ_SETTINGS);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatMemories, setChatMemories] = useState<ChatMemory[]>([]);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [busyMemoryId, setBusyMemoryId] = useState<number | null>(null);
+  const [memoryClearing, setMemoryClearing] = useState(false);
+  const [memoryError, setMemoryError] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
+  const [chatStreamFeedback, setChatStreamFeedback] = useState<ChatStreamFeedback | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatClearing, setChatClearing] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(() => loadAutoSpeak(getBrowserStorage()));
@@ -574,14 +635,25 @@ export default function App() {
   const speechRequestTokenRef = useRef(0);
   const chatStreamAbortRef = useRef<AbortController | null>(null);
   const chatStreamTokenRef = useRef(0);
+  const activeChatStreamRef = useRef<ActiveChatStream | null>(null);
+  const chatInputRef = useRef<HTMLInputElement>(null);
   const autoSpeakRef = useRef(autoSpeak);
 
   const refresh = useCallback(async () => {
-    const [nowState, tasteProfile, status, chatHistory, environmentContext, settings] = await Promise.all([
+    const [
+      nowState,
+      tasteProfile,
+      status,
+      chatHistory,
+      memories,
+      environmentContext,
+      settings
+    ] = await Promise.all([
       fetchNowPlaying(),
       fetchTaste(),
       fetchSystemStatus(),
       fetchChatHistory().catch(() => []),
+      fetchChatMemories().catch(() => []),
       fetchEnvironment().catch(() => null),
       fetchDjSettings().catch(() => DEFAULT_DJ_SETTINGS)
     ]);
@@ -589,6 +661,7 @@ export default function App() {
     setTaste(tasteProfile);
     setSystemStatus(status);
     setMessages(chatHistory);
+    setChatMemories(memories);
     setEnvironment(environmentContext);
     setDjSettings(settings);
   }, []);
@@ -620,7 +693,7 @@ export default function App() {
           const messageId = Number(job.key.split(":")[1]);
           setFailedSpeechId(Number.isFinite(messageId) ? messageId : null);
         }
-        setSpeechNotice("浏览器没有让语音自动播放，点一下回复旁的小喇叭就好啦～");
+        setSpeechNotice("语音播放出错，文字回复已保留；可以点回复旁的播放按钮重试。");
       }
     });
     speechControllerRef.current = controller;
@@ -636,6 +709,33 @@ export default function App() {
     saveAutoSpeak(getBrowserStorage(), autoSpeak);
   }, [autoSpeak]);
 
+  const stopActiveChatStream = useCallback(() => {
+    const activeStream = activeChatStreamRef.current;
+    if (!activeStream) {
+      return;
+    }
+
+    activeChatStreamRef.current = null;
+    chatStreamAbortRef.current = null;
+    chatStreamTokenRef.current += 1;
+    activeStream.abortController.abort();
+    speechControllerRef.current?.stop(true);
+    setMessages((current) =>
+      settleChatStreamFailure(current, {
+        kind: "stopped",
+        streamAt: activeStream.streamAt,
+        retryMessage: activeStream.retryMessage
+      }).messages
+    );
+    setChatStreamFeedback({
+      kind: "stopped",
+      retryMessage: activeStream.retryMessage,
+      hadPartialReply: Boolean(activeStream.receivedText.trim())
+    });
+    setStreamingMessageAt(null);
+    setChatLoading(false);
+  }, []);
+
   const playAssistantMessage = useCallback(async (message: ChatMessage, manual = false) => {
     if (!message.id) {
       return;
@@ -650,8 +750,7 @@ export default function App() {
       return;
     }
     if (manual) {
-      chatStreamAbortRef.current?.abort();
-      chatStreamAbortRef.current = null;
+      stopActiveChatStream();
       controller.stop();
     }
     const requestToken = ++speechRequestTokenRef.current;
@@ -663,11 +762,14 @@ export default function App() {
       if (requestToken !== speechRequestTokenRef.current) {
         return;
       }
-      const played = await controller.playNow({
-        key,
-        audioUrl: speech.audioUrl,
-        kind: "chat"
-      });
+      const jobs = speech.segments?.length
+        ? speech.segments.map((segment) => ({
+            key,
+            audioUrl: segment.audioUrl,
+            kind: "chat" as const
+          }))
+        : [{ key, audioUrl: speech.audioUrl, kind: "chat" as const }];
+      const played = await controller.playSequence(jobs);
       if (!played) {
         setFailedSpeechId(message.id);
       }
@@ -681,7 +783,7 @@ export default function App() {
         setLoadingSpeechId((current) => (current === message.id ? null : current));
       }
     }
-  }, []);
+  }, [stopActiveChatStream]);
 
   const playDjScript = useCallback(async (script: NonNullable<NowPlayingState["djScript"]>, manual = false) => {
     if (!script.audioUrl) {
@@ -724,6 +826,11 @@ export default function App() {
       if (status.djSettings) {
         setDjSettings(status.djSettings);
       }
+    } else if (payload.event === "chat_memory_updated") {
+      const data = payload.data as { memories?: ChatMemory[] };
+      if (Array.isArray(data.memories)) {
+        setChatMemories(data.memories);
+      }
     }
   }, [playDjScript]);
 
@@ -754,9 +861,18 @@ export default function App() {
     const abortController = new AbortController();
     chatStreamAbortRef.current?.abort();
     chatStreamAbortRef.current = abortController;
-    let resultReceived = false;
+    const activeStream: ActiveChatStream = {
+      abortController,
+      receivedText: "",
+      retryMessage: message,
+      streamAt,
+      token: streamToken
+    };
+    activeChatStreamRef.current = activeStream;
     setInput("");
     setChatError(null);
+    setChatStreamFeedback(null);
+    setSpeechNotice(null);
     setChatLoading(true);
     setStreamingMessageAt(streamAt);
     setMessages((current) => [...current, optimistic, streamingAssistant]);
@@ -769,6 +885,7 @@ export default function App() {
             return;
           }
           if (event.type === "text_delta") {
+            activeStream.receivedText += event.delta;
             setMessages((current) =>
               current.map((item) =>
                 item.at === streamAt
@@ -783,43 +900,30 @@ export default function App() {
               kind: "chat"
             });
           } else if (event.type === "result") {
-            resultReceived = true;
+            if (activeChatStreamRef.current?.token === streamToken) {
+              activeChatStreamRef.current = null;
+            }
             setMessages(event.response.messages);
             setNow(event.response.now);
             setStreamingMessageAt(null);
           }
         }
       });
-      await refreshTaste();
-    } catch (error) {
-      const aborted = error instanceof DOMException && error.name === "AbortError";
-      if (!aborted && chatStreamTokenRef.current === streamToken) {
-        const interrupted = error instanceof ChatStreamInterruptedError;
-        setChatError(
-          interrupted
-            ? "连接刚刚抖了一下，已经收到的回复还在，再发一次就好啦～"
-            : error instanceof Error
-              ? error.message
-              : "GPT DJ 暂时掉线了。"
+      await refreshTaste().catch(() => undefined);
+    } catch {
+      if (!abortController.signal.aborted && chatStreamTokenRef.current === streamToken) {
+        setMessages((current) =>
+          settleChatStreamFailure(current, {
+            kind: "error",
+            streamAt,
+            retryMessage: message
+          }).messages
         );
-        if (!resultReceived) {
-          const history = await fetchChatHistory().catch(() => undefined);
-          if (history?.at(-1)?.role === "assistant") {
-            setMessages(history);
-          } else if (!interrupted) {
-            if (history) {
-              setMessages(history);
-            } else {
-              setMessages((current) => current.filter((item) => item.at !== streamAt));
-            }
-          } else {
-            setMessages((current) =>
-              current.some((item) => item.at === streamAt && item.text.trim())
-                ? current
-                : current.filter((item) => item.at !== streamAt)
-            );
-          }
-        }
+        setChatStreamFeedback({
+          kind: "error",
+          retryMessage: message,
+          hadPartialReply: Boolean(activeStream.receivedText.trim())
+        });
       }
     } finally {
       speechControllerRef.current?.finishChatStream(streamKey);
@@ -827,6 +931,9 @@ export default function App() {
         chatStreamAbortRef.current = null;
       }
       if (chatStreamTokenRef.current === streamToken) {
+        if (activeChatStreamRef.current?.token === streamToken) {
+          activeChatStreamRef.current = null;
+        }
         setStreamingMessageAt(null);
         setChatLoading(false);
       }
@@ -854,7 +961,9 @@ export default function App() {
     if (chatLoading || chatClearing || messages.length === 0) {
       return;
     }
-    const confirmed = window.confirm("确定清空全部历史聊天记录吗？此操作无法撤销。");
+    const confirmed = window.confirm(
+      "确定清空全部聊天记录吗？此操作无法撤销，但“她记得的我”中的长期记忆会保留。"
+    );
     if (!confirmed) {
       return;
     }
@@ -870,6 +979,44 @@ export default function App() {
       setChatError(error instanceof Error ? error.message : "聊天记录清空失败，请稍后再试。");
     } finally {
       setChatClearing(false);
+    }
+  };
+
+  const onForgetMemory = async (memory: ChatMemory) => {
+    if (busyMemoryId !== null || memoryClearing) {
+      return;
+    }
+    setBusyMemoryId(memory.id);
+    setMemoryError(null);
+    try {
+      await deleteChatMemory(memory.id);
+      setChatMemories((current) => current.filter((item) => item.id !== memory.id));
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "这条记忆暂时忘不掉，请稍后再试。");
+    } finally {
+      setBusyMemoryId(null);
+    }
+  };
+
+  const onClearMemories = async () => {
+    if (memoryClearing || busyMemoryId !== null || chatMemories.length === 0) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "确定让她忘记全部长期记忆吗？聊天记录会继续保留。"
+    );
+    if (!confirmed) {
+      return;
+    }
+    setMemoryClearing(true);
+    setMemoryError(null);
+    try {
+      await clearChatMemories();
+      setChatMemories([]);
+    } catch (error) {
+      setMemoryError(error instanceof Error ? error.message : "长期记忆清空失败，请稍后再试。");
+    } finally {
+      setMemoryClearing(false);
     }
   };
 
@@ -922,6 +1069,20 @@ export default function App() {
     }
     await refreshTaste();
   }, [onRequestNext, refreshTaste]);
+
+  const onFavorite = useCallback(async (favorite: boolean) => {
+    const currentTrack = currentTrackRef.current;
+    if (!currentTrack) {
+      return;
+    }
+    const result = await updateFavorite(currentTrack.id, favorite);
+    setNow((current) =>
+      current.track?.id === currentTrack.id
+        ? { ...current, isFavorite: result.favorite }
+        : current
+    );
+    setTaste(result.taste);
+  }, []);
 
   const onPlaybackStateChange = useCallback((paused: boolean) => {
     setNow((current) => (current.paused === paused ? current : { ...current, paused }));
@@ -1008,6 +1169,10 @@ export default function App() {
     () => taste?.favoritePeriods[0]?.period ?? "night",
     [taste?.favoritePeriods]
   );
+  const topTasteTags = useMemo(
+    () => taste?.preferenceTags?.slice(0, 6) ?? [],
+    [taste?.preferenceTags]
+  );
 
   const trackTitle = now.track?.title ?? "等待开播";
   const isLive = Boolean(systemStatus?.ncmReachable);
@@ -1073,6 +1238,7 @@ export default function App() {
         <PlayerStack
           now={now}
           onFeedback={onFeedback}
+          onFavorite={onFavorite}
           onPlaybackStateChange={onPlaybackStateChange}
           onRequestNext={onRequestNext}
           onTrackEnded={onTrackEnded}
@@ -1104,8 +1270,26 @@ export default function App() {
                 自动朗读
               </label>
               <span className="context-chip">全程小晓声线</span>
+              <button
+                className="memory-toggle"
+                type="button"
+                aria-expanded={memoryOpen}
+                onClick={() => setMemoryOpen((open) => !open)}
+              >
+                她记得的我 {chatMemories.length}
+              </button>
             </div>
           </header>
+          <div className="chat-memory-slot" hidden={!memoryOpen}>
+            <ChatMemoryPanel
+              memories={chatMemories}
+              busyMemoryId={busyMemoryId}
+              clearing={memoryClearing}
+              error={memoryError}
+              onForget={(memory) => void onForgetMemory(memory)}
+              onClear={() => void onClearMemories()}
+            />
+          </div>
           <MessageList
             activeSpeechKey={activeSpeechKey}
             chatLoading={chatLoading}
@@ -1139,19 +1323,46 @@ export default function App() {
               {chatClearing ? "清空中…" : "清空历史"}
             </button>
           </div>
+          {chatStreamFeedback ? (
+            <ChatStreamFeedbackNotice
+              feedback={chatStreamFeedback}
+              onContinue={() => {
+                setChatStreamFeedback(null);
+                chatInputRef.current?.focus();
+              }}
+              onRetry={() => {
+                const retryMessage = chatStreamFeedback.retryMessage;
+                setChatStreamFeedback(null);
+                void submitChat(retryMessage);
+              }}
+            />
+          ) : null}
           {chatError ? <p className="chat-error">{chatError}</p> : null}
           {speechNotice ? <p className="speech-notice">{speechNotice}</p> : null}
           <form onSubmit={onSubmitChat} className="chat-form">
             <input
+              ref={chatInputRef}
               value={input}
               onChange={(event) => setInput(event.target.value)}
-              placeholder="描述你想听的歌、点歌，或让 GPT DJ 点评当前曲目..."
+              placeholder="想聊什么都可以；需要点歌时直接告诉我～"
               aria-label="Message Neonwave FM"
               disabled={chatLoading}
             />
-            <button type="submit" aria-label="Send message" disabled={chatLoading}>
-              {chatLoading ? "..." : "→"}
-            </button>
+            {chatLoading ? (
+              <button
+                className="stop-chat-button"
+                type="button"
+                aria-label="停止生成回复"
+                title="停止生成回复"
+                onClick={stopActiveChatStream}
+              >
+                ■
+              </button>
+            ) : (
+              <button type="submit" aria-label="Send message">
+                →
+              </button>
+            )}
           </form>
           <audio ref={speechAudioRef} className="speech-audio" preload="none" />
         </article>
@@ -1166,6 +1377,13 @@ export default function App() {
             : "AI FALLBACK"}
         </span>
         <span>Taste {favoritePeriod}</span>
+        {topTasteTags.length > 0 ? (
+          <span className="taste-tag-group" aria-label="偏好标签">
+            {topTasteTags.map((tag) => (
+              <em key={`${tag.category}:${tag.value}`}>{tag.value}</em>
+            ))}
+          </span>
+        ) : null}
         <span>{formatWeather(environment)}</span>
         <span>DJ {djSettings.tone.toUpperCase()} / {djSettings.voiceGender.toUpperCase()}</span>
         <span>Import {formatTime(systemStatus?.lastImportAt)}</span>

@@ -7,9 +7,27 @@ export type MoodTag =
   | "nostalgia"
   | "unknown";
 
+export type MusicTagCategory =
+  | "artist"
+  | "mood"
+  | "style"
+  | "scene"
+  | "period"
+  | "weather";
+
+export interface MusicTag {
+  category: MusicTagCategory;
+  value: string;
+}
+
+export interface PreferenceTag extends MusicTag {
+  weight: number;
+  evidenceCount: number;
+}
+
 export type DayPeriod = "morning" | "afternoon" | "evening" | "late_night";
 
-export type FeedbackType = "skip" | "like" | "replay" | "complete";
+export type FeedbackType = "skip" | "like" | "unlike" | "replay" | "complete";
 
 export type WeatherKind = "clear" | "cloudy" | "rain" | "snow" | "fog" | "storm" | "unknown";
 
@@ -26,11 +44,13 @@ export interface Track {
   coverUrl?: string;
   songUrl?: string;
   moodTag?: MoodTag;
+  tags?: MusicTag[];
 }
 
 export interface TrackStat {
   track: Track;
   likedAt?: string;
+  localFavoritedAt?: string;
   playCount: number;
   lastPlayedAt?: string;
   lastPlayedHour?: number;
@@ -67,6 +87,7 @@ export interface TasteProfile {
     weight: number;
   }>;
   moodWeights: Record<MoodTag, number>;
+  preferenceTags: PreferenceTag[];
   pacingPreference: "gentle" | "balanced" | "dynamic";
 }
 
@@ -107,6 +128,25 @@ export interface RadioPlanItem {
   track: Track;
   score: number;
   reason: string;
+  bucket?: RecommendationBucket;
+  source?: RecommendationSource;
+}
+
+export type RecommendationBucket = "familiar" | "explore";
+
+export type RecommendationSource =
+  | "library"
+  | "ncm_daily"
+  | "context_search"
+  | "style_search"
+  | "chat_search";
+
+export interface RecommendationCandidate {
+  track: Track;
+  source: RecommendationSource;
+  tags: MusicTag[];
+  discoveredAt: string;
+  expiresAt: string;
 }
 
 export interface PlayEvent {
@@ -131,6 +171,7 @@ export interface NowPlayingState {
   queue: RadioPlanItem[];
   startedAt?: string;
   paused: boolean;
+  isFavorite?: boolean;
   djScript?: DjScript;
 }
 
@@ -147,14 +188,32 @@ export interface ChatMessage {
   speech?: ChatSpeech;
 }
 
+export type ChatMemoryCategory = "preference" | "habit" | "background" | "relationship";
+
+export interface ChatMemory {
+  id: number;
+  category: ChatMemoryCategory;
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatSpeechSegment {
+  sequence: number;
+  text: string;
+  audioUrl: string;
+}
+
 export interface ChatSpeech {
   audioUrl: string;
   profileKey: string;
+  segments?: ChatSpeechSegment[];
 }
 
 export interface ChatSpeechResponse {
   messageId: number;
   audioUrl: string;
+  segments?: ChatSpeechSegment[];
 }
 
 export type ChatStreamEvent =
@@ -178,6 +237,7 @@ export interface ChatResponse {
     | "replan"
     | "play_specific"
     | "play_by_description"
+    | "play_atmosphere"
     | "comment_current"
     | "noop";
   reply: string;
@@ -188,6 +248,15 @@ export interface ChatResponse {
 export interface FeedbackRequest {
   type: FeedbackType;
   trackId: number;
+}
+
+export interface FavoriteRequest {
+  favorite: boolean;
+}
+
+export interface FavoriteResponse {
+  favorite: boolean;
+  taste: TasteProfile;
 }
 
 export interface PlayTrackRequest {
@@ -242,6 +311,11 @@ export interface ImportNcmResponse {
 }
 
 export interface WsPayload {
-  event: "now_playing_updated" | "queue_updated" | "dj_tts_ready" | "system_status";
+  event:
+    | "now_playing_updated"
+    | "queue_updated"
+    | "dj_tts_ready"
+    | "system_status"
+    | "chat_memory_updated";
   data: unknown;
 }

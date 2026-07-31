@@ -2,6 +2,7 @@ import type {
   ChatRequest,
   DjSettings,
   EnvironmentLocationRequest,
+  FavoriteRequest,
   FeedbackRequest,
   NextRequest,
   PlayTrackRequest,
@@ -12,12 +13,15 @@ export const API_ROUTES = {
   chat: "/api/chat",
   chatStream: "/api/chat/stream",
   chatHistory: "/api/chat/history",
+  chatMemories: "/api/chat/memories",
+  chatMemory: (memoryId: number) => `/api/chat/memories/${memoryId}`,
   chatSpeech: (messageId: number) => `/api/chat/${messageId}/speech`,
   now: "/api/now",
   next: "/api/next",
   playTrack: "/api/play-track",
   taste: "/api/taste",
   feedback: "/api/feedback",
+  favorite: (trackId: number) => `/api/favorites/${trackId}`,
   systemStatus: "/api/system/status",
   importNcm: "/api/import/ncm",
   environment: "/api/environment",
@@ -50,8 +54,15 @@ export function isFeedbackRequest(value: unknown): value is FeedbackRequest {
   const maybe = value as FeedbackRequest;
   return (
     typeof maybe.trackId === "number" &&
-    ["skip", "like", "replay", "complete"].includes(maybe.type)
+    ["skip", "like", "unlike", "replay", "complete"].includes(maybe.type)
   );
+}
+
+export function isFavoriteRequest(value: unknown): value is FavoriteRequest {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  return typeof (value as FavoriteRequest).favorite === "boolean";
 }
 
 export function isPlayTrackRequest(value: unknown): value is PlayTrackRequest {

@@ -14,7 +14,9 @@ beforeEach(() => {
     "OPENAI_MODEL",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_MODEL"
+    "DEEPSEEK_MODEL",
+    "AI_DJ_MEMORY_TURNS",
+    "AI_DJ_CHAT_MAX_TOKENS"
   ]) {
     delete process.env[name];
   }
@@ -27,6 +29,15 @@ afterEach(() => {
 });
 
 describe("config", () => {
+  it("defaults to a wider conversation window and adaptive reply budget", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.aiDjMemoryTurns).toBe(20);
+    expect(config.aiDjChatMaxTokens).toBe(800);
+  });
+
   it("treats an empty OPENAI_BASE_URL as unset", async () => {
     process.env.MUSICGPT_SKIP_DOTENV = "true";
     process.env.OPENAI_BASE_URL = "";

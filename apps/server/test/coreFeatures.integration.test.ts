@@ -4,6 +4,8 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { AiDjAssistant } from "../src/aiDjAssistant.js";
+import { fallbackClassify } from "../src/aiDjAssistant.js";
 import type { EnvironmentService } from "../src/environmentService.js";
 import { DjBrain } from "../src/djBrain.js";
 import { NcmConnector } from "../src/ncmConnector.js";
@@ -49,6 +51,7 @@ describe("core feature integration", () => {
     const app = await createServer({
       repo,
       ncm,
+      aiDjAssistant: createLocalAssistant(),
       djBrain: new DjBrain(),
       ttsPipeline: tts,
       environmentService,
@@ -74,6 +77,19 @@ describe("core feature integration", () => {
     const importPayload = (await importRes.json()) as { importedCount: number; skippedCount: number };
     expect(importPayload.importedCount).toBeGreaterThan(0);
     expect(importPayload.skippedCount).toBeGreaterThanOrEqual(0);
+
+    const atmosphereRes = await fetch(`${base}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "来点适合现在氛围的歌" })
+    });
+    expect(atmosphereRes.ok).toBe(true);
+    const atmosphere = (await atmosphereRes.json()) as {
+      action: string;
+      messages: Array<{ trackSuggestion?: { reason: string } }>;
+    };
+    expect(atmosphere.action).toBe("play_atmosphere");
+    expect(atmosphere.messages.at(-1)?.trackSuggestion?.reason).toMatch(/雨天|深夜|日推|氛围/);
 
     const settingsRes = await fetch(`${base}/api/dj/settings`, {
       method: "POST",
@@ -123,7 +139,7 @@ describe("core feature integration", () => {
     expect(thirdNow.djScript?.text.length).toBeGreaterThan(0);
   });
 
-  it("updates liked_at and exposes status/import endpoints", async () => {
+  it("updates local favorite state and exposes status/import endpoints", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-status-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
     const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
@@ -155,9 +171,41 @@ describe("core feature integration", () => {
     expect(status.queueLength).toBeGreaterThanOrEqual(0);
 
     const now = await requestNext(base);
+    const favoriteRes = await fetch(`${base}/api/favorites/${now.track!.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ favorite: true })
+    });
+    expect(favoriteRes.ok).toBe(true);
+    const favoritePayload = (await favoriteRes.json()) as {
+      favorite: boolean;
+      taste: { preferenceTags: Array<{ value: string }> };
+    };
+    expect(favoritePayload.favorite).toBe(true);
+    expect(favoritePayload.taste.preferenceTags.length).toBeGreaterThan(0);
+    expect(repo.getTrackStats(50).find((item) => item.track.id === now.track!.id)?.localFavoritedAt)
+      .toBeDefined();
+
+    const duplicateFavoriteRes = await fetch(`${base}/api/favorites/${now.track!.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ favorite: true })
+    });
+    expect(duplicateFavoriteRes.ok).toBe(true);
+    expect(repo.getRecentPlayEvents(20).filter((event) => event.type === "like")).toHaveLength(1);
+
+    const unfavoriteRes = await fetch(`${base}/api/favorites/${now.track!.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ favorite: false })
+    });
+    expect(unfavoriteRes.ok).toBe(true);
+    expect(repo.getTrackStats(50).find((item) => item.track.id === now.track!.id)?.localFavoritedAt)
+      .toBeUndefined();
+
     await sendFeedback(base, "like", now.track!.id);
-    const liked = repo.getTrackStats(50).find((item) => item.track.id === now.track!.id);
-    expect(liked?.likedAt).toBeDefined();
+    expect(repo.getTrackStats(50).find((item) => item.track.id === now.track!.id)?.localFavoritedAt)
+      .toBeDefined();
 
     const importRes = await fetch(`${base}/api/import/ncm`, {
       method: "POST"
@@ -269,6 +317,20 @@ function createMockNcmFetch(): typeof fetch {
       });
     }
     return json({});
+  };
+}
+
+function createLocalAssistant(): AiDjAssistant {
+  return {
+    status: () => ({ configured: false, provider: "local" }),
+    classify: async (message) => fallbackClassify(message),
+    selectTrack: async (_description, candidates) => ({
+      trackId: candidates[0]?.id,
+      reason: "本地上下文排序"
+    }),
+    commentTrack: async (track) => `这首《${track.title}》和现在的氛围很合拍。`,
+    commentCurrent: async () => "正在播放的这首很合适。",
+    chat: async () => "本地 DJ 在线。"
   };
 }
 

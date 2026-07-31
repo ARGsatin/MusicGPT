@@ -104,7 +104,7 @@ describe("TtsPipeline", () => {
     expect(spoken).toEqual(["好呀，我们慢慢挑首喜欢的歌～"]);
   });
 
-  it("limits spoken chat text to 320 characters", async () => {
+  it("speaks a long reply completely in ordered segments of at most 80 characters", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-limit-"));
     const spoken: string[] = [];
     const saveFn = vi.fn(async (text: string, filePath: string) => {
@@ -112,10 +112,18 @@ describe("TtsPipeline", () => {
       fs.writeFileSync(filePath, "audio");
     });
     const pipeline = new TtsPipeline(dir, "zh-CN-XiaoxiaoNeural", saveFn);
+    const longReply = `${"呀".repeat(170)}。${"好".repeat(170)}！`;
 
-    await pipeline.synthesizeText("呀".repeat(400));
+    const result = await pipeline.synthesizeSegments(longReply);
 
-    expect(spoken[0]).toHaveLength(320);
+    expect(result.segments.length).toBeGreaterThan(4);
+    expect(result.audioUrl).toBe(result.segments[0]?.audioUrl);
+    expect(result.segments.map((segment) => segment.text).join("")).toBe(longReply);
+    expect(result.segments.every((segment) => [...segment.text].length <= 80)).toBe(true);
+    expect(spoken.length).toBeLessThan(result.segments.length);
+    expect(result.segments.map((segment) => segment.sequence)).toEqual(
+      result.segments.map((_, index) => index)
+    );
   });
 
   it("writes cache on miss and reuses cache on hit", async () => {

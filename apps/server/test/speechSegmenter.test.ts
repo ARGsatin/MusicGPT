@@ -22,4 +22,13 @@ describe("SpeechTextSegmenter", () => {
     expect([...ready[0]!]).toHaveLength(18);
     expect(segmenter.finish().join("")).toBe("快开始朗读的长回复");
   });
+
+  it("uses English sentence punctuation as a natural speech boundary", () => {
+    const segmenter = new SpeechTextSegmenter();
+
+    expect(segmenter.push("That makes sense. Let me think about the next part")).toEqual([
+      "That makes sense."
+    ]);
+    expect(segmenter.finish()).toEqual(["Let me think about the next part"]);
+  });
 });

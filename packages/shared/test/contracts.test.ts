@@ -6,6 +6,7 @@ import {
   isChatRequest,
   isDjSettingsRequest,
   isEnvironmentLocationRequest,
+  isFavoriteRequest,
   isFeedbackRequest,
   isNextRequest,
   isPlayTrackRequest
@@ -53,6 +54,17 @@ describe("contracts", () => {
   it("builds the chat speech route for a persisted assistant message", () => {
     expect(API_ROUTES.chatStream).toBe("/api/chat/stream");
     expect(API_ROUTES.chatSpeech(42)).toBe("/api/chat/42/speech");
+  });
+
+  it("validates favorite payload and builds its route", () => {
+    expect(isFavoriteRequest({ favorite: true })).toBe(true);
+    expect(isFavoriteRequest({ favorite: "yes" })).toBe(false);
+    expect(API_ROUTES.favorite(42)).toBe("/api/favorites/42");
+  });
+
+  it("exposes persistent chat memory routes", () => {
+    expect(API_ROUTES.chatMemories).toBe("/api/chat/memories");
+    expect(API_ROUTES.chatMemory(7)).toBe("/api/chat/memories/7");
   });
 
   it("validates environment location payload", () => {

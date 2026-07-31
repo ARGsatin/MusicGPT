@@ -22,6 +22,7 @@ const profile: TasteProfile = {
     nostalgia: 0.05,
     unknown: 0.05
   },
+  preferenceTags: [],
   pacingPreference: "gentle"
 };
 
@@ -59,6 +60,38 @@ describe("RecommendationImporter", () => {
     expect(seenQueries.some((query) => query.includes("陈奕迅"))).toBe(true);
     expect(result.importedCount).toBe(2);
     expect(result.skippedCount).toBeGreaterThan(0);
-    expect(repo.getTrackStats(20).map((item) => item.track.id)).toEqual(expect.arrayContaining([1, 20, 21]));
+    expect(repo.getTrackStats(20).map((item) => item.track.id)).toEqual([1]);
+    expect(repo.getRecommendationCandidates(20).map((item) => item.track.id)).toEqual(
+      expect.arrayContaining([20, 21])
+    );
+  });
+
+  it("loads NCM daily recommendations once per local day and caches their source", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-daily-recs-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    let dailyRequests = 0;
+    const importer = new RecommendationImporter(repo, {
+      searchSongs: async () => [],
+      fetchDailyRecommendations: async () => {
+        dailyRequests += 1;
+        return [{ id: 501, title: "Daily Pick", artists: ["NCM"] }];
+      }
+    });
+    const environment = {
+      dayPeriod: "morning" as const,
+      weather: "clear" as const,
+      updatedAt: new Date().toISOString()
+    };
+
+    await importer.importRecommendations(profile, environment);
+    await importer.importRecommendations(profile, environment);
+
+    expect(dailyRequests).toBe(1);
+    expect(repo.getRecommendationCandidates()).toEqual([
+      expect.objectContaining({
+        source: "ncm_daily",
+        track: expect.objectContaining({ id: 501 })
+      })
+    ]);
   });
 });

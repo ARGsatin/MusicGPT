@@ -7,6 +7,8 @@ import type {
   WeatherKind
 } from "@musicgpt/shared";
 
+export const WEATHER_FRESHNESS_MS = 30 * 60 * 1000;
+
 interface OpenMeteoResponse {
   current?: {
     temperature_2m?: number;
@@ -24,6 +26,18 @@ export class EnvironmentService {
       ...this.context,
       dayPeriod: currentPeriod()
     };
+  }
+
+  async refreshIfStale(context?: EnvironmentContext): Promise<EnvironmentContext> {
+    const current = context ?? this.context;
+    if (!current.location || isWeatherFresh(current)) {
+      this.context = {
+        ...current,
+        dayPeriod: currentPeriod()
+      };
+      return this.getContext();
+    }
+    return this.updateLocation(current.location);
   }
 
   async updateLocation(location: EnvironmentLocationRequest): Promise<EnvironmentContext> {
@@ -67,6 +81,14 @@ export class EnvironmentService {
       return this.context;
     }
   }
+}
+
+export function isWeatherFresh(context: EnvironmentContext, now = Date.now()): boolean {
+  if (context.weather === "unknown") {
+    return false;
+  }
+  const updatedAt = Date.parse(context.updatedAt);
+  return Number.isFinite(updatedAt) && now - updatedAt <= WEATHER_FRESHNESS_MS;
 }
 
 function createFallbackContext(): EnvironmentContext {

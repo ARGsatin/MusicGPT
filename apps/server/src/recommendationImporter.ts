@@ -1,16 +1,38 @@
 import { inferMood } from "./moodClassifier.js";
 import { StateRepository } from "./stateRepository.js";
+import {
+  DISCOVERY_STYLES,
+  environmentTags,
+  inferTrackTags,
+  tagsFromContextText
+} from "./trackTags.js";
 
-import type { EnvironmentContext, TasteProfile, Track, TrackStat } from "@musicgpt/shared";
+import type {
+  EnvironmentContext,
+  MusicTag,
+  RecommendationCandidate,
+  TasteProfile,
+  Track
+} from "@musicgpt/shared";
 
 interface SearchProvider {
   searchSongs(query: string): Promise<Track[]>;
+  fetchDailyRecommendations?(): Promise<Track[]>;
 }
 
 export interface RecommendationImportResult {
   importedCount: number;
   skippedCount: number;
 }
+
+interface SearchSeed {
+  query: string;
+  source: "context_search" | "style_search";
+  tags: MusicTag[];
+}
+
+const SEARCH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DAILY_TTL_MS = 2 * 24 * 60 * 60 * 1000;
 
 export class RecommendationImporter {
   constructor(
@@ -20,106 +42,190 @@ export class RecommendationImporter {
 
   async importRecommendations(
     profile: TasteProfile,
-    environment: EnvironmentContext
+    environment: EnvironmentContext,
+    contextText = "",
+    forceDailyRefresh = false,
+    includeSearch = true
   ): Promise<RecommendationImportResult> {
+    this.repo.deleteExpiredRecommendationCandidates();
     const existingIds = new Set(this.repo.getTrackStats(5000).map((item) => item.track.id));
-    const candidates = new Map<number, Track>();
+
+    const now = new Date();
+    const discoveredAt = now.toISOString();
+    const candidates = new Map<number, RecommendationCandidate>();
     let skippedCount = 0;
 
-    for (const seed of buildSeeds(profile, environment)) {
-      const tracks = await this.searchProvider.searchSongs(seed).catch(() => []);
+    const dailyDate = localDateKey(now);
+    const shouldRefreshDaily =
+      forceDailyRefresh ||
+      this.repo.getRecommendationRefreshDate("ncm_daily") !== dailyDate;
+    if (shouldRefreshDaily && this.searchProvider.fetchDailyRecommendations) {
+      const dailyTracks = await this.searchProvider.fetchDailyRecommendations().catch(() => []);
+      for (const track of dailyTracks) {
+        skippedCount += addCandidate(candidates, existingIds, {
+          track,
+          source: "ncm_daily",
+          tags: inferTrackTags(track),
+          discoveredAt,
+          expiresAt: new Date(now.getTime() + DAILY_TTL_MS).toISOString()
+        });
+      }
+      if (dailyTracks.length > 0) {
+        this.repo.saveRecommendationRefreshDate("ncm_daily", dailyDate);
+      }
+    }
+
+    const seeds = includeSearch ? buildSeeds(profile, environment, contextText, now) : [];
+    const batches = await Promise.all(
+      seeds.map(async (seed) => ({
+        seed,
+        tracks: await this.searchProvider.searchSongs(seed.query).catch(() => [])
+      }))
+    );
+    for (const { seed, tracks } of batches) {
       for (const track of tracks) {
-        if (existingIds.has(track.id) || candidates.has(track.id)) {
-          skippedCount += 1;
-          continue;
-        }
-        candidates.set(track.id, {
+        const normalized = {
           ...track,
           moodTag: track.moodTag ?? inferMood(track)
+        };
+        const tags = inferTrackTags(normalized, seed.tags);
+        skippedCount += addCandidate(candidates, existingIds, {
+          track: { ...normalized, tags },
+          source: seed.source,
+          tags,
+          discoveredAt,
+          expiresAt: new Date(now.getTime() + SEARCH_TTL_MS).toISOString()
         });
       }
     }
 
-    const stats: TrackStat[] = [...candidates.values()].map((track) => ({
-      track,
-      playCount: 0
-    }));
-    if (stats.length > 0) {
-      this.repo.upsertTrackStats(stats);
-    }
-
+    const rows = [...candidates.values()];
+    this.repo.upsertRecommendationCandidates(rows);
     return {
-      importedCount: stats.length,
+      importedCount: rows.length,
       skippedCount
     };
   }
 }
 
-function buildSeeds(profile: TasteProfile, environment: EnvironmentContext): string[] {
-  const seeds = new Set<string>();
-  const weather = weatherSeed(environment.weather, environment.dayPeriod);
-  if (weather) {
-    seeds.add(weather);
+function addCandidate(
+  candidates: Map<number, RecommendationCandidate>,
+  existingIds: Set<number>,
+  candidate: RecommendationCandidate
+): number {
+  if (existingIds.has(candidate.track.id) || candidates.has(candidate.track.id)) {
+    return 1;
   }
-
-  const period = periodSeed(environment.dayPeriod);
-  if (period) {
-    seeds.add(period);
-  }
-
-  for (const artist of profile.topArtists.slice(0, 3)) {
-    seeds.add(`${artist.name} ${weather || period || "推荐"}`);
-  }
-
-  const topMood = Object.entries(profile.moodWeights).sort((left, right) => right[1] - left[1])[0]?.[0];
-  if (topMood) {
-    seeds.add(`${moodSeed(topMood)} 音乐`);
-  }
-
-  return [...seeds].slice(0, 8);
+  candidates.set(candidate.track.id, candidate);
+  return 0;
 }
 
-function weatherSeed(weather: EnvironmentContext["weather"], period: EnvironmentContext["dayPeriod"]): string {
-  if (weather === "rain") {
-    return period === "late_night" || period === "evening" ? "雨夜 温柔" : "雨天 治愈";
+function buildSeeds(
+  profile: TasteProfile,
+  environment: EnvironmentContext,
+  contextText: string,
+  now: Date
+): SearchSeed[] {
+  const seeds = new Map<string, SearchSeed>();
+  const contextTags = [
+    ...environmentTags(environment),
+    ...tagsFromContextText(contextText)
+  ];
+  const atmosphere = [
+    atmosphereSeed(environment),
+    contextTags.find((tag) => tag.category === "scene")?.value ?? ""
+  ].filter(Boolean).join(" ");
+  if (atmosphere) {
+    seeds.set(atmosphere, {
+      query: atmosphere,
+      source: "context_search",
+      tags: contextTags
+    });
   }
-  if (weather === "clear") {
-    return period === "morning" ? "晴天 清晨" : "晴天 轻快";
+
+  for (const artist of profile.topArtists.slice(0, 2)) {
+    const query = `${artist.name} ${atmosphere || "相似推荐"}`;
+    seeds.set(query, {
+      query,
+      source: "context_search",
+      tags: contextTags
+    });
   }
-  if (weather === "cloudy" || weather === "fog") {
-    return "阴天 氛围";
+
+  const topTags = profile.preferenceTags
+    .filter((tag) => tag.category === "style" || tag.category === "mood")
+    .slice(0, 2);
+  for (const tag of topTags) {
+    const query = `${tag.value} ${periodSeed(environment.dayPeriod)}`;
+    seeds.set(query, {
+      query,
+      source: "context_search",
+      tags: [{ category: tag.category, value: tag.value }, ...contextTags]
+    });
   }
-  if (weather === "snow") {
-    return "雪天 安静";
+
+  const dayIndex = dayOfYear(now);
+  const discoveryIndexes = [dayIndex % DISCOVERY_STYLES.length, (dayIndex + 5) % DISCOVERY_STYLES.length];
+  for (const index of discoveryIndexes) {
+    const style = DISCOVERY_STYLES[index]!;
+    const query = `${style} ${periodSeed(environment.dayPeriod)}`;
+    seeds.set(query, {
+      query,
+      source: "style_search",
+      tags: [{ category: "style", value: style }, ...environmentTags(environment)]
+    });
   }
-  if (weather === "storm") {
-    return "雷雨 夜晚";
+  return [...seeds.values()].slice(0, 7);
+}
+
+function weatherSeed(weather: EnvironmentContext["weather"]): string {
+  const labels: Record<EnvironmentContext["weather"], string> = {
+    clear: "晴天",
+    cloudy: "阴天",
+    rain: "雨天",
+    snow: "雪天",
+    fog: "雾天",
+    storm: "雷雨",
+    unknown: ""
+  };
+  return labels[weather];
+}
+
+function atmosphereSeed(environment: EnvironmentContext): string {
+  if (environment.weather === "rain") {
+    return environment.dayPeriod === "evening" || environment.dayPeriod === "late_night"
+      ? "雨夜"
+      : "雨天治愈";
   }
-  return "";
+  return [
+    environment.weather === "unknown" ? "" : weatherSeed(environment.weather),
+    periodSeed(environment.dayPeriod)
+  ].filter(Boolean).join(" ");
 }
 
 function periodSeed(period: EnvironmentContext["dayPeriod"]): string {
-  if (period === "morning") {
-    return "早晨 轻快";
-  }
-  if (period === "afternoon") {
-    return "下午 工作";
-  }
-  if (period === "evening") {
-    return "傍晚 温柔";
-  }
-  return "深夜 安静";
+  const labels: Record<EnvironmentContext["dayPeriod"], string> = {
+    morning: "清晨轻快",
+    afternoon: "午后",
+    evening: "傍晚",
+    late_night: "深夜"
+  };
+  return labels[period];
 }
 
-function moodSeed(mood: string): string {
-  const labels: Record<string, string> = {
-    calm: "安静",
-    focus: "专注",
-    warm: "温柔",
-    night: "夜晚",
-    energy: "活力",
-    nostalgia: "怀旧",
-    unknown: "私人电台"
-  };
-  return labels[mood] ?? "私人电台";
+function localDateKey(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
+
+function dayOfYear(date: Date): number {
+  const start = new Date(date.getFullYear(), 0, 0);
+  return Math.floor((date.getTime() - start.getTime()) / (24 * 60 * 60 * 1000));
+}
+
+export const recommendationInternals = {
+  buildSeeds,
+  localDateKey
+};

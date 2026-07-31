@@ -8,6 +8,36 @@ import { NcmConnector } from "../src/ncmConnector.js";
 import { StateRepository } from "../src/stateRepository.js";
 
 describe("NcmConnector integration", () => {
+  it("parses logged-in daily recommendations into playable track metadata", async () => {
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", async (input) => {
+      expect(input.toString()).toContain("/recommend/songs");
+      return json({
+        data: {
+          dailySongs: [
+            {
+              id: 901,
+              name: "Daily Jazz",
+              ar: [{ name: "Cloud Trio" }],
+              al: { name: "Morning Set", picUrl: "https://example.com/cover.jpg" },
+              dt: 203000
+            }
+          ]
+        }
+      });
+    });
+
+    await expect(connector.fetchDailyRecommendations()).resolves.toEqual([
+      expect.objectContaining({
+        id: 901,
+        title: "Daily Jazz",
+        artists: ["Cloud Trio"],
+        album: "Morning Set",
+        coverUrl: "https://example.com/cover.jpg",
+        durationMs: 203000
+      })
+    ]);
+  });
+
   it("reads the current cookie for every request so QR recovery needs no server restart", async () => {
     let cookie = "MUSIC_U=old";
     const seenCookies: string[] = [];

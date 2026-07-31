@@ -70,6 +70,19 @@ interface NcmSearchResponse {
   };
 }
 
+interface NcmDailyRecommendationsResponse {
+  data?: {
+    dailySongs?: Array<{
+      id: number;
+      name: string;
+      ar?: Array<{ name: string }>;
+      al?: { name?: string; picUrl?: string };
+      dt?: number;
+      reason?: string;
+    }>;
+  };
+}
+
 interface NcmLyricResponse {
   nolyric?: boolean;
   lrc?: { lyric?: string };
@@ -431,6 +444,33 @@ export class NcmConnector {
     } catch {
       return createPureMusicLyrics(trackId);
     }
+  }
+
+  async fetchDailyRecommendations(): Promise<Track[]> {
+    const payload = await this.getJson<NcmDailyRecommendationsResponse>(
+      `/recommend/songs?timestamp=${Date.now()}`
+    );
+    return (payload.data?.dailySongs ?? []).map((song) => {
+      const track: Track = {
+        id: song.id,
+        title: song.name,
+        artists: (song.ar ?? []).map((artist) => artist.name),
+        moodTag: "unknown"
+      };
+      if (song.al?.name) {
+        track.album = song.al.name;
+      }
+      if (song.al?.picUrl) {
+        track.coverUrl = song.al.picUrl;
+      }
+      if (song.dt) {
+        track.durationMs = song.dt;
+      }
+      return {
+        ...track,
+        moodTag: inferMood(track)
+      };
+    });
   }
 
   async searchSongs(keyword: string): Promise<Track[]> {

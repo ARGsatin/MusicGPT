@@ -18,6 +18,7 @@ const profile: TasteProfile = {
     nostalgia: 0.05,
     unknown: 0.05
   },
+  preferenceTags: [],
   pacingPreference: "gentle"
 };
 

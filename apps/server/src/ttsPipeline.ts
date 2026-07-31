@@ -2,8 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import type { DjScript } from "@musicgpt/shared";
+import type { ChatSpeechSegment, DjScript } from "@musicgpt/shared";
 import { saveEdgeTts } from "./edgeTtsClient.js";
+import { SpeechTextSegmenter } from "./speechSegmenter.js";
 
 const DEFAULT_RATE = "+6%";
 const DEFAULT_PITCH = "+2Hz";
@@ -14,6 +15,10 @@ const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 interface SpeechSynthesisResult {
   audioUrl?: string;
   profileKey: string;
+}
+
+interface SegmentedSpeechSynthesisResult extends SpeechSynthesisResult {
+  segments: ChatSpeechSegment[];
 }
 
 type SaveFn = (
@@ -114,6 +119,37 @@ export class TtsPipeline {
     }
   }
 
+  async synthesizeSegments(text: string): Promise<SegmentedSpeechSynthesisResult> {
+    const preparedText = prepareSpeechText(text);
+    const profileKey = profileKeyFor(this.getSpeechProfile());
+    if (!preparedText) {
+      return { profileKey, segments: [] };
+    }
+
+    const segmenter = new SpeechTextSegmenter({ minSoftBreakChars: 16, maxChars: 80 });
+    const texts = [...segmenter.push(preparedText), ...segmenter.finish()];
+    const segments: ChatSpeechSegment[] = [];
+    for (const [sequence, segmentText] of texts.entries()) {
+      const speech = await this.synthesizeText(segmentText);
+      if (!speech.audioUrl) {
+        return { profileKey: speech.profileKey, segments: [] };
+      }
+      segments.push({
+        sequence,
+        text: segmentText,
+        audioUrl: speech.audioUrl
+      });
+    }
+    const audioUrl = segments[0]?.audioUrl;
+    return audioUrl
+      ? {
+          profileKey,
+          audioUrl,
+          segments
+        }
+      : { profileKey, segments };
+  }
+
   private getSpeechProfile(): SpeechProfile {
     return {
       voice: this.voice,
@@ -190,7 +226,7 @@ export function prepareSpeechText(text: string): string {
   ) {
     lines.shift();
   }
-  return lines.join(" ").replace(/\s+/g, " ").trim().slice(0, 320);
+  return lines.join(" ").replace(/\s+/g, " ").trim();
 }
 
 function escapeSsmlText(text: string): string {

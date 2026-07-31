@@ -4,12 +4,23 @@
 
 ## 核心能力
 
-- 网易云历史偏好建模（收藏 + 播放行为）
-- 自动电台续播（10 首窗口规划）
-- AI DJ 流式对话：文字边生成边显示，点歌结果、歌曲点评和普通闲聊均支持
-- 邻家少女语音：聊天短句紧跟播放，定时 DJ 播报默认每 4 首触发一次
-- PWA 播放器：播放控制、歌词窗口、聊天历史、偏好面板与推荐导入
-- 本地持久化：SQLite 保存聊天、播放事件、口味画像和语音元数据
+- 网易云历史偏好 + 本地收藏标签建模（艺人、氛围、风格、场景、时段、天气）
+- 自动电台续播（10 首窗口按 5 首熟悉口味 + 5 首新风格交错规划）
+- 网易云每日推荐、环境搜索与轮换风格组成的探索候选池
+- 自由流式聊天：可以自然聊任何日常话题，回复长度随问题深浅调整，不会强行把话题拉回音乐
+- 邻家少女语音：聊天回复完整分段朗读，定时 DJ 播报默认每 4 首触发一次
+- 长期人物记忆：自动提炼稳定偏好、习惯与背景，可在“她记得的我”中逐条或全部忘记
+- PWA 播放器：播放控制、歌词窗口、聊天历史、人物记忆、偏好面板与推荐导入
+- 本地持久化：SQLite 保存聊天、人物记忆、播放事件、口味画像和语音元数据
+
+## 自由聊天与长期记忆
+
+- 普通聊天采用真实的 `user` / `assistant` 历史角色，默认携带最近 20 轮对话；页面独立展示最近 100 条消息
+- 简单闲聊保持轻盈，复杂问题可以自然展开；默认聊天输出上限由 `AI_DJ_CHAT_MAX_TOKENS=800` 控制
+- 机器人可以主动追问、开玩笑或温和表达不同意见，遇到严肃话题会认真回应
+- 只有明确提出点歌、切歌、暂停等操作时才进入音乐控制；单纯谈到“播放”“推荐”“歌”仍会继续聊天
+- 回复完成后会异步提炼长期有用的信息，不阻塞文字和语音；最多保存 100 条，每轮最多选取 20 条相关记忆进入上下文
+- 密码、API Key、支付信息和身份凭证永不进入长期记忆；聊天记录与长期记忆可分别清除
 
 ## 语音体验
 
@@ -18,6 +29,7 @@
 - 中文和英文都使用同一个小晓音色，避免中英混读时声线突然变化
 - 自动朗读默认开启，可在页面中关闭；设备偏好保存在浏览器 `localStorage`
 - 每条 AI 消息都可手动播放、暂停或重播；最近一次 DJ 播报也可重播
+- 长回复按自然标点切成最多 80 字的有序语音段，完整播放并缓存；旧客户端仍可使用第一段 `audioUrl`
 - 聊天语音优先于定时 DJ 播报，手动点击会立即切换到所选消息
 - 朗读时音乐临时降到当前音量的 25%；原本静音时不会自行出声，结束或中断后恢复
 - 浏览器阻止自动播放时保留文字回复并提示手动播放，不使用静音音频绕过限制
@@ -60,6 +72,8 @@ cp .env.example .env
 - `DEEPSEEK_API_KEY`：推荐，用于 GPT DJ 对话和意图理解；默认会使用 `https://api.deepseek.com` 和 `deepseek-v4-flash`
 - `OPENAI_API_KEY`：可选，也可以使用 OpenAI 兼容配置；如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，优先使用 `OPENAI_API_KEY`
 - `TTS_VOICE`：可选，默认 `zh-CN-XiaoxiaoNeural`
+- `AI_DJ_MEMORY_TURNS`：可选，模型近期上下文轮数，默认 `20`
+- `AI_DJ_CHAT_MAX_TOKENS`：可选，普通聊天最大输出 token，默认 `800`
 
 如果前端状态条显示 `AI FALLBACK`，说明服务端没有读到 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY`。如果聊天回复里出现 “DeepSeek 调用失败”，说明 key 已读到，但 DeepSeek 请求失败，需要检查 key、余额、网络或模型名。
 
@@ -82,11 +96,15 @@ npm run dev
 - `POST /api/chat/:messageId/speech`（为已保存的 assistant 消息生成或复用语音）
 - `GET /api/chat/history`
 - `DELETE /api/chat/history`
+- `GET /api/chat/memories`
+- `DELETE /api/chat/memories/:memoryId`
+- `DELETE /api/chat/memories`
 - `GET /api/now`
 - `POST /api/next`
 - `POST /api/play-track`
 - `GET /api/taste`
 - `POST /api/feedback`
+- `PUT /api/favorites/:trackId`（本地收藏/取消收藏，不写回网易云）
 - `GET /api/system/status`
 - `POST /api/import/ncm`
 - `GET /api/environment`

@@ -4,6 +4,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
+  ChatMemory,
+  ChatMemoryCategory,
   ChatMessage,
   ChatSpeech,
   DjSettings,
@@ -11,6 +13,8 @@ import type {
   EnvironmentContext,
   NowPlayingState,
   PlayEvent,
+  RecommendationCandidate,
+  RecommendationSource,
   TasteProfile,
   Track,
   TrackStat
@@ -42,6 +46,7 @@ export class StateRepository {
         track_id INTEGER PRIMARY KEY,
         track_json TEXT NOT NULL,
         liked_at TEXT,
+        local_favorited_at TEXT,
         play_count INTEGER NOT NULL DEFAULT 0,
         last_played_at TEXT,
         last_played_hour INTEGER
@@ -74,8 +79,52 @@ export class StateRepository {
         at TEXT NOT NULL,
         metadata_json TEXT
       );
+      CREATE TABLE IF NOT EXISTS chat_memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        content TEXT NOT NULL,
+        normalized_key TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS recommendation_candidates (
+        track_id INTEGER PRIMARY KEY,
+        track_json TEXT NOT NULL,
+        source TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        discovered_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
     `);
     this.ensureChatMetadataColumn();
+    this.ensureTrackStatsColumns();
+    this.migrateLegacyLocalFavorites();
+  }
+
+  private ensureTrackStatsColumns(): void {
+    const columns = this.db.prepare("PRAGMA table_info(track_stats)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "local_favorited_at")) {
+      this.db.exec("ALTER TABLE track_stats ADD COLUMN local_favorited_at TEXT");
+    }
+  }
+
+  private migrateLegacyLocalFavorites(): void {
+    this.db.exec(`
+      UPDATE track_stats
+      SET local_favorited_at = (
+        SELECT MAX(play_events.at)
+        FROM play_events
+        WHERE play_events.track_id = track_stats.track_id
+          AND play_events.event_type = 'like'
+      )
+      WHERE local_favorited_at IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM play_events
+          WHERE play_events.track_id = track_stats.track_id
+            AND play_events.event_type = 'like'
+        );
+    `);
   }
 
   private ensureChatMetadataColumn(): void {
@@ -87,11 +136,14 @@ export class StateRepository {
 
   upsertTrackStats(stats: TrackStat[]): void {
     const statement = this.db.prepare(`
-      INSERT INTO track_stats(track_id, track_json, liked_at, play_count, last_played_at, last_played_hour)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO track_stats(
+        track_id, track_json, liked_at, local_favorited_at, play_count, last_played_at, last_played_hour
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(track_id) DO UPDATE SET
         track_json=excluded.track_json,
         liked_at=COALESCE(excluded.liked_at, track_stats.liked_at),
+        local_favorited_at=COALESCE(excluded.local_favorited_at, track_stats.local_favorited_at),
         play_count=MAX(track_stats.play_count, excluded.play_count),
         last_played_at=COALESCE(excluded.last_played_at, track_stats.last_played_at),
         last_played_hour=COALESCE(excluded.last_played_hour, track_stats.last_played_hour);
@@ -104,6 +156,7 @@ export class StateRepository {
           row.track.id,
           JSON.stringify(row.track),
           row.likedAt ?? null,
+          row.localFavoritedAt ?? null,
           row.playCount,
           row.lastPlayedAt ?? null,
           row.lastPlayedHour ?? null
@@ -119,13 +172,15 @@ export class StateRepository {
   getTrackStats(limit = 800): TrackStat[] {
     const stmt = this.db.prepare(`
       SELECT track_json, liked_at, play_count, last_played_at, last_played_hour
+           , local_favorited_at
       FROM track_stats
-      ORDER BY play_count DESC, track_id DESC
+      ORDER BY (local_favorited_at IS NOT NULL) DESC, play_count DESC, track_id DESC
       LIMIT ?;
     `);
     const rows = stmt.all(limit) as Array<{
       track_json: string;
       liked_at: string | null;
+      local_favorited_at: string | null;
       play_count: number;
       last_played_at: string | null;
       last_played_hour: number | null;
@@ -142,6 +197,9 @@ export class StateRepository {
       };
       if (row.liked_at) {
         stat.likedAt = row.liked_at;
+      }
+      if (row.local_favorited_at) {
+        stat.localFavoritedAt = row.local_favorited_at;
       }
       if (row.last_played_at) {
         stat.lastPlayedAt = row.last_played_at;
@@ -178,10 +236,110 @@ export class StateRepository {
       .run(JSON.stringify(parsed), trackId);
   }
 
+  ensureTrack(track: Track): void {
+    const existing = this.db
+      .prepare("SELECT track_id FROM track_stats WHERE track_id = ?")
+      .get(track.id) as { track_id: number } | undefined;
+    if (existing) {
+      this.db
+        .prepare("UPDATE track_stats SET track_json = ? WHERE track_id = ?")
+        .run(JSON.stringify(track), track.id);
+      return;
+    }
+    this.upsertTrackStats([{ track, playCount: 0 }]);
+  }
+
   markTrackLiked(trackId: number, likedAt: string): void {
+    this.setTrackFavorite(trackId, true, likedAt);
+  }
+
+  setTrackFavorite(trackId: number, favorite: boolean, at = new Date().toISOString()): boolean {
     this.db
-      .prepare("UPDATE track_stats SET liked_at = COALESCE(liked_at, ?) WHERE track_id = ?")
-      .run(likedAt, trackId);
+      .prepare("UPDATE track_stats SET local_favorited_at = ? WHERE track_id = ?")
+      .run(favorite ? at : null, trackId);
+    return this.isTrackFavorite(trackId);
+  }
+
+  isTrackFavorite(trackId: number): boolean {
+    const row = this.db
+      .prepare("SELECT local_favorited_at FROM track_stats WHERE track_id = ?")
+      .get(trackId) as { local_favorited_at: string | null } | undefined;
+    return Boolean(row?.local_favorited_at);
+  }
+
+  upsertRecommendationCandidates(candidates: RecommendationCandidate[]): void {
+    if (candidates.length === 0) {
+      return;
+    }
+    const statement = this.db.prepare(`
+      INSERT INTO recommendation_candidates(
+        track_id, track_json, source, tags_json, discovered_at, expires_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_id) DO UPDATE SET
+        track_json=excluded.track_json,
+        source=excluded.source,
+        tags_json=excluded.tags_json,
+        discovered_at=excluded.discovered_at,
+        expires_at=excluded.expires_at
+    `);
+    this.db.exec("BEGIN");
+    try {
+      for (const candidate of candidates) {
+        statement.run(
+          candidate.track.id,
+          JSON.stringify({ ...candidate.track, tags: candidate.tags }),
+          candidate.source,
+          JSON.stringify(candidate.tags),
+          candidate.discoveredAt,
+          candidate.expiresAt
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getRecommendationCandidates(
+    limit = 1000,
+    now = new Date().toISOString()
+  ): RecommendationCandidate[] {
+    const rows = this.db
+      .prepare(`
+        SELECT track_json, source, tags_json, discovered_at, expires_at
+        FROM recommendation_candidates
+        WHERE expires_at > ?
+        ORDER BY discovered_at DESC, track_id DESC
+        LIMIT ?
+      `)
+      .all(now, limit) as Array<{
+      track_json: string;
+      source: RecommendationSource;
+      tags_json: string;
+      discovered_at: string;
+      expires_at: string;
+    }>;
+    return rows.map((row) => ({
+      track: parseJson<Track>(row.track_json, { id: 0, title: "unknown", artists: ["unknown"] }),
+      source: row.source,
+      tags: parseJson(row.tags_json, []),
+      discoveredAt: row.discovered_at,
+      expiresAt: row.expires_at
+    }));
+  }
+
+  deleteExpiredRecommendationCandidates(now = new Date().toISOString()): void {
+    this.db.prepare("DELETE FROM recommendation_candidates WHERE expires_at <= ?").run(now);
+  }
+
+  saveRecommendationRefreshDate(source: RecommendationSource, date: string): void {
+    this.saveAppState(`recommendation_refresh:${source}`, date);
+  }
+
+  getRecommendationRefreshDate(source: RecommendationSource): string | undefined {
+    return this.getAppState<string>(`recommendation_refresh:${source}`);
   }
 
   addPlayEvent(event: PlayEvent): void {
@@ -339,6 +497,79 @@ export class StateRepository {
     this.db.prepare("DELETE FROM chat_messages").run();
   }
 
+  upsertChatMemory(input: {
+    category: ChatMemoryCategory;
+    content: string;
+    normalizedKey: string;
+    at?: string;
+  }): ChatMemory {
+    const at = input.at ?? new Date().toISOString();
+    this.db
+      .prepare(`
+        INSERT INTO chat_memories(category, content, normalized_key, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(normalized_key) DO UPDATE SET
+          category=excluded.category,
+          content=excluded.content,
+          updated_at=excluded.updated_at
+      `)
+      .run(input.category, input.content, input.normalizedKey, at, at);
+    const row = this.db
+      .prepare(`
+        SELECT id, category, content, created_at, updated_at
+        FROM chat_memories
+        WHERE normalized_key = ?
+      `)
+      .get(input.normalizedKey) as unknown as ChatMemoryRow;
+    return mapChatMemory(row);
+  }
+
+  getChatMemories(limit = 100): ChatMemory[] {
+    const rows = this.db
+      .prepare(`
+        SELECT id, category, content, created_at, updated_at
+        FROM chat_memories
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+      `)
+      .all(limit) as unknown as ChatMemoryRow[];
+    return rows.map(mapChatMemory);
+  }
+
+  deleteChatMemory(id: number): boolean {
+    const result = this.db.prepare("DELETE FROM chat_memories WHERE id = ?").run(id);
+    return Number(result.changes) > 0;
+  }
+
+  deleteChatMemories(ids: number[]): number {
+    const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id) && id > 0))];
+    if (uniqueIds.length === 0) {
+      return 0;
+    }
+    const placeholders = uniqueIds.map(() => "?").join(", ");
+    const result = this.db
+      .prepare(`DELETE FROM chat_memories WHERE id IN (${placeholders})`)
+      .run(...uniqueIds);
+    return Number(result.changes);
+  }
+
+  clearChatMemories(): void {
+    this.db.prepare("DELETE FROM chat_memories").run();
+  }
+
+  pruneChatMemories(maxItems = 100): void {
+    const limit = Math.max(1, Math.floor(maxItems));
+    this.db.prepare(`
+      DELETE FROM chat_memories
+      WHERE id NOT IN (
+        SELECT id
+        FROM chat_memories
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+      )
+    `).run(limit);
+  }
+
   private mapChatMessage(row: {
     id: number;
     role: ChatMessage["role"];
@@ -382,4 +613,22 @@ export class StateRepository {
     }
     return parseJson<T | undefined>(row.value_json, undefined);
   }
+}
+
+interface ChatMemoryRow {
+  id: number;
+  category: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function mapChatMemory(row: ChatMemoryRow): ChatMemory {
+  return {
+    id: row.id,
+    category: row.category as ChatMemoryCategory,
+    content: row.content,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }

@@ -313,10 +313,21 @@ describe("AI DJ assistant chat", () => {
       method: "POST"
     });
     expect(speechResponse.ok).toBe(true);
-    const speech = (await speechResponse.json()) as { messageId: number; audioUrl: string };
-    expect(speech).toEqual({
+    const speech = (await speechResponse.json()) as {
+      messageId: number;
+      audioUrl: string;
+      segments: Array<{ sequence: number; text: string; audioUrl: string }>;
+    };
+    expect(speech).toMatchObject({
       messageId: assistantMessage!.id,
-      audioUrl: expect.stringMatching(/^\/tts-cache\/[a-f0-9]{40}\.mp3$/)
+      audioUrl: expect.stringMatching(/^\/tts-cache\/[a-f0-9]{40}\.mp3$/),
+      segments: [
+        {
+          sequence: 0,
+          text: "好呀，今天想听点轻松又亮晶晶的歌～",
+          audioUrl: expect.stringMatching(/^\/tts-cache\/[a-f0-9]{40}\.mp3$/)
+        }
+      ]
     });
 
     const historyRes = await fetch(`${fixture.base}/api/chat/history`);
@@ -325,8 +336,40 @@ describe("AI DJ assistant chat", () => {
     };
     expect(history.messages.at(-1)?.speech).toEqual({
       audioUrl: speech.audioUrl,
-      profileKey: "zh-CN-XiaoxiaoNeural|+6%|+2Hz|+0%"
+      profileKey: "zh-CN-XiaoxiaoNeural|+6%|+2Hz|+0%",
+      segments: speech.segments
     });
+  });
+
+  it("returns and persists every segment for a reply longer than 320 characters", async () => {
+    const longReply = `${"第一段很认真地陪你聊下去。".repeat(15)}${"后面的话也不会被截断。".repeat(15)}`;
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "chat" },
+        chatReply: longReply
+      })
+    });
+
+    const response = await postChat(fixture.base, "和我深入聊聊");
+    const assistantMessage = response.messages.at(-1)!;
+    const speechResponse = await fetch(`${fixture.base}/api/chat/${assistantMessage.id}/speech`, {
+      method: "POST"
+    });
+    const speech = (await speechResponse.json()) as {
+      messageId: number;
+      audioUrl: string;
+      segments: Array<{ sequence: number; text: string; audioUrl: string }>;
+    };
+
+    expect(speechResponse.ok).toBe(true);
+    expect(speech.segments.length).toBeGreaterThan(4);
+    expect(speech.segments.map((segment) => segment.text).join("")).toBe(longReply);
+    expect(speech.segments.every((segment) => [...segment.text].length <= 80)).toBe(true);
+    expect(speech.audioUrl).toBe(speech.segments[0]?.audioUrl);
+
+    const historyResponse = await fetch(`${fixture.base}/api/chat/history`);
+    const history = (await historyResponse.json()) as { messages: ChatMessage[] };
+    expect(history.messages.at(-1)?.speech?.segments).toEqual(speech.segments);
   });
 
   it("rejects speech generation for a user message", async () => {

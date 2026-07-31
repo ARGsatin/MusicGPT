@@ -1,4 +1,5 @@
 import type {
+  ChatMemory,
   ChatMessage,
   ChatResponse,
   ChatSpeechResponse,
@@ -6,6 +7,7 @@ import type {
   DjSettings,
   EnvironmentContext,
   EnvironmentLocationRequest,
+  FavoriteResponse,
   FeedbackRequest,
   ImportNcmResponse,
   NextResponse,
@@ -146,6 +148,33 @@ export async function fetchChatHistory(): Promise<ChatMessage[]> {
   return payload.messages;
 }
 
+export async function fetchChatMemories(): Promise<ChatMemory[]> {
+  const response = await fetch(API_ROUTES.chatMemories);
+  if (!response.ok) {
+    throw new Error("Failed to load chat memories");
+  }
+  const payload = (await response.json()) as { memories: ChatMemory[] };
+  return payload.memories;
+}
+
+export async function deleteChatMemory(memoryId: number): Promise<void> {
+  const response = await fetch(API_ROUTES.chatMemory(memoryId), {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to delete chat memory");
+  }
+}
+
+export async function clearChatMemories(): Promise<void> {
+  const response = await fetch(API_ROUTES.chatMemories, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to clear chat memories");
+  }
+}
+
 export async function generateChatSpeech(messageId: number): Promise<ChatSpeechResponse> {
   const response = await fetch(API_ROUTES.chatSpeech(messageId), {
     method: "POST"
@@ -198,6 +227,18 @@ export async function sendFeedback(payload: FeedbackRequest): Promise<void> {
   if (!response.ok) {
     throw new Error("Feedback failed");
   }
+}
+
+export async function setFavorite(trackId: number, favorite: boolean): Promise<FavoriteResponse> {
+  const response = await fetch(API_ROUTES.favorite(trackId), {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ favorite })
+  });
+  if (!response.ok) {
+    throw new Error("Favorite update failed");
+  }
+  return (await response.json()) as FavoriteResponse;
 }
 
 export async function fetchSystemStatus(): Promise<SystemStatus> {

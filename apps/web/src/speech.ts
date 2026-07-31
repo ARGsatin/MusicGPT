@@ -65,6 +65,7 @@ export class SpeechPlaybackController {
   private streamingChatKey: string | undefined;
   private blockedChatStreamKey: string | undefined;
   private chatStreamFinished = false;
+  private playbackAttempt = 0;
   private active = false;
   private disposed = false;
 
@@ -75,11 +76,12 @@ export class SpeechPlaybackController {
 
   private readonly onError = () => {
     const failed = this.current;
+    const failedChatStreamKey = this.streamingChatKey;
     this.current = undefined;
     this.chatQueue.length = 0;
     this.djQueue.length = 0;
     this.streamingChatKey = undefined;
-    this.blockedChatStreamKey = undefined;
+    this.blockedChatStreamKey = failedChatStreamKey;
     this.chatStreamFinished = false;
     this.callbacks.onPlayingKeyChange?.(undefined);
     this.setActive(false);
@@ -111,6 +113,24 @@ export class SpeechPlaybackController {
       this.current = undefined;
     }
     return this.start(job);
+  }
+
+  async playSequence(jobs: SpeechPlaybackJob[]): Promise<boolean> {
+    if (jobs.length === 0 || this.disposed) {
+      return false;
+    }
+    this.chatQueue.length = 0;
+    this.streamingChatKey = undefined;
+    this.blockedChatStreamKey = undefined;
+    this.chatStreamFinished = false;
+    if (this.current) {
+      this.audio.pause();
+      this.audio.currentTime = 0;
+      this.current = undefined;
+    }
+    const [first, ...remaining] = jobs;
+    this.chatQueue.push(...remaining);
+    return this.start(first!);
   }
 
   enqueueChatSegment(streamKey: string, job: SpeechPlaybackJob): void {
@@ -175,6 +195,7 @@ export class SpeechPlaybackController {
   }
 
   stop(clearQueue = false): void {
+    this.playbackAttempt += 1;
     if (clearQueue) {
       this.djQueue.length = 0;
     }
@@ -234,6 +255,7 @@ export class SpeechPlaybackController {
     if (this.disposed) {
       return false;
     }
+    const playbackAttempt = ++this.playbackAttempt;
     this.current = job;
     this.audio.src = job.audioUrl;
     this.audio.currentTime = 0;
@@ -244,6 +266,9 @@ export class SpeechPlaybackController {
       await this.audio.play();
       return true;
     } catch (error) {
+      if (playbackAttempt !== this.playbackAttempt) {
+        return true;
+      }
       this.chatQueue.length = 0;
       this.djQueue.length = 0;
       this.streamingChatKey = undefined;

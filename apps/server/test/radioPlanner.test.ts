@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { PlayEvent, TasteProfile, TrackStat } from "@musicgpt/shared";
+import type {
+  PlayEvent,
+  RecommendationCandidate,
+  TasteProfile,
+  TrackStat
+} from "@musicgpt/shared";
 import { RadioPlanner } from "../src/radioPlanner.js";
 
 const stats: TrackStat[] = [
@@ -41,6 +46,7 @@ const profile: TasteProfile = {
     nostalgia: 0.05,
     unknown: 0.05
   },
+  preferenceTags: [],
   pacingPreference: "balanced"
 };
 
@@ -78,5 +84,48 @@ describe("RadioPlanner", () => {
     expect(plan[0]?.track.id).toBe(2);
     expect(plan[0]?.reason).toContain("雨天");
     expect(plan[0]?.reason).toContain("深夜");
+  });
+
+  it("interleaves a ten-track window into five familiar and five exploration picks", () => {
+    const planner = new RadioPlanner(() => 0.5);
+    const familiarStats: TrackStat[] = Array.from({ length: 6 }, (_, index) => ({
+      track: {
+        id: index + 1,
+        title: `Familiar ${index + 1}`,
+        artists: [`Known ${index + 1}`],
+        moodTag: "warm"
+      },
+      playCount: 20 - index
+    }));
+    const candidates: RecommendationCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+      track: {
+        id: 100 + index,
+        title: `Explore ${index + 1}`,
+        artists: [`New ${index + 1}`],
+        moodTag: "warm"
+      },
+      source: index % 2 === 0 ? "ncm_daily" : "style_search",
+      tags: [{ category: "style", value: `Style ${index + 1}` }],
+      discoveredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    }));
+
+    const plan = planner.plan(familiarStats, profile, [], {
+      windowSize: 10,
+      candidates,
+      environment: {
+        dayPeriod: "evening",
+        weather: "clear",
+        updatedAt: new Date().toISOString()
+      }
+    });
+
+    expect(plan).toHaveLength(10);
+    expect(plan.filter((item) => item.bucket === "familiar")).toHaveLength(5);
+    expect(plan.filter((item) => item.bucket === "explore")).toHaveLength(5);
+    expect(plan.map((item) => item.bucket)).toEqual([
+      "familiar", "explore", "familiar", "explore", "familiar",
+      "explore", "familiar", "explore", "familiar", "explore"
+    ]);
   });
 });
