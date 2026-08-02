@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import type { NowPlayingState, TrackLyrics } from "@musicgpt/shared";
 import { findActiveLyricIndex } from "../lyrics";
+import { LyricsOverlay } from "./LyricsOverlay";
 import {
   applyPlayerVolume,
   DEFAULT_PLAYER_VOLUME,
@@ -53,13 +54,15 @@ const EMPTY_LYRIC_LINES: TrackLyrics["lines"] = [];
 const RING_RADIUS = 158;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
-/** 唱机下方悬浮的卡拉 OK 歌词条：前一行淡出、当前行高亮、下一行预告。 */
+/** 唱机下方悬浮的卡拉 OK 歌词条：前一行淡出、当前行高亮、下一行预告。有歌词时可点击展开全屏歌词。 */
 const LyricRibbon = memo(function LyricRibbon({
   activeIndex,
-  lyrics
+  lyrics,
+  onExpand
 }: {
   activeIndex: number;
   lyrics: TrackLyrics | undefined;
+  onExpand?: (() => void) | undefined;
 }) {
   const lines = lyrics?.lines ?? EMPTY_LYRIC_LINES;
   const current = activeIndex >= 0 ? lines[activeIndex] : undefined;
@@ -81,14 +84,38 @@ const LyricRibbon = memo(function LyricRibbon({
     );
   }
 
-  return (
-    <div className="lyric-ribbon" aria-live="polite">
+  const content = (
+    <>
       <p className="lyric-now" key={`${activeIndex}-${current?.timeMs ?? 0}`}>
         {current?.text ?? "♪"}
         {current?.translation ? <span className="lyric-translation">{current.translation}</span> : null}
       </p>
       {upcoming ? <p className="lyric-next">{upcoming.text}</p> : null}
-    </div>
+    </>
+  );
+
+  if (!onExpand) {
+    return (
+      <div className="lyric-ribbon" aria-live="polite">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <button
+      className="lyric-ribbon is-expandable"
+      type="button"
+      aria-label="展开全部歌词"
+      title="展开全部歌词"
+      aria-live="polite"
+      onClick={onExpand}
+    >
+      {content}
+      <span className="lyric-expand-hint" aria-hidden="true">
+        全部歌词 ⤢
+      </span>
+    </button>
   );
 });
 
@@ -108,6 +135,7 @@ export const TurntableStage = memo(function TurntableStage({
   const [favoritePending, setFavoritePending] = useState(false);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [heartBurst, setHeartBurst] = useState(0);
+  const [lyricsOpen, setLyricsOpen] = useState(false);
   const [playerVolume, setPlayerVolume] = useState(() => loadPlayerVolume(getBrowserStorage()));
   const audioRef = useRef<HTMLAudioElement>(null);
   const lastAudibleVolumeRef = useRef(
@@ -125,6 +153,7 @@ export const TurntableStage = memo(function TurntableStage({
     setAudioDuration(0);
     setFavorite(Boolean(now.isFavorite));
     setFavoriteError(null);
+    setLyricsOpen(false);
   }, [now.track]);
 
   useEffect(() => {
@@ -286,7 +315,22 @@ export const TurntableStage = memo(function TurntableStage({
         </div>
       </div>
 
-      <LyricRibbon activeIndex={activeLyricIndex} lyrics={now.lyrics} />
+      <LyricRibbon
+        activeIndex={activeLyricIndex}
+        lyrics={now.lyrics}
+        onExpand={lyricLines.length > 0 ? () => setLyricsOpen(true) : undefined}
+      />
+
+      {lyricsOpen && now.lyrics && lyricLines.length > 0 ? (
+        <LyricsOverlay
+          activeIndex={activeLyricIndex}
+          artist={formatArtists(now.track?.artists)}
+          lyrics={now.lyrics}
+          trackTitle={now.track?.title ?? "等待开播"}
+          onClose={() => setLyricsOpen(false)}
+          onSeek={onSeek}
+        />
+      ) : null}
 
       <div className="transport" aria-label="Playback controls">
         <button className="transport-btn" type="button" aria-label="Replay" onClick={() => void onReplay()}>

@@ -11,7 +11,7 @@
 
 - **黑胶唱机舞台**：封面做成旋转黑胶（播放时转动、暂停即停），唱臂随播放/暂停摆动落下，唱机外圈是发光进度环，点唱片中央可播放/暂停
 - **极光氛围背景**：三层缓慢漂移的极光光带 + 漂浮微尘，颜色随天气切换（晴=青金、雨=蓝靛、雪=冷白、云=灰紫、风暴=电紫）
-- **悬浮歌词条**：卡拉 OK 式逐行高亮 + 下一行预告，替代原来的歌词卡片
+- **悬浮歌词条**：卡拉 OK 式逐行高亮 + 下一行预告；**点击可展开全屏歌词面板**——当前行自动居中滚动高亮，点击任意一句直接跳转播放进度，Esc / ✕ / 点击背景关闭
 - **底部信号跑马灯**：曲库数 / AI 状态 / 口味标签 / 天气滚成电台字幕带
 - **ON AIR 呼吸灯**、心形收藏弹跳、7 段均衡器随播放律动
 
@@ -35,7 +35,8 @@ apps/web/src/
   styles.css                   # 全新设计系统（暗色极光）
   components/
     AmbientBackdrop.tsx        # 极光背景 + 天气变色 + 微尘
-    TurntableStage.tsx         # 唱机舞台（播放器全部交互）
+    TurntableStage.tsx         # 唱机舞台（播放器全部交互 + 歌词条）
+    LyricsOverlay.tsx          # 全屏歌词面板（点句跳转进度）
     ChatPanel.tsx              # 对话/队列侧栏
     StatusRibbon.tsx           # 顶部栏 + 时钟 + 底部跑马灯
 ```
@@ -43,8 +44,8 @@ apps/web/src/
 ## 验证结果
 
 - `tsc --noEmit`：0 错误
-- `vitest run`：10 个文件 / 34 个测试全部通过
-- `vite build`：JS 234KB（gzip 74KB）/ CSS 30KB（gzip 7KB）
+- `vitest run`：11 个文件 / 37 个测试全部通过
+- `vite build`：JS 237KB（gzip 75KB）/ CSS 34KB（gzip 7.7KB）
 
 ## 本地预览
 
@@ -57,6 +58,6 @@ node ../../node_modules/vite/bin/vite.js preview --port 5174
 ## 注意事项（follow-up）
 
 1. **worktree 的 node_modules 是指向主仓库的目录联接**（当时 npm install 太慢的权宜之计）。建议网络空闲时在 worktree 根目录跑一次真正的 `npm install` 替换掉联接，之后 `npm run dev` 体验与主仓库一致。
-2. `vite dev` 在联接依赖下首次 pre-bundle 会非常慢，先用 `vite build && vite preview`。
+2. `vite dev` 在联接依赖下首次 pre-bundle 会非常慢，先用 `vite build && vite preview`；若 build 报 `emptyDir` 失败（预览进程占用 dist 或删除被拦截），先 `rm -rf apps/web/dist` 再构建。
 3. 合并回主线：`git merge aurora-ui`（在 main 上操作，注意主目录当前有未提交改动，先提交或 stash）。
 4. 顺带修复：主仓库 `.git/info/exclude` 增加了 `.worktrees/`，避免 worktree 目录干扰 `git status`。
