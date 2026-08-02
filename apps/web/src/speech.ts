@@ -2,6 +2,7 @@ import type { PlayerVolume } from "./volume";
 
 export const AUTO_SPEAK_STORAGE_KEY = "musicgpt.chat-speech.auto";
 export const SPEECH_DUCKING_RATIO = 0.25;
+export const SPEECH_DUCKING_FADE_MS = 500;
 
 type ReadableStorage = Pick<Storage, "getItem">;
 type WritableStorage = Pick<Storage, "setItem">;
