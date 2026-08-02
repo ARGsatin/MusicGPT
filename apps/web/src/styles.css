@@ -87,6 +87,35 @@ select:focus-visible {
   min-width: 0;
 }
 
+/* 桌面端：页面钉死在视口高度，对话在面板内部滚动，不撑长页面 */
+@media (min-width: 1101px) {
+  .deck {
+    height: 100dvh;
+  }
+
+  .deck-grid {
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .stage-column {
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  .stage {
+    justify-content: safe center;
+  }
+
+  .chat-panel {
+    min-height: 0;
+  }
+
+  .message-thread {
+    min-height: 0;
+  }
+}
+
 /* ============ 极光背景 ============ */
 
 .aurora-backdrop {
