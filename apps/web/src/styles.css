@@ -100,11 +100,6 @@ select:focus-visible {
 
   .stage-column {
     min-height: 0;
-    overflow-y: auto;
-  }
-
-  .stage {
-    justify-content: safe center;
   }
 
   .chat-panel {
@@ -408,19 +403,19 @@ select:focus-visible {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 18px;
+  gap: 13px;
   padding: 12px 8px 8px;
   min-width: 0;
 }
 
 .turntable-wrap {
   position: relative;
-  padding: clamp(10px, 1.6vw, 22px);
+  padding: clamp(8px, 1.4vw, 18px);
 }
 
 .turntable {
   position: relative;
-  width: clamp(272px, 32vw, 372px);
+  width: clamp(240px, 33vh, 360px);
   aspect-ratio: 1;
   border-radius: 50%;
   background:
@@ -666,7 +661,7 @@ select:focus-visible {
 
 .stage-title {
   margin: 0;
-  font-size: clamp(22px, 3vw, 34px);
+  font-size: clamp(20px, 2.6vw, 30px);
   font-weight: 800;
   letter-spacing: 0.01em;
   overflow: hidden;
@@ -677,9 +672,9 @@ select:focus-visible {
 }
 
 .stage-artist {
-  margin: 6px 0 0;
+  margin: 5px 0 0;
   color: var(--muted);
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .equalizer {
@@ -687,8 +682,8 @@ select:focus-visible {
   align-items: flex-end;
   justify-content: center;
   gap: 4px;
-  height: 26px;
-  margin-top: 12px;
+  height: 22px;
+  margin-top: 10px;
 }
 
 .equalizer i {
@@ -723,7 +718,7 @@ select:focus-visible {
 /* 歌词悬浮条 */
 
 .lyric-ribbon {
-  min-height: 74px;
+  min-height: 64px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -992,13 +987,13 @@ button.lyric-ribbon:focus-visible .lyric-expand-hint {
 }
 
 .transport-btn {
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   border: 1px solid var(--line);
   background: rgba(19, 25, 48, 0.72);
   color: var(--muted);
-  font-size: 19px;
+  font-size: 18px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1023,9 +1018,9 @@ button.lyric-ribbon:focus-visible .lyric-expand-hint {
 }
 
 .transport-primary {
-  width: 68px;
-  height: 68px;
-  font-size: 24px;
+  width: 62px;
+  height: 62px;
+  font-size: 22px;
   color: #0a0e1d;
   border: none;
   background: linear-gradient(135deg, var(--aurora-1), var(--aurora-2) 70%);
@@ -1960,6 +1955,34 @@ input[type="range"]::-moz-range-track {
 }
 
 /* ============ 响应式 ============ */
+
+/* 矮视口紧凑模式：唱机区不放滚动条，而是自动缩小并隐藏次要元素 */
+@media (max-height: 860px) {
+  .turntable {
+    width: clamp(210px, 28vh, 300px);
+  }
+
+  .stage {
+    gap: 9px;
+  }
+
+  .equalizer,
+  .lyric-next {
+    display: none;
+  }
+
+  .lyric-ribbon {
+    min-height: 48px;
+  }
+
+  .stage-title {
+    font-size: clamp(18px, 2.2vw, 24px);
+  }
+
+  .micro-label {
+    margin-bottom: 3px;
+  }
+}
 
 @media (max-width: 1100px) {
   .deck-grid {
