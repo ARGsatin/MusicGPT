@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type OpenAI from "openai";
 
 import type { TasteProfile } from "@musicgpt/shared";
 import { DjBrain, sanitizeDjText } from "../src/djBrain.js";
@@ -30,26 +31,46 @@ describe("DjBrain", () => {
     expect(sanitized.length).toBeLessThanOrEqual(90);
   });
 
-  it("generates fallback script when no api key is provided", async () => {
+  it("skips the scheduled broadcast when no api key is provided", async () => {
     const brain = new DjBrain();
     const script = await brain.generate({
       profile,
       nowTrack: { id: 1, title: "Song", artists: ["Artist"] },
       upcoming: []
     });
-    expect(script.text.length).toBeGreaterThan(0);
-    expect(script.trackIds[0]).toBe(1);
+    expect(script).toBeUndefined();
   });
 
-  it("includes lively tone cues in fallback script when requested", async () => {
-    const brain = new DjBrain();
+  it("rewrites a canned scheduled broadcast before publishing it", async () => {
+    const drafts = [
+      "这首歌的分寸感很好，重点到了，又不会一下子扑得太满。",
+      "当前曲目的短鼓点接到下一首的合成器长音，节拍会从紧凑转为舒展。"
+    ];
+    let calls = 0;
+    const client = {
+      responses: {
+        create: async () => {
+          calls += 1;
+          return { output_text: drafts.shift() ?? "" };
+        }
+      }
+    } as unknown as OpenAI;
+    const brain = new DjBrain({ model: "test-model", client });
+
     const script = await brain.generate({
       profile,
-      nowTrack: { id: 1, title: "Song", artists: ["Artist"] },
-      upcoming: [],
-      settings: { tone: "lively", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" }
+      nowTrack: { id: 1, title: "First", artists: ["Artist"] },
+      upcoming: [
+        {
+          track: { id: 2, title: "Second", artists: ["Next"] },
+          score: 1,
+          reason: "测试"
+        }
+      ]
     });
 
-    expect(script.text).toContain("轻快");
+    expect(script?.text).toBe("当前曲目的短鼓点接到下一首的合成器长音，节拍会从紧凑转为舒展。");
+    expect(script?.text).not.toContain("分寸感");
+    expect(calls).toBe(2);
   });
 });

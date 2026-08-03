@@ -126,7 +126,12 @@ export async function createServer(options: CreateServerOptions = {}) {
     ncm,
     options.tasteEngine ?? new TasteEngine(),
     options.planner ?? new RadioPlanner(),
-    options.djBrain ?? new DjBrain(config.openAiApiKey),
+    options.djBrain ??
+      new DjBrain({
+        apiKey: config.openAiApiKey,
+        baseUrl: config.openAiBaseUrl,
+        model: config.openAiModel
+      }),
     options.aiDjAssistant ??
       new OpenAiDjAssistant({
         apiKey: config.openAiApiKey,

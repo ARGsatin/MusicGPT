@@ -11,6 +11,8 @@ const DEFAULT_PITCH = "+2Hz";
 const DEFAULT_VOLUME = "+0%";
 const DEFAULT_MAX_FILES = 500;
 const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
+const EMOJI_SEQUENCE =
+  /(?:\p{Regional_Indicator}{1,2}|[#*0-9]\uFE0F?\u20E3|\p{Emoji_Modifier}|\p{Extended_Pictographic}(?:\uFE0E|\uFE0F)?(?:\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0E|\uFE0F)?(?:\p{Emoji_Modifier})?)*)(?:[\u{E0020}-\u{E007E}]*\u{E007F})?/gu;
 
 interface SpeechSynthesisResult {
   audioUrl?: string;
@@ -219,6 +221,13 @@ export class TtsPipeline {
 }
 
 export function prepareSpeechText(text: string): string {
+  if (
+    /^(?:尚未连接 DeepSeek\/OpenAI，当前无法生成开放式回复。|DeepSeek 暂时没能生成可信的(?:回复，请重试。|点评；这次不使用本地套话。))$/u.test(
+      text.trim()
+    )
+  ) {
+    return "";
+  }
   const lines = text.split(/\r?\n/);
   if (
     lines[0] &&
@@ -226,7 +235,12 @@ export function prepareSpeechText(text: string): string {
   ) {
     lines.shift();
   }
-  return lines.join(" ").replace(/\s+/g, " ").trim();
+  return lines
+    .join(" ")
+    .replace(EMOJI_SEQUENCE, " ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([，。！？；：、,.!?;:])/g, "$1")
+    .trim();
 }
 
 function escapeSsmlText(text: string): string {

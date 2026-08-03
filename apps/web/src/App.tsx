@@ -47,6 +47,7 @@ import { useWsStream } from "./useWsStream";
 import {
   applyPlayerVolume,
   DEFAULT_PLAYER_VOLUME,
+  fadePlayerVolume,
   loadPlayerVolume,
   normalizeVolumeLevel,
   savePlayerVolume
@@ -55,6 +56,7 @@ import {
   getDuckedPlayerVolume,
   loadAutoSpeak,
   saveAutoSpeak,
+  SPEECH_DUCKING_FADE_MS,
   SpeechPlaybackController
 } from "./speech";
 
@@ -382,6 +384,7 @@ export const PlayerStack = memo(function PlayerStack({
   const lastAudibleVolumeRef = useRef(
     playerVolume.level > 0 ? playerVolume.level : DEFAULT_PLAYER_VOLUME.level
   );
+  const previousSpeechActiveRef = useRef(speechActive);
   const lyricLines = now.lyrics?.lines ?? EMPTY_LYRIC_LINES;
   const activeLyricIndex = useMemo(
     () => findActiveLyricIndex(lyricLines, audioTime * 1000),
@@ -400,10 +403,20 @@ export const PlayerStack = memo(function PlayerStack({
   }, [now.isFavorite]);
 
   useEffect(() => {
-    if (audioRef.current) {
-      applyPlayerVolume(audioRef.current, getDuckedPlayerVolume(playerVolume, speechActive));
+    const audio = audioRef.current;
+    const speechStateChanged = previousSpeechActiveRef.current !== speechActive;
+    previousSpeechActiveRef.current = speechActive;
+    let cancelFade: (() => void) | undefined;
+    if (audio) {
+      const targetVolume = getDuckedPlayerVolume(playerVolume, speechActive);
+      if (speechStateChanged) {
+        cancelFade = fadePlayerVolume(audio, targetVolume, SPEECH_DUCKING_FADE_MS);
+      } else {
+        applyPlayerVolume(audio, targetVolume);
+      }
     }
     savePlayerVolume(getBrowserStorage(), playerVolume);
+    return cancelFade;
   }, [playerVolume, speechActive]);
 
   const onTogglePlayback = async () => {

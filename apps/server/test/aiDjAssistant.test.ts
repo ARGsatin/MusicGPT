@@ -1,26 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type OpenAI from "openai";
 
 import {
   AI_DJ_PERSONA_STYLE,
   buildChatMessages,
   canFastPathChat,
   OpenAiDjAssistant,
-  fallbackChatReply,
   fallbackClassify,
-  fallbackComment,
   normalizeIntent
 } from "../src/aiDjAssistant.js";
+import { OpenEndedReplyRejectedError } from "../src/openEndedReply.js";
 
-describe("AI DJ assistant fallback comments", () => {
-  it("uses visibly different fallback reviews for different moods", () => {
-    const focus = fallbackComment({ id: 1, title: "Terminal Glow", artists: ["Bit Depth"], moodTag: "focus" });
-    const energy = fallbackComment({ id: 2, title: "Rocket Floor", artists: ["Voltage"], moodTag: "energy" });
-
-    expect(focus).not.toBe(energy);
-    expect(focus).toContain("Terminal Glow");
-    expect(energy).toContain("Rocket Floor");
-  });
-
+describe("AI DJ assistant", () => {
   it("reports fallback mode when no OpenAI API key is configured", () => {
     const assistant = new OpenAiDjAssistant({ model: "gpt-4.1-mini" });
 
@@ -32,33 +23,87 @@ describe("AI DJ assistant fallback comments", () => {
     });
   });
 
-  it("does not use the same canned chat fallback for every message", () => {
-    const first = fallbackChatReply("聊聊这首", { messages: [], queue: [] });
-    const second = fallbackChatReply("我想听冷一点", { messages: [], queue: [] });
-
-    expect(first).not.toBe(second);
-    expect(first.length).toBeLessThan(80);
-    expect(second.length).toBeLessThan(80);
+  it("asks for direct, specific language without a forced cute persona", () => {
+    expect(AI_DJ_PERSONA_STYLE).toContain("直接、具体、有判断");
+    expect(AI_DJ_PERSONA_STYLE).toContain("不知道就明说");
+    expect(AI_DJ_PERSONA_STYLE).not.toContain("邻家女孩");
+    expect(AI_DJ_PERSONA_STYLE).not.toContain("活泼、温柔");
   });
 
-  it("keeps the assistant lively and gentle while allowing serious conversation", () => {
-    const comments = [
-      fallbackComment({ id: 11, title: "Soft Steps", artists: ["Mori"], moodTag: "calm" }),
-      fallbackComment({ id: 12, title: "Sunny Side", artists: ["Lumi"], moodTag: "energy" }),
-      fallbackComment({ id: 13, title: "Warm Hug", artists: ["Nana"], moodTag: "warm" })
+  it("rewrites a canned model comment before returning anything to the caller", async () => {
+    const drafts = [
+      "我喜欢它的分寸感，重点到了，又不会一下子扑得太满。",
+      "钢琴的重复音型不断向前推，主旋律拉长时也没有拖慢拍子。"
     ];
-    const chats = [
-      fallbackChatReply("陪我聊聊", { messages: [], queue: [] }),
-      fallbackChatReply("我想听冷一点", { messages: [], queue: [] })
-    ];
-    const replies = [...comments, ...chats].join("\n");
+    let calls = 0;
+    const client = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            return {
+              choices: [{ message: { content: drafts.shift() ?? "" } }]
+            };
+          }
+        }
+      }
+    } as unknown as OpenAI;
+    const assistant = new OpenAiDjAssistant({
+      model: "test-model",
+      client
+    });
 
-    expect(AI_DJ_PERSONA_STYLE).toContain("活泼、温柔");
-    expect(AI_DJ_PERSONA_STYLE).toContain("邻家女孩");
-    expect(AI_DJ_PERSONA_STYLE).toContain("自己的喜恶和判断");
-    expect(AI_DJ_PERSONA_STYLE).toContain("严肃或脆弱");
-    expect(replies).toMatch(/[呀啦诶～]/);
-    expect(replies).not.toMatch(/深沉|灵魂|夜色|唱针|灰质|骨相/);
+    const reply = await assistant.commentTrack(
+      { id: 1, title: "Flower Dance", artists: ["DJ OKAWARI"] },
+      { messages: [], queue: [] },
+      "comment_current"
+    );
+
+    expect(reply).toBe("钢琴的重复音型不断向前推，主旋律拉长时也没有拖慢拍子。");
+    expect(reply).not.toContain("分寸感");
+    expect(calls).toBe(2);
+  });
+
+  it("stops after two empty responses instead of inventing local prose", async () => {
+    let calls = 0;
+    const client = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            return { choices: [{ message: { content: "" } }] };
+          }
+        }
+      }
+    } as unknown as OpenAI;
+    const assistant = new OpenAiDjAssistant({ model: "test-model", client });
+
+    await expect(
+      assistant.chat("还在吗", { messages: [], queue: [] })
+    ).rejects.toBeInstanceOf(OpenEndedReplyRejectedError);
+    expect(calls).toBe(2);
+    expect(assistant.status().lastError).toContain("open_ended_reply_rejected:empty");
+  });
+
+  it("records a timeout without replacing it with a local persona reply", async () => {
+    let calls = 0;
+    const client = {
+      chat: {
+        completions: {
+          create: async () => {
+            calls += 1;
+            throw new Error("request timed out");
+          }
+        }
+      }
+    } as unknown as OpenAI;
+    const assistant = new OpenAiDjAssistant({ model: "test-model", client });
+
+    await expect(
+      assistant.chat("还在吗", { messages: [], queue: [] })
+    ).rejects.toThrow("request timed out");
+    expect(calls).toBe(1);
+    expect(assistant.status().lastError).toBe("request timed out");
   });
 
   it("builds a real role-ordered conversation without duplicating the current message", () => {

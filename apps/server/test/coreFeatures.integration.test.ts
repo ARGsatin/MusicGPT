@@ -105,10 +105,12 @@ describe("core feature integration", () => {
     });
   });
 
-  it("records completion via feedback and triggers DJ by completed tracks", async () => {
+  it("records completion but skips scheduled DJ output when AI is unavailable", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-core-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
+    const spoken: string[] = [];
     const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
+      spoken.push(_text);
       fs.writeFileSync(filePath, "audio");
     });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
@@ -136,7 +138,9 @@ describe("core feature integration", () => {
 
     await sendFeedback(base, "complete", secondNow.track!.id);
     const thirdNow = await requestNext(base);
-    expect(thirdNow.djScript?.text.length).toBeGreaterThan(0);
+    expect(thirdNow.track?.id).toBeDefined();
+    expect(thirdNow.djScript).toBeUndefined();
+    expect(spoken).toEqual([]);
   });
 
   it("updates local favorite state and exposes status/import endpoints", async () => {
@@ -325,8 +329,7 @@ function createLocalAssistant(): AiDjAssistant {
     status: () => ({ configured: false, provider: "local" }),
     classify: async (message) => fallbackClassify(message),
     selectTrack: async (_description, candidates) => ({
-      trackId: candidates[0]?.id,
-      reason: "本地上下文排序"
+      trackId: candidates[0]?.id
     }),
     commentTrack: async (track) => `这首《${track.title}》和现在的氛围很合拍。`,
     commentCurrent: async () => "正在播放的这首很合适。",

@@ -8,6 +8,8 @@ import type { ChatMessage, Track, TrackStat } from "@musicgpt/shared";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
+import { currentPeriod } from "../src/time.js";
+import { periodLabel } from "../src/trackTags.js";
 import { TtsPipeline } from "../src/ttsPipeline.js";
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "../src/aiDjAssistant.js";
 
@@ -56,9 +58,7 @@ describe("AI DJ assistant chat", () => {
       });
 
     expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
-      "好呀，",
-      "今天听点轻快的。",
-      "再来一首！"
+      "好呀，今天听点轻快的。再来一首！"
     ]);
     expect(events.filter((event) => event.type === "speech").map((event) => event.text)).toEqual([
       "好呀，今天听点轻快的。",
@@ -117,7 +117,7 @@ describe("AI DJ assistant chat", () => {
     }
   });
 
-  it("shows a streaming provider diagnostic but only speaks the friendly fallback", async () => {
+  it("shows an honest provider failure without speaking a canned fallback", async () => {
     const spoken: string[] = [];
     const fixture = await createFixture({
       assistant: new FakeAssistant({
@@ -137,17 +137,36 @@ describe("AI DJ assistant chat", () => {
     });
     const body = await response.text();
 
-    expect(body).toContain("upstream stream broke");
-    expect(spoken.join("")).not.toContain("upstream stream broke");
-    expect(spoken.join("")).not.toContain("刚刚开了个小差");
-    expect(spoken.join("")).toMatch(/[呀啦～]/);
+    expect(body).toContain("DeepSeek 暂时没能生成可信的回复，请重试。");
+    expect(body).not.toContain("upstream stream broke");
+    expect(spoken).toEqual([]);
+  });
+
+  it("does not invent a local chat reply when no AI provider is configured", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        configured: false,
+        intent: { type: "chat" },
+        chatReply: "好呀，我懂你想要的感觉了～"
+      })
+    });
+
+    const response = await postChat(fixture.base, "还在吗");
+
+    expect(response.reply).toBe("尚未连接 DeepSeek/OpenAI，当前无法生成开放式回复。");
+    expect(response.reply).not.toContain("好呀");
+    const speechResponse = await fetch(
+      `${fixture.base}/api/chat/${response.messages.at(-1)!.id}/speech`,
+      { method: "POST" }
+    );
+    expect(speechResponse.status).toBe(503);
   });
 
   it("selects a described song from the local library without changing playback", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "雨夜散步，不要太伤", searchQuery: "雨夜 散步" },
-        selection: { trackId: 102, reason: "它有雨夜感，但节奏没有彻底塌下去。" }
+        selection: { trackId: 102 }
       })
     });
     fixture.repo.upsertTrackStats([
@@ -161,7 +180,9 @@ describe("AI DJ assistant chat", () => {
     expect(response.now.track).toBeUndefined();
     expect(response.now.queue).toHaveLength(0);
     expect(response.reply).toContain("Rain Walk");
-    expect(response.reply).toContain("给你～");
+    expect(response.reply).toContain("散步通勤");
+    expect(response.reply).toContain("夜听");
+    expect(response.reply).not.toContain("给你～");
     expect(response.messages.at(-1)?.role).toBe("assistant");
     const suggestion = response.messages.at(-1)?.trackSuggestion;
     expect(suggestion?.track.id).toBe(102);
@@ -174,7 +195,7 @@ describe("AI DJ assistant chat", () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "rain walk", searchQuery: "rain walk" },
-        selection: { trackId: 102, reason: "soft night pacing" }
+        selection: { trackId: 102 }
       })
     });
     fixture.repo.upsertTrackStats([
@@ -196,7 +217,7 @@ describe("AI DJ assistant chat", () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "凌晨写代码的低频电子", searchQuery: "低频 电子" },
-        selection: { trackId: 202, reason: "低频线条更适合深夜专注。" }
+        selection: { trackId: 202 }
       }),
       searchTracks: [{ id: 202, title: "Sub Bass Room", artists: ["Kernel"], moodTag: "focus" }]
     });
@@ -212,7 +233,7 @@ describe("AI DJ assistant chat", () => {
     expect(fixture.ncmSearches).toEqual(["低频 电子"]);
   });
 
-  it("uses warm, lively wording for built-in operation replies", async () => {
+  it("keeps built-in operation replies functional and neutral", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "pause" }
@@ -222,9 +243,8 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "先暂停一下");
 
     expect(response.action).toBe("pause");
-    expect(response.reply).toContain("暂停啦");
-    expect(response.reply).toMatch(/[呀啦～]/);
-    expect(response.reply).not.toMatch(/夜色|唱针|灵魂|骨相/);
+    expect(response.reply).toBe("已暂停播放。");
+    expect(response.reply).not.toMatch(/[呀啦～]|夜色|唱针|灵魂|骨相/);
   });
 
   it("comments on the current track without changing playback", async () => {
@@ -247,7 +267,25 @@ describe("AI DJ assistant chat", () => {
     expect(fixture.assistant.lastContext?.nowTrack?.title).toBe("Midnight Window");
   });
 
-  it("streams a DeepSeek-style current-track comment instead of waiting for the full review", async () => {
+  it("uses an honest notice when an explicit song comment cannot be generated", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "comment_current" },
+        commentError: new Error("quality rejected")
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 303, title: "Plain Facts", artists: ["Direct"], moodTag: "focus", playCount: 4 })
+    ]);
+    await requestNext(fixture.base);
+
+    const response = await postChat(fixture.base, "点评当前这首");
+
+    expect(response.reply).toBe("DeepSeek 暂时没能生成可信的点评；这次不使用本地套话。");
+    expect(response.reply).not.toMatch(/分寸感|重点到了|扑得太满/);
+  });
+
+  it("buffers a current-track comment before emitting the accepted review", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "comment_current" },
@@ -270,8 +308,7 @@ describe("AI DJ assistant chat", () => {
       .map((line) => JSON.parse(line) as { type: string; delta?: string });
 
     expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
-      "鼓点很轻，",
-      "但弹性特别好呀。"
+      "鼓点很轻，但弹性特别好呀。"
     ]);
   });
 
@@ -413,13 +450,14 @@ describe("AI DJ assistant chat", () => {
     expect(history.messages.at(-1)?.speech).toBeUndefined();
   });
 
-  it("adds a free DJ comment after a described song selection", async () => {
+  it("describes a song selection with structured evidence instead of an automatic review", async () => {
+    const assistant = new FakeAssistant({
+      intent: { type: "play_by_description", description: "late coding bass", searchQuery: "late coding bass" },
+      selection: { trackId: 402 },
+      selectedComment: "This one moves like a terminal window left open after midnight."
+    });
     const fixture = await createFixture({
-      assistant: new FakeAssistant({
-        intent: { type: "play_by_description", description: "late coding bass", searchQuery: "late coding bass" },
-        selection: { trackId: 402, reason: "internal ranking reason" },
-        selectedComment: "This one moves like a terminal window left open after midnight."
-      })
+      assistant
     });
     fixture.repo.upsertTrackStats([
       stat({ id: 402, title: "Terminal Glow", artists: ["Bit Depth"], moodTag: "focus", playCount: 7 })
@@ -429,18 +467,20 @@ describe("AI DJ assistant chat", () => {
 
     expect(response.action).toBe("play_by_description");
     expect(response.reply).toContain("Terminal Glow");
-    expect(response.reply).toContain("terminal window");
-    expect(response.reply).not.toContain("internal ranking reason");
+    expect(response.reply).toContain("专注");
+    expect(response.reply).not.toContain("terminal window");
     expect(response.now.track).toBeUndefined();
     expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(402);
+    expect(assistant.commentTrackCalls).toBe(0);
   });
 
-  it("adds a free DJ comment after a direct song request", async () => {
+  it("returns a factual result after a direct song request", async () => {
+    const assistant = new FakeAssistant({
+      intent: { type: "play_specific", query: "Nevada", searchQuery: "Nevada" },
+      selectedComment: "The hook is bright enough for the skyline, but the vocal keeps a little rain in its pocket."
+    });
     const fixture = await createFixture({
-      assistant: new FakeAssistant({
-        intent: { type: "play_specific", query: "Nevada", searchQuery: "Nevada" },
-        selectedComment: "The hook is bright enough for the skyline, but the vocal keeps a little rain in its pocket."
-      }),
+      assistant,
       searchTracks: [{ id: 403, title: "Nevada", artists: ["Vicetone", "Cozi Zuehlsdorff"], moodTag: "energy" }]
     });
 
@@ -450,10 +490,12 @@ describe("AI DJ assistant chat", () => {
     expect(response.now.track).toBeUndefined();
     expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(403);
     expect(response.reply).toContain("Nevada");
-    expect(response.reply).toContain("skyline");
+    expect(response.reply).toBe("找到《Nevada》— Vicetone / Cozi Zuehlsdorff。");
+    expect(response.reply).not.toContain("skyline");
+    expect(assistant.commentTrackCalls).toBe(0);
   });
 
-  it("streams the generated comment after a direct song-search result", async () => {
+  it("emits one factual result after a direct song-search result", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_specific", query: "Nevada", searchQuery: "Nevada" },
@@ -477,12 +519,11 @@ describe("AI DJ assistant chat", () => {
       });
     const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
 
-    expect(deltas[0]).toContain("我挑了《Nevada》");
-    expect(deltas.slice(1)).toEqual(["副歌很亮，", "人声又留了一点雨意呀。"]);
+    expect(deltas).toEqual(["找到《Nevada》— Vicetone。"]);
     expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(404);
   });
 
-  it("streams the generated comment after a described-song selection", async () => {
+  it("emits one evidence-based result after a described-song selection", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: {
@@ -490,7 +531,7 @@ describe("AI DJ assistant chat", () => {
           description: "适合下雨散步",
           searchQuery: "下雨 散步"
         },
-        selection: { trackId: 405, reason: "雨天步速很合适" },
+        selection: { trackId: 405 },
         selectedCommentDeltas: ["吉他很松弛，", "雨里走路正合适呀。"]
       })
     });
@@ -513,21 +554,68 @@ describe("AI DJ assistant chat", () => {
       });
     const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
 
-    expect(deltas[0]).toContain("我挑了《Rainy Steps》");
-    expect(deltas.slice(1)).toEqual(["吉他很松弛，", "雨里走路正合适呀。"]);
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0]).toContain("散步通勤");
+    expect(deltas[0]).toContain("Rainy Steps");
+    expect(deltas[0]).not.toContain("吉他很松弛");
     expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(405);
+  });
+
+  it("uses factual atmosphere evidence in both chat endpoints without requesting a review", async () => {
+    const assistant = new FakeAssistant({
+      intent: { type: "play_atmosphere" },
+      selection: { trackId: 406 },
+      selectedComment: "A generic atmospheric review that must never be requested."
+    });
+    const fixture = await createFixture({ assistant });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 406, title: "Morning Signal", artists: ["North Loop"], moodTag: "focus", playCount: 12 })
+    ]);
+    fixture.repo.saveEnvironmentContext({
+      weather: "clear",
+      dayPeriod: "morning",
+      updatedAt: new Date().toISOString()
+    });
+    const reason = `晴天 · ${periodLabel(currentPeriod())} · 熟悉偏好`;
+
+    const regular = await postChat(fixture.base, "根据现在的天气和时间点歌");
+    expect(regular.action).toBe("play_atmosphere");
+    expect(regular.reply).toBe(`${reason}，选了《Morning Signal》— North Loop。`);
+    expect(regular.messages.at(-1)?.trackSuggestion?.reason).toBe(reason);
+
+    const streamResponse = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "来点适合现在氛围的歌", synthesizeSpeech: false })
+    });
+    const events = (await streamResponse.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        delta?: string;
+        response?: { messages: ChatMessage[] };
+    });
+    expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
+      `${reason}，选了《Morning Signal》— North Loop。`
+    ]);
+    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.reason).toBe(reason);
+    expect(assistant.commentTrackCalls).toBe(0);
   });
 });
 
 class FakeAssistant implements AiDjAssistant {
   lastContext: AiDjContext | undefined;
   lastCandidates: Track[] = [];
+  commentTrackCalls = 0;
 
   constructor(
     private readonly options: {
+      configured?: boolean;
       intent: AiDjIntent;
       selection?: TrackSelection;
       comment?: string;
+      commentError?: Error;
       commentDeltas?: string[];
       selectedComment?: string;
       selectedCommentDeltas?: string[];
@@ -538,7 +626,12 @@ class FakeAssistant implements AiDjAssistant {
   ) {}
 
   status(): { configured: boolean; provider: string; model?: string; baseUrlConfigured?: boolean; lastError?: string } {
-    return { configured: true, provider: "fake", model: "fake-dj", baseUrlConfigured: false };
+    return {
+      configured: this.options.configured ?? true,
+      provider: "fake",
+      model: "fake-dj",
+      baseUrlConfigured: false
+    };
   }
 
   async classify(_message: string, context: AiDjContext): Promise<AiDjIntent> {
@@ -549,46 +642,29 @@ class FakeAssistant implements AiDjAssistant {
   async selectTrack(_description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection> {
     this.lastContext = context;
     this.lastCandidates = candidates;
-    return this.options.selection ?? { trackId: candidates[0]?.id, reason: "默认选择最接近的一首。" };
+    return this.options.selection ?? { trackId: candidates[0]?.id };
   }
 
   async commentCurrent(context: AiDjContext): Promise<string> {
     this.lastContext = context;
-    return this.options.comment ?? "这首歌有自己的阴影和光。";
+    if (this.options.commentError) {
+      throw this.options.commentError;
+    }
+    return this.options.commentDeltas?.join("") ?? this.options.comment ?? "这首歌有自己的阴影和光。";
   }
 
   async commentTrack(_track: Track, context: AiDjContext, _purpose: string): Promise<string> {
     this.lastContext = context;
+    this.commentTrackCalls += 1;
     return this.options.selectedComment ?? "A selected-track comment with its own pulse.";
   }
 
   async chat(_message: string, context: AiDjContext): Promise<string> {
     this.lastContext = context;
-    return this.options.chatReply ?? "我在，继续说你的听感。";
-  }
-
-  async *commentTrackStream(_track: Track, context: AiDjContext, _purpose: string): AsyncIterable<string> {
-    this.lastContext = context;
-    for (const delta of this.options.selectedCommentDeltas ?? [this.options.selectedComment ?? "A selected-track comment with its own pulse."]) {
-      yield delta;
-    }
-  }
-
-  async *commentCurrentStream(context: AiDjContext): AsyncIterable<string> {
-    this.lastContext = context;
-    for (const delta of this.options.commentDeltas ?? [this.options.comment ?? "这首歌有自己的阴影和光。"]) {
-      yield delta;
-    }
-  }
-
-  async *chatStream(_message: string, context: AiDjContext): AsyncIterable<string> {
-    this.lastContext = context;
     if (this.options.streamError) {
       throw this.options.streamError;
     }
-    for (const delta of this.options.chatDeltas ?? [this.options.chatReply ?? "我在，继续说你的听感。"]) {
-      yield delta;
-    }
+    return this.options.chatDeltas?.join("") ?? this.options.chatReply ?? "我在，继续说你的听感。";
   }
 }
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { applyPlayerVolume, loadPlayerVolume, savePlayerVolume, VOLUME_STORAGE_KEY } from "./volume";
+import {
+  applyPlayerVolume,
+  fadePlayerVolume,
+  loadPlayerVolume,
+  savePlayerVolume,
+  type VolumeFadeScheduler,
+  VOLUME_STORAGE_KEY
+} from "./volume";
 
 describe("player volume preferences", () => {
   it("restores the saved volume and mute state", () => {
@@ -43,4 +50,63 @@ describe("player volume preferences", () => {
 
     expect(loadPlayerVolume(storage)).toEqual({ level: 1, muted: false });
   });
+
+  it("fades music to the speech ducking level and can cancel an in-progress fade", () => {
+    const scheduler = new FakeVolumeFadeScheduler();
+    const audio = { volume: 0.8, muted: false };
+
+    const cancel = fadePlayerVolume(
+      audio,
+      { level: 0.2, muted: false },
+      500,
+      scheduler
+    );
+    scheduler.advanceTo(250);
+    expect(audio.volume).toBeCloseTo(0.5);
+    scheduler.advanceTo(500);
+    expect(audio.volume).toBeCloseTo(0.2);
+
+    audio.volume = 0.2;
+    const cancelRestore = fadePlayerVolume(
+      audio,
+      { level: 0.8, muted: false },
+      500,
+      scheduler
+    );
+    scheduler.advanceTo(750);
+    expect(audio.volume).toBeCloseTo(0.5);
+    cancelRestore();
+    scheduler.advanceTo(1_000);
+    expect(audio.volume).toBeCloseTo(0.5);
+    cancel();
+  });
 });
+
+class FakeVolumeFadeScheduler implements VolumeFadeScheduler {
+  private timestamp = 0;
+  private nextHandle = 1;
+  private readonly callbacks = new Map<number, FrameRequestCallback>();
+
+  now(): number {
+    return this.timestamp;
+  }
+
+  requestFrame(callback: FrameRequestCallback): number {
+    const handle = this.nextHandle++;
+    this.callbacks.set(handle, callback);
+    return handle;
+  }
+
+  cancelFrame(handle: number): void {
+    this.callbacks.delete(handle);
+  }
+
+  advanceTo(timestamp: number): void {
+    this.timestamp = timestamp;
+    const callbacks = [...this.callbacks.values()];
+    this.callbacks.clear();
+    for (const callback of callbacks) {
+      callback(timestamp);
+    }
+  }
+}

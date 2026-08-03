@@ -4,9 +4,18 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { TtsPipeline } from "../src/ttsPipeline.js";
+import { prepareSpeechText, TtsPipeline } from "../src/ttsPipeline.js";
 
 describe("TtsPipeline", () => {
+  it("removes emoji from speech without changing the surrounding reply", () => {
+    expect(
+      prepareSpeechText(
+        "太好啦 😄🎶！下一首也很适合你 👨‍👩‍👧‍👦，国旗 🇨🇳 和点赞 👍🏽 都不朗读。"
+      )
+    ).toBe("太好啦！下一首也很适合你，国旗 和点赞 都不朗读。");
+    expect(prepareSpeechText("🎉✨")).toBe("");
+  });
+
   it("synthesizes chat text with the neighbor-girl voice profile and escapes SSML", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-chat-"));
     const requests: Array<{ text: string; options: Record<string, string> }> = [];
@@ -88,7 +97,7 @@ describe("TtsPipeline", () => {
     ).toBe("ONE");
   });
 
-  it("speaks the friendly fallback without reading technical provider diagnostics", async () => {
+  it("does not speak an AI availability notice", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-tts-friendly-"));
     const spoken: string[] = [];
     const saveFn = vi.fn(async (text: string, filePath: string) => {
@@ -97,11 +106,12 @@ describe("TtsPipeline", () => {
     });
     const pipeline = new TtsPipeline(dir, "zh-CN-XiaoxiaoNeural", saveFn);
 
-    await pipeline.synthesizeText(
-      "DeepSeek 还没连接好（未检测到 DEEPSEEK_API_KEY 或 OPENAI_API_KEY），我先用本地 DJ 模式陪你聊～\n好呀，我们慢慢挑首喜欢的歌～"
+    const result = await pipeline.synthesizeText(
+      "尚未连接 DeepSeek/OpenAI，当前无法生成开放式回复。"
     );
 
-    expect(spoken).toEqual(["好呀，我们慢慢挑首喜欢的歌～"]);
+    expect(spoken).toEqual([]);
+    expect(result.audioUrl).toBeUndefined();
   });
 
   it("speaks a long reply completely in ordered segments of at most 80 characters", async () => {
