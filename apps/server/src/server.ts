@@ -14,6 +14,7 @@ import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import {
+  buildRealtimeSessionConfig,
   createRealtimeSession,
   REALTIME_MODEL,
   REALTIME_VOICE
@@ -100,6 +101,7 @@ interface CreateServerOptions {
   importRetryIntervalMs?: number;
   realtimeApiKey?: string;
   realtimeBaseUrl?: string;
+  realtimeWorkspaceId?: string;
   realtimeFetch?: typeof fetch;
 }
 
@@ -154,31 +156,34 @@ export async function createServer(options: CreateServerOptions = {}) {
   app.get("/health", async () => ({ ok: true }));
 
   app.get("/api/realtime/session", async () => ({
-    enabled: Boolean(options.realtimeApiKey ?? config.openAiRealtimeApiKey),
+    enabled: Boolean(options.realtimeApiKey ?? config.dashScopeRealtimeApiKey),
     model: REALTIME_MODEL,
-    voice: REALTIME_VOICE
+    voice: REALTIME_VOICE,
+    session: buildRealtimeSessionConfig()
   }));
 
   app.post("/api/realtime/session", async (request, reply) => {
-    const apiKey = options.realtimeApiKey ?? config.openAiRealtimeApiKey;
+    const apiKey = options.realtimeApiKey ?? config.dashScopeRealtimeApiKey;
     if (!apiKey) {
-      return reply.status(503).send({ error: "openai_realtime_not_configured" });
+      return reply.status(503).send({ error: "dashscope_realtime_not_configured" });
     }
     if (typeof request.body !== "string" || request.body.trim().length === 0) {
       return reply.status(400).send({ error: "invalid_sdp_offer" });
     }
 
     try {
-      const realtimeBaseUrl = options.realtimeBaseUrl ?? config.openAiRealtimeBaseUrl;
+      const realtimeBaseUrl = options.realtimeBaseUrl ?? config.dashScopeRealtimeBaseUrl;
+      const realtimeWorkspaceId = options.realtimeWorkspaceId ?? config.dashScopeWorkspaceId;
       const answerSdp = await createRealtimeSession({
         apiKey,
         ...(realtimeBaseUrl ? { baseUrl: realtimeBaseUrl } : {}),
+        ...(realtimeWorkspaceId ? { workspaceId: realtimeWorkspaceId } : {}),
         offerSdp: request.body,
         ...(options.realtimeFetch ? { fetchFn: options.realtimeFetch } : {})
       });
       return reply.status(201).type("application/sdp").send(answerSdp);
     } catch (error) {
-      request.log.error({ err: error }, "OpenAI Realtime session setup failed");
+      request.log.error({ err: error }, "DashScope Realtime session setup failed");
       return reply.status(502).send({ error: "realtime_session_failed" });
     }
   });

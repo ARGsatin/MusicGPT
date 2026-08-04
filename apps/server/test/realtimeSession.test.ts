@@ -5,7 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { NcmConnector } from "../src/ncmConnector.js";
-import { createRealtimeSession } from "../src/realtimeSession.js";
+import {
+  buildRealtimeSessionConfig,
+  createRealtimeSession,
+  resolveRealtimeSessionUrl
+} from "../src/realtimeSession.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
 
@@ -18,24 +22,13 @@ afterEach(async () => {
 });
 
 describe("Realtime speech session", () => {
-  it("exchanges the browser SDP for a gpt-realtime-2.1 native audio session", async () => {
-    const fetchFn = vi.fn<typeof fetch>(async (_input, init) => {
-      const body = init?.body as FormData;
-      expect(body.get("sdp")).toBe("v=0\r\no=browser-offer");
-      expect(JSON.parse(String(body.get("session")))).toMatchObject({
-        type: "realtime",
-        model: "gpt-realtime-2.1",
-        output_modalities: ["audio"],
-        audio: {
-          input: { turn_detection: { type: "semantic_vad" } },
-          output: { voice: "marin" }
-        }
-      });
-      return new Response("v=0\r\no=openai-answer", {
-        status: 201,
+  it("exchanges raw browser SDP for a Qwen3.5 Omni Realtime session", async () => {
+    const fetchFn = vi.fn<typeof fetch>(async () =>
+      new Response("v=0\r\no=qwen-answer", {
+        status: 200,
         headers: { "content-type": "application/sdp" }
-      });
-    });
+      })
+    );
 
     const answer = await createRealtimeSession({
       apiKey: "server-secret",
@@ -43,44 +36,67 @@ describe("Realtime speech session", () => {
       fetchFn
     });
 
-    expect(answer).toBe("v=0\r\no=openai-answer");
+    expect(answer).toBe("v=0\r\no=qwen-answer");
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://api.openai.com/v1/realtime/calls",
+      "https://dashscope.aliyuncs.com/api/v1/webrtc/realtime?model=qwen3.5-omni-plus-realtime",
       expect.objectContaining({
         method: "POST",
-        headers: { Authorization: "Bearer server-secret" }
+        headers: {
+          Authorization: "Bearer server-secret",
+          "Content-Type": "application/sdp"
+        },
+        body: "v=0\r\no=browser-offer"
       })
     );
   });
 
-  it("routes the Realtime SDP exchange through a configured relay base URL", async () => {
+  it("uses a configured DashScope workspace endpoint", async () => {
     const fetchFn = vi.fn<typeof fetch>(async () =>
-      new Response("v=0\r\no=relay-answer", {
-        status: 201,
+      new Response("v=0\r\no=qwen-answer", {
+        status: 200,
         headers: { "content-type": "application/sdp" }
       })
     );
 
     await createRealtimeSession({
-      apiKey: "relay-secret",
-      baseUrl: "https://relay.example.com/openai/v1/",
+      apiKey: "dashscope-secret",
+      workspaceId: "llm-aurora123",
       offerSdp: "v=0\r\no=browser-offer",
       fetchFn
     });
 
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://relay.example.com/openai/v1/realtime/calls",
+      "https://llm-aurora123.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime?model=qwen3.5-omni-plus-realtime",
       expect.objectContaining({
-        headers: { Authorization: "Bearer relay-secret" }
+        headers: expect.objectContaining({ Authorization: "Bearer dashscope-secret" })
       })
     );
   });
 
-  it("exposes the SDP exchange through the app without returning the OpenAI key", async () => {
+  it("builds the Qwen session update with semantic VAD, Tina, and nested function tools", () => {
+    expect(buildRealtimeSessionConfig()).toMatchObject({
+      modalities: ["text", "audio"],
+      voice: "Tina",
+      input_audio_format: "pcm",
+      output_audio_format: "pcm",
+      turn_detection: { type: "semantic_vad" },
+      tools: [
+        { type: "function", function: { name: "run_music_command" } },
+        { type: "function", function: { name: "wait_for_user" } }
+      ]
+    });
+  });
+
+  it("rejects an unsafe workspace ID before constructing a hostname", () => {
+    expect(() => resolveRealtimeSessionUrl(undefined, "bad.example.com/path"))
+      .toThrow("invalid_dashscope_workspace_id");
+  });
+
+  it("exposes the SDP exchange through the app without returning the DashScope key", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-realtime-route-"));
     const realtimeFetch = vi.fn<typeof fetch>(async () =>
-      new Response("v=0\r\no=openai-answer", {
-        status: 201,
+      new Response("v=0\r\no=qwen-answer", {
+        status: 200,
         headers: { "content-type": "application/sdp" }
       })
     );
@@ -107,7 +123,7 @@ describe("Realtime speech session", () => {
 
     expect(response.statusCode).toBe(201);
     expect(response.headers["content-type"]).toContain("application/sdp");
-    expect(response.body).toBe("v=0\r\no=openai-answer");
+    expect(response.body).toBe("v=0\r\no=qwen-answer");
     expect(response.body).not.toContain("must-stay-on-server");
   });
 
@@ -126,10 +142,14 @@ describe("Realtime speech session", () => {
     const response = await app.inject({ method: "GET", url: "/api/realtime/session" });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       enabled: true,
-      model: "gpt-realtime-2.1",
-      voice: "marin"
+      model: "qwen3.5-omni-plus-realtime",
+      voice: "Tina",
+      session: {
+        voice: "Tina",
+        turn_detection: { type: "semantic_vad" }
+      }
     });
     expect(response.body).not.toContain("server-secret");
   });

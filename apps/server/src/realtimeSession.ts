@@ -1,42 +1,46 @@
-const DEFAULT_REALTIME_BASE_URL = "https://api.openai.com/v1";
+const DEFAULT_REALTIME_BASE_URL = "https://dashscope.aliyuncs.com/api/v1/webrtc/realtime";
 
-export const REALTIME_MODEL = "gpt-realtime-2.1";
-export const REALTIME_VOICE = "marin";
+export const REALTIME_MODEL = "qwen3.5-omni-plus-realtime";
+export const REALTIME_VOICE = "Tina";
 
 export interface CreateRealtimeSessionOptions {
   apiKey: string;
   baseUrl?: string;
+  workspaceId?: string;
   offerSdp: string;
   fetchFn?: typeof fetch;
 }
 
-export function resolveRealtimeCallsUrl(baseUrl = DEFAULT_REALTIME_BASE_URL): string {
-  const normalized = baseUrl.trim().replace(/\/+$/, "");
-  return normalized.endsWith("/realtime/calls")
-    ? normalized
-    : `${normalized}/realtime/calls`;
+export function resolveRealtimeSessionUrl(
+  baseUrl?: string,
+  workspaceId?: string
+): string {
+  const normalizedWorkspaceId = workspaceId?.trim();
+  if (normalizedWorkspaceId && !/^[a-zA-Z0-9-]+$/.test(normalizedWorkspaceId)) {
+    throw new Error("invalid_dashscope_workspace_id");
+  }
+  const resolvedBaseUrl = baseUrl?.trim() || (normalizedWorkspaceId
+    ? `https://${normalizedWorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime`
+    : DEFAULT_REALTIME_BASE_URL);
+  const url = new URL(resolvedBaseUrl);
+  url.searchParams.set("model", REALTIME_MODEL);
+  return url.toString();
 }
 
 export function buildRealtimeSessionConfig() {
   return {
-    type: "realtime" as const,
-    model: REALTIME_MODEL,
-    output_modalities: ["audio"],
-    audio: {
-      input: {
-        turn_detection: {
-          type: "semantic_vad" as const,
-          create_response: true,
-          interrupt_response: true
-        }
-      },
-      output: {
-        voice: REALTIME_VOICE
-      }
+    modalities: ["text", "audio"],
+    voice: REALTIME_VOICE,
+    input_audio_format: "pcm" as const,
+    output_audio_format: "pcm" as const,
+    turn_detection: {
+      type: "semantic_vad" as const,
+      threshold: 0.5,
+      silence_duration_ms: 800,
+      create_response: true,
+      interrupt_response: true
     },
-    reasoning: {
-      effort: "low" as const
-    },
+    enable_search: false,
     instructions: [
       "# Role and Objective",
       "你是 Aurora UI 里的 AI DJ，也是用户熟悉的音乐搭子。陪用户听歌、闲聊，并准确执行音乐请求。",
@@ -59,58 +63,57 @@ export function buildRealtimeSessionConfig() {
     tools: [
       {
         type: "function" as const,
-        name: "run_music_command",
-        description:
-          "Read or change Aurora UI music state. Always use for playback controls, current-track questions, requests, recommendations, queue changes, likes, and music preferences.",
-        parameters: {
-          type: "object",
-          properties: {
-            request: {
-              type: "string",
-              description: "The user's original music-related request, preserving names and details."
-            }
-          },
-          required: ["request"],
-          additionalProperties: false
+        function: {
+          name: "run_music_command",
+          description:
+            "Read or change Aurora UI music state. Always use for playback controls, current-track questions, requests, recommendations, queue changes, likes, and music preferences.",
+          parameters: {
+            type: "object",
+            properties: {
+              request: {
+                type: "string",
+                description: "The user's original music-related request, preserving names and details."
+              }
+            },
+            required: ["request"]
+          }
         }
       },
       {
         type: "function" as const,
-        name: "wait_for_user",
-        description:
-          "Stay silent when the latest audio is background music, environmental noise, silence, TV, side conversation, or speech not addressed to the DJ.",
-        parameters: {
-          type: "object",
-          properties: {},
-          required: [],
-          additionalProperties: false
+        function: {
+          name: "wait_for_user",
+          description:
+            "Stay silent when the latest audio is background music, environmental noise, silence, TV, side conversation, or speech not addressed to the DJ.",
+          parameters: {
+            type: "object",
+            properties: {},
+            required: []
+          }
         }
       }
-    ],
-    tool_choice: "auto" as const
+    ]
   };
 }
 
 export async function createRealtimeSession({
   apiKey,
   baseUrl,
+  workspaceId,
   offerSdp,
   fetchFn = fetch
 }: CreateRealtimeSessionOptions): Promise<string> {
-  const body = new FormData();
-  body.set("sdp", offerSdp);
-  body.set("session", JSON.stringify(buildRealtimeSessionConfig()));
-
-  const response = await fetchFn(resolveRealtimeCallsUrl(baseUrl), {
+  const response = await fetchFn(resolveRealtimeSessionUrl(baseUrl, workspaceId), {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/sdp"
     },
-    body
+    body: offerSdp
   });
   const responseBody = await response.text();
   if (!response.ok) {
-    throw new Error(`realtime_session_failed:${response.status}:${responseBody.slice(0, 300)}`);
+    throw new Error(`dashscope_realtime_session_failed:${response.status}:${responseBody.slice(0, 300)}`);
   }
   return responseBody;
 }

@@ -8,7 +8,7 @@
 - 自动电台续播（10 首窗口按 5 首熟悉口味 + 5 首新风格交错规划）
 - 网易云每日推荐、环境搜索与轮换风格组成的探索候选池
 - 自由聊天：可以聊任何日常话题，开放式回复通过套话与近期重复检查后再显示
-- 原生实时语音：`gpt-realtime-2.1` 直接理解和生成音频，支持自然轮次、随时打断与语音点歌
+- 原生实时语音：`qwen3.5-omni-plus-realtime` 直接理解和生成音频，支持自然轮次、随时打断与语音点歌
 - 长期人物记忆：自动提炼稳定偏好、习惯与背景，可在“她记得的我”中逐条或全部忘记
 - PWA 播放器：播放控制、歌词窗口、聊天历史、人物记忆、偏好面板与推荐导入
 - 本地持久化：SQLite 保存聊天、人物记忆、播放事件和口味画像
@@ -24,7 +24,7 @@
 
 ## 语音体验
 
-- 模型固定为 `gpt-realtime-2.1`，默认使用官方推荐的 `marin` 音色
+- 模型固定为 `qwen3.5-omni-plus-realtime`，默认使用官方默认的 `Tina` 音色
 - 浏览器通过 WebRTC 直接传输麦克风和模型音频，不经过“转文字 → Edge TTS → MP3”链路
 - `semantic_vad` 负责自然判断说话轮次；用户开口时可打断 DJ，未播放的模型音频会由 Realtime 自动截断
 - 点击“开启实时语音”后才申请麦克风权限；关闭页面或结束语音会立即停止麦克风轨道
@@ -32,7 +32,7 @@
 - 文字聊天继续独立可用；实时会话已连接时，可自动播报文字回复，也可手动让 Realtime 说出某条消息或最近 DJ 播报
 - DJ 说话或聆听用户时，音乐临时降到当前音量的 25%，结束后恢复
 
-标准 OpenAI API Key 只保存在服务端。浏览器把 SDP offer 发给 `/api/realtime/session`，服务端使用统一 Realtime 接口完成一次握手并只返回 SDP answer，不会把 Key 或临时令牌交给前端。语音用量按 OpenAI API 账户计费，与 ChatGPT 订阅分开。
+百炼 `DASHSCOPE_API_KEY` 只保存在服务端。浏览器把 SDP offer 发给 `/api/realtime/session`，服务端向百炼 WebRTC 接口完成握手并只返回 SDP answer，不会把 Key 交给前端。语音用量由阿里云百炼账户按量计费。
 
 ## 目录结构
 
@@ -67,10 +67,12 @@ cp .env.example .env
 至少需要填：
 
 - `NCM_COOKIE`：你的网易云 Cookie（本地使用）
-- `DEEPSEEK_API_KEY`：推荐，用于 GPT DJ 对话和意图理解；默认会使用 `https://api.deepseek.com` 和 `deepseek-v4-flash`
-- `OPENAI_API_KEY`：启用 `gpt-realtime-2.1` 原生语音所必需；使用官方服务时填写 OpenAI Key，使用中转站时填写中转站分配的 Key。如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，文字 AI 也优先使用 OpenAI
-- `OPENAI_BASE_URL`：只用于 OpenAI 兼容的文字模型请求
-- `OPENAI_REALTIME_BASE_URL`：可选的 Realtime 中转地址，默认 `https://api.openai.com/v1`。通常填写到 `/v1`，例如 `https://relay.example.com/v1`；也可以直接填写完整的 `/v1/realtime/calls` 地址。中转站必须支持 Realtime WebRTC unified interface，而不能只支持 Chat Completions
+- `DEEPSEEK_API_KEY`：推荐，用于 AI DJ 文字对话和意图理解；默认会使用 `https://api.deepseek.com` 和 `deepseek-v4-flash`
+- `OPENAI_API_KEY`：可选，只用于 OpenAI 兼容的文字模型；如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，文字 AI 优先使用 OpenAI
+- `OPENAI_BASE_URL`：可选，只用于 OpenAI 兼容的文字模型请求
+- `DASHSCOPE_API_KEY`：启用 `qwen3.5-omni-plus-realtime` 原生语音所必需，在阿里云百炼控制台创建
+- `DASHSCOPE_WORKSPACE_ID`：可选但推荐，填写百炼业务空间 ID 后使用华北 2（北京）的工作空间专属域名；不填时使用 `dashscope.aliyuncs.com` 公共域名
+- `DASHSCOPE_REALTIME_BASE_URL`：可选，用于覆盖完整的 WebRTC SDP 交换地址；通常保持为空
 - `AI_DJ_MEMORY_TURNS`：可选，模型近期上下文轮数，默认 `20`
 - `AI_DJ_CHAT_MAX_TOKENS`：可选，普通聊天最大输出 token，默认 `800`
 
@@ -95,7 +97,7 @@ npm run dev
 - `POST /api/chat`（兼容的非流式聊天接口）
 - `POST /api/chat/stream`（NDJSON：文本增量与最终持久化结果）
 - `GET /api/realtime/session`（检查原生语音是否已配置，不申请麦克风权限）
-- `POST /api/realtime/session`（`application/sdp`：创建 `gpt-realtime-2.1` WebRTC 会话）
+- `POST /api/realtime/session`（`application/sdp`：创建 `qwen3.5-omni-plus-realtime` WebRTC 会话）
 - `GET /api/chat/history`
 - `DELETE /api/chat/history`
 - `GET /api/chat/memories`

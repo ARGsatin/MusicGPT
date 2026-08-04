@@ -32,5 +32,5 @@ MusicGPT is a local-first AI radio that combines NetEase Cloud Music playback, t
 
 ## Current state
 
-- As of 2026-08-04, main uses `gpt-realtime-2.1` instead of the retired Edge TTS pipeline and includes DeepSeek V4 non-thinking compatibility plus JSON-response retry diagnostics.
+- As of 2026-08-04, main uses Alibaba Cloud `qwen3.5-omni-plus-realtime` WebRTC instead of the retired Edge TTS/OpenAI Realtime pipelines and includes DeepSeek V4 non-thinking compatibility plus JSON-response retry diagnostics.
 - Local tests, typecheck, and production build pass. Realtime and DeepSeek remain pending live verification with real provider credentials before publishing.

@@ -13,27 +13,16 @@ describe("Realtime voice protocol", () => {
 
     expect(events).toEqual([
       {
-        event_id: "dj-script-1:response",
-        type: "response.create",
-        response: {
-          conversation: "none",
-          metadata: {
-            source: "aurora-ui-spoken-text",
-            request_id: "dj-script-1"
-          },
-          output_modalities: ["audio"],
-          input: [
-            {
-              type: "message",
-              role: "user",
-              content: [
-                { type: "input_text", text: "这首歌的鼓点很松，别急着切。" }
-              ]
-            }
-          ],
-          tool_choice: "none",
-          instructions: expect.stringContaining("自然地说出")
+        event_id: "dj-script-1:session",
+        type: "session.update",
+        session: {
+          tools: [],
+          instructions: expect.stringContaining("这首歌的鼓点很松，别急着切。")
         }
+      },
+      {
+        event_id: "dj-script-1:response",
+        type: "response.create"
       }
     ]);
     expect(JSON.stringify(events)).not.toContain("audioUrl");
@@ -58,6 +47,17 @@ describe("Realtime voice protocol", () => {
     ]);
   });
 
+  it("reads Qwen function arguments as soon as their dedicated event completes", () => {
+    expect(findMusicFunctionCalls({
+      type: "response.function_call_arguments.done",
+      name: "run_music_command",
+      call_id: "call_qwen",
+      arguments: "{\"request\":\"播放陈奕迅\"}"
+    })).toEqual([
+      { callId: "call_qwen", request: "播放陈奕迅" }
+    ]);
+  });
+
   it("recognizes a silent wait tool call for background music", () => {
     expect(findWaitFunctionCallIds({
       type: "response.done",
@@ -77,32 +77,59 @@ describe("Realtime voice protocol", () => {
   it("connects the microphone to the server SDP endpoint over WebRTC", async () => {
     const statuses: string[] = [];
     const sentEvents: string[] = [];
+    const replaceTrackCalls: Array<MediaStreamTrack | null> = [];
     const channel = new EventTarget() as RTCDataChannel;
     Object.defineProperties(channel, {
       readyState: { value: "connecting", writable: true },
-      send: { value: (payload: string) => sentEvents.push(payload) },
+      send: {
+        value: (payload: string) => {
+          sentEvents.push(payload);
+          const event = JSON.parse(payload) as { type?: string };
+          if (event.type === "session.update") {
+            channel.dispatchEvent(new MessageEvent("message", {
+              data: JSON.stringify({ type: "session.updated" })
+            }));
+          }
+        }
+      },
       close: { value: () => undefined }
     });
-    const track = { stop: () => undefined } as MediaStreamTrack;
+    const track = { enabled: true, stop: () => undefined } as MediaStreamTrack;
     const stream = {
       getAudioTracks: () => [track],
       getTracks: () => [track]
     } as unknown as MediaStream;
+    const sender = {
+      replaceTrack: async (next: MediaStreamTrack | null) => {
+        replaceTrackCalls.push(next);
+      }
+    } as RTCRtpSender;
     const peer = {
-      addTrack: () => undefined,
+      iceGatheringState: "complete",
+      localDescription: { type: "offer", sdp: "v=0\r\no=browser-offer" },
+      addTrack: () => sender,
       createDataChannel: () => channel,
       createOffer: async () => ({ type: "offer", sdp: "v=0\r\no=browser-offer" }),
       setLocalDescription: async () => undefined,
       setRemoteDescription: async () => {
         Object.defineProperty(channel, "readyState", { value: "open", writable: true });
-        channel.dispatchEvent(new Event("open"));
+        channel.dispatchEvent(new MessageEvent("message", {
+          data: JSON.stringify({ type: "session.created" })
+        }));
       },
       close: () => undefined
     } as unknown as RTCPeerConnection;
     const fetchFn = async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "GET") {
         expect(input).toBe("/api/realtime/session");
-        return new Response(JSON.stringify({ enabled: true }), {
+        return new Response(JSON.stringify({
+          enabled: true,
+          session: {
+            modalities: ["text", "audio"],
+            voice: "Tina",
+            turn_detection: { type: "semantic_vad" }
+          }
+        }), {
           headers: { "content-type": "application/json" }
         });
       }
@@ -112,7 +139,7 @@ describe("Realtime voice protocol", () => {
         headers: { "content-type": "application/sdp" },
         body: "v=0\r\no=browser-offer"
       });
-      return new Response("v=0\r\no=openai-answer", {
+      return new Response("v=0\r\no=qwen-answer", {
         status: 201,
         headers: { "content-type": "application/sdp" }
       });
@@ -131,7 +158,12 @@ describe("Realtime voice protocol", () => {
     expect(controller.status).toBe("ready");
     expect(statuses).toEqual(["connecting", "ready"]);
     expect(audio.autoplay).toBe(true);
-    expect(sentEvents).toEqual([]);
+    expect(JSON.parse(sentEvents[0] ?? "{}")).toMatchObject({
+      type: "session.update",
+      session: { voice: "Tina", turn_detection: { type: "semantic_vad" } }
+    });
+    expect(replaceTrackCalls).toEqual([null, track]);
+    expect(track.enabled).toBe(true);
     controller.stop();
   });
 
@@ -154,7 +186,7 @@ describe("Realtime voice protocol", () => {
       }
     );
 
-    await expect(controller.start()).rejects.toThrow("openai_realtime_not_configured");
+    await expect(controller.start()).rejects.toThrow("dashscope_realtime_not_configured");
     expect(microphoneRequested).toBe(false);
   });
 });

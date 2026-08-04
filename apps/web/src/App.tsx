@@ -720,8 +720,8 @@ export default function App() {
         }
       },
       onError: (error) => {
-        const notice = error.message === "openai_realtime_not_configured"
-          ? "实时语音需要在服务端配置 OPENAI_API_KEY。"
+        const notice = error.message === "dashscope_realtime_not_configured"
+          ? "实时语音需要在服务端配置 DASHSCOPE_API_KEY。"
           : error.message.includes("Permission") || error.message.includes("permission")
             ? "没有拿到麦克风权限；请允许访问后再试。"
             : "实时语音连接失败，文字聊天仍可继续。";
@@ -1282,10 +1282,10 @@ export default function App() {
           speechActive={speechActive}
         />
 
-        <article className="dj-console" aria-label="GPT DJ conversation">
+        <article className="dj-console" aria-label="Qwen DJ conversation">
           <header className="card-header">
             <div>
-              <p className="micro-label">GPT DJ window</p>
+              <p className="micro-label">Qwen DJ window</p>
               <h2>Conversation</h2>
             </div>
             <div className="dj-settings-bar">
@@ -1317,7 +1317,7 @@ export default function App() {
               >
                 {REALTIME_STATUS_LABELS[realtimeStatus]}
               </button>
-              <span className="context-chip">GPT Realtime · Marin</span>
+              <span className="context-chip">Qwen Realtime · Tina</span>
               <button
                 className="memory-toggle"
                 type="button"
