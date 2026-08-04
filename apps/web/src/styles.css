@@ -405,6 +405,38 @@ button {
   accent-color: var(--brand);
 }
 
+.realtime-voice-button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid rgba(109, 123, 255, 0.28);
+  border-radius: 999px;
+  color: var(--ink);
+  background: rgba(109, 123, 255, 0.08);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.realtime-voice-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(91, 108, 255, 0.18);
+}
+
+.realtime-voice-button.is-active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, #6574ff, #8b5cf6);
+  box-shadow: 0 0 0 4px rgba(109, 123, 255, 0.13);
+}
+
+.realtime-voice-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .memory-toggle {
   min-height: 38px;
   border: 1px solid rgba(109, 123, 255, 0.22);

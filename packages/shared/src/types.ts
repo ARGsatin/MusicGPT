@@ -162,7 +162,6 @@ export interface DjScript {
   reason: string;
   trackIds: number[];
   createdAt: string;
-  audioUrl?: string;
 }
 
 export interface NowPlayingState {
@@ -185,7 +184,6 @@ export interface ChatMessage {
   text: string;
   at: string;
   trackSuggestion?: TrackSuggestion;
-  speech?: ChatSpeech;
 }
 
 export type ChatMemoryCategory = "preference" | "habit" | "background" | "relationship";
@@ -198,27 +196,8 @@ export interface ChatMemory {
   updatedAt: string;
 }
 
-export interface ChatSpeechSegment {
-  sequence: number;
-  text: string;
-  audioUrl: string;
-}
-
-export interface ChatSpeech {
-  audioUrl: string;
-  profileKey: string;
-  segments?: ChatSpeechSegment[];
-}
-
-export interface ChatSpeechResponse {
-  messageId: number;
-  audioUrl: string;
-  segments?: ChatSpeechSegment[];
-}
-
 export type ChatStreamEvent =
   | { type: "text_delta"; delta: string }
-  | { type: "speech"; sequence: number; text: string; audioUrl: string }
   | { type: "result"; response: ChatResponse }
   | { type: "error"; message: string };
 
@@ -314,7 +293,7 @@ export interface WsPayload {
   event:
     | "now_playing_updated"
     | "queue_updated"
-    | "dj_tts_ready"
+    | "dj_script_ready"
     | "system_status"
     | "chat_memory_updated";
   data: unknown;

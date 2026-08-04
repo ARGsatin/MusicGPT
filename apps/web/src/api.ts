@@ -2,7 +2,6 @@ import type {
   ChatMemory,
   ChatMessage,
   ChatResponse,
-  ChatSpeechResponse,
   ChatStreamEvent,
   DjSettings,
   EnvironmentContext,
@@ -61,7 +60,6 @@ export async function sendChat(message: string): Promise<ChatResponse> {
 export async function sendChatStream(
   message: string,
   options: {
-    synthesizeSpeech: boolean;
     signal?: AbortSignal;
     onEvent: (event: ChatStreamEvent) => void;
   }
@@ -69,10 +67,7 @@ export async function sendChatStream(
   const response = await fetch(API_ROUTES.chatStream, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      message,
-      synthesizeSpeech: options.synthesizeSpeech
-    }),
+    body: JSON.stringify({ message }),
     ...(options.signal ? { signal: options.signal } : {})
   });
   return readChatEventStream(response, options.onEvent);
@@ -173,16 +168,6 @@ export async function clearChatMemories(): Promise<void> {
   if (!response.ok) {
     throw new Error("Failed to clear chat memories");
   }
-}
-
-export async function generateChatSpeech(messageId: number): Promise<ChatSpeechResponse> {
-  const response = await fetch(API_ROUTES.chatSpeech(messageId), {
-    method: "POST"
-  });
-  if (!response.ok) {
-    throw new Error("Speech synthesis failed");
-  }
-  return (await response.json()) as ChatSpeechResponse;
 }
 
 export async function clearChatHistory(): Promise<void> {

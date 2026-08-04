@@ -9,7 +9,6 @@ describe("chat event stream", () => {
     const encoder = new TextEncoder();
     const payload = [
       '{"type":"text_delta","delta":"好呀"}\n',
-      '{"type":"speech","sequence":0,"text":"好呀","audioUrl":"/tts-cache/a.mp3"}\n',
       '{"type":"result","response":{"action":"noop","reply":"好呀","now":{"queue":[],"paused":false},"messages":[]}}\n'
     ].join("");
     const bytes = encoder.encode(payload);
@@ -29,7 +28,7 @@ describe("chat event stream", () => {
 
     const result = await readChatEventStream(response, (event) => events.push(event));
 
-    expect(events.map((event) => event.type)).toEqual(["text_delta", "speech", "result"]);
+    expect(events.map((event) => event.type)).toEqual(["text_delta", "result"]);
     expect(events[0]).toEqual({ type: "text_delta", delta: "好呀" });
     expect(result.reply).toBe("好呀");
   });

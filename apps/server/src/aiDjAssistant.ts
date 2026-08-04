@@ -16,6 +16,7 @@ import {
   type OpenEndedReplyKind,
   type OpenEndedReplyRejection
 } from "./openEndedReply.js";
+import { withAiProviderCompatibility } from "./aiProviderCompatibility.js";
 
 export type AiDjIntent =
   | { type: "skip" }
@@ -67,7 +68,7 @@ interface OpenAiDjAssistantOptions {
 }
 
 export const AI_DJ_PERSONA_STYLE =
-  "像熟悉的朋友一样直接、具体、有判断。语气跟随当前话题，不使用固定口癖、卖萌开场或程序化共情；不知道就明说，不用抽象比喻制造深度。";
+  "像熟悉的朋友一样直接、具体、有判断。回复会被直接朗读，按自然口语组织，长短句自然交替；不要主播腔、客服腔或总结腔，也不要刻意添加语气词。语气跟随当前话题，不使用固定口癖、卖萌开场或程序化共情；不知道就明说，不用抽象比喻制造深度。";
 
 export interface ChatMemoryUpsert {
   category: ChatMemoryCategory;
@@ -318,32 +319,27 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     if (!this.client) {
       return { upserts: [], deleteIds: [] };
     }
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            '你负责维护用户主动建立的长期人物记忆。只返回 JSON：{"upserts":[{"category":"preference|habit|background|relationship","content":"简短、独立、第三人称事实","normalizedKey":"稳定去重键","supersedesIds":[数字]}],"deleteIds":[数字]}。只保存长期有用且由用户明确陈述的信息；忽略瞬时情绪、一次性请求、助手推测和闲聊细节。密码、API Key、验证码、支付信息、身份证件和精确住址永不保存；健康、亲密关系等其他敏感信息只有用户明确说“记住”时才可保存。新信息纠正旧信息时在 supersedesIds 中列出旧 id。没有内容时返回空数组。'
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            userMessage,
-            assistantReply,
-            existingMemories: existingMemories.map((memory) => ({
-              id: memory.id,
-              category: memory.category,
-              content: memory.content
-            }))
-          })
-        }
-      ]
-    });
+    const result = await this.askJson<unknown>([
+      {
+        role: "system",
+        content:
+          '你负责维护用户主动建立的长期人物记忆。只返回 JSON：{"upserts":[{"category":"preference|habit|background|relationship","content":"简短、独立、第三人称事实","normalizedKey":"稳定去重键","supersedesIds":[数字]}],"deleteIds":[数字]}。只保存长期有用且由用户明确陈述的信息；忽略瞬时情绪、一次性请求、助手推测和闲聊细节。密码、API Key、验证码、支付信息、身份证件和精确住址永不保存；健康、亲密关系等其他敏感信息只有用户明确说“记住”时才可保存。新信息纠正旧信息时在 supersedesIds 中列出旧 id。没有内容时返回空数组。'
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          userMessage,
+          assistantReply,
+          existingMemories: existingMemories.map((memory) => ({
+            id: memory.id,
+            category: memory.category,
+            content: memory.content
+          }))
+        })
+      }
+    ]);
     return normalizeMemoryUpdate(
-      response.choices[0]?.message.content ?? "{}",
+      result,
       new Set(existingMemories.map((memory) => memory.id))
     );
   }
@@ -352,20 +348,50 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     if (!this.client) {
       throw new Error("OpenAI client is not configured");
     }
-    try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages
-      });
-      this.lastError = undefined;
-      const content = response.choices[0]?.message.content ?? "{}";
-      return JSON.parse(content) as T;
-    } catch (error) {
-      this.lastError = summarizeOpenAiError(error);
-      throw error;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let response: OpenAI.Chat.Completions.ChatCompletion;
+      try {
+        response = await this.createCompletion({
+          model: this.model,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          messages
+        });
+      } catch (error) {
+        this.lastError = summarizeOpenAiError(error);
+        throw error;
+      }
+
+      const content = response.choices[0]?.message.content?.trim() ?? "";
+      try {
+        if (!content) {
+          throw new Error("AI provider returned empty JSON content");
+        }
+        const parsed = JSON.parse(content) as T;
+        this.lastError = undefined;
+        return parsed;
+      } catch (error) {
+        if (attempt === 0) {
+          continue;
+        }
+        this.lastError = summarizeOpenAiError(error);
+        throw error;
+      }
     }
+
+    throw new Error("AI provider JSON retry loop exhausted");
+  }
+
+  private createCompletion(
+    request: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
+  ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    if (!this.client) {
+      throw new Error("OpenAI client is not configured");
+    }
+    return this.client.chat.completions.create(
+      withAiProviderCompatibility(this.provider, request)
+    );
   }
 
   private async completeOpenEndedReply(
@@ -380,7 +406,7 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     }
     return generateAcceptedOpenEndedReply(
       async (rejection) => {
-        const response = await this.client!.chat.completions.create({
+        const response = await this.createCompletion({
           model: this.model,
           temperature,
           max_tokens: maxTokens,
@@ -519,9 +545,39 @@ function blocksPlayback(text: string): boolean {
   return /别点歌|不要点歌|不点歌|先别点|先别播|别播|不要播|别放|不播放|随便聊|聊聊|只聊天|先聊天/.test(text);
 }
 
-function summarizeOpenAiError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").slice(0, 240);
+export function summarizeOpenAiError(error: unknown): string {
+  const details: string[] = [error instanceof Error ? error.message : String(error)];
+  const errorRecord = asRecord(error);
+
+  for (const key of ["status", "code", "type", "request_id"] as const) {
+    const value = errorRecord?.[key];
+    if (typeof value === "string" || typeof value === "number") {
+      details.push(`${key}=${value}`);
+    }
+  }
+
+  const cause = error instanceof Error ? error.cause : errorRecord?.cause;
+  if (cause) {
+    const causeRecord = asRecord(cause);
+    const causeCode = causeRecord?.code;
+    const causeMessage = cause instanceof Error ? cause.message : String(cause);
+    const causeDetails = [
+      typeof causeCode === "string" || typeof causeCode === "number" ? String(causeCode) : "",
+      causeMessage
+    ].filter(Boolean);
+    if (causeDetails.length > 0) {
+      details.push(`cause=${causeDetails.join(" ")}`);
+    }
+  }
+
+  return [...new Set(details)]
+    .join(" | ")
+    .replace(/\s+/g, " ")
+    .slice(0, 480);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
 }
 
 function withRewriteRequest(
@@ -599,13 +655,7 @@ function buildSearchQuery(text: string): string {
     .slice(0, 40);
 }
 
-function normalizeMemoryUpdate(content: string, existingIds: Set<number>): ChatMemoryUpdate {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return { upserts: [], deleteIds: [] };
-  }
+function normalizeMemoryUpdate(parsed: unknown, existingIds: Set<number>): ChatMemoryUpdate {
   if (!parsed || typeof parsed !== "object") {
     return { upserts: [], deleteIds: [] };
   }

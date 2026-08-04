@@ -4,7 +4,7 @@ This project now supports running the Netease Cloud Music API locally via Node.j
 
 ## 1) Configure `.env`
 
-Edit `D:\MusicGPT\.env` and set:
+Edit the repository root `.env` file and set:
 
 ```env
 NCM_BASE_URL=http://127.0.0.1:3001
@@ -22,7 +22,7 @@ npm run ncm:cookie
 
 What this command does:
 - calls NCM QR login endpoints
-- writes QR image to `D:\MusicGPT\.ncm-login-qr.png`
+- writes the QR image to `.ncm-login-qr.png` in the repository root
 - opens the QR image automatically
 - waits for login confirmation on your phone
 - overwrites `NCM_COOKIE` in `.env`

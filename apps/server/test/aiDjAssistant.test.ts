@@ -7,7 +7,8 @@ import {
   canFastPathChat,
   OpenAiDjAssistant,
   fallbackClassify,
-  normalizeIntent
+  normalizeIntent,
+  summarizeOpenAiError
 } from "../src/aiDjAssistant.js";
 import { OpenEndedReplyRejectedError } from "../src/openEndedReply.js";
 
@@ -26,6 +27,8 @@ describe("AI DJ assistant", () => {
   it("asks for direct, specific language without a forced cute persona", () => {
     expect(AI_DJ_PERSONA_STYLE).toContain("直接、具体、有判断");
     expect(AI_DJ_PERSONA_STYLE).toContain("不知道就明说");
+    expect(AI_DJ_PERSONA_STYLE).toContain("自然口语");
+    expect(AI_DJ_PERSONA_STYLE).toContain("不要主播腔、客服腔或总结腔");
     expect(AI_DJ_PERSONA_STYLE).not.toContain("邻家女孩");
     expect(AI_DJ_PERSONA_STYLE).not.toContain("活泼、温柔");
   });
@@ -104,6 +107,53 @@ describe("AI DJ assistant", () => {
     ).rejects.toThrow("request timed out");
     expect(calls).toBe(1);
     expect(assistant.status().lastError).toBe("request timed out");
+  });
+
+  it("keeps provider and network details in diagnostics", () => {
+    const cause = Object.assign(new Error("socket access was blocked"), { code: "EPERM" });
+    const error = Object.assign(new Error("Connection error.", { cause }), {
+      status: 503,
+      request_id: "request-test"
+    });
+
+    expect(summarizeOpenAiError(error)).toContain("status=503");
+    expect(summarizeOpenAiError(error)).toContain("request_id=request-test");
+    expect(summarizeOpenAiError(error)).toContain("EPERM");
+    expect(summarizeOpenAiError(error)).toContain("socket access was blocked");
+  });
+
+  it("disables DeepSeek thinking and retries one empty JSON response", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const client = {
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            requests.push(request);
+            return {
+              choices: [
+                {
+                  message: {
+                    content: requests.length === 1 ? "" : '{"type":"pause"}'
+                  }
+                }
+              ]
+            };
+          }
+        }
+      }
+    } as unknown as OpenAI;
+    const assistant = new OpenAiDjAssistant({
+      model: "deepseek-v4-flash",
+      provider: "deepseek",
+      client
+    });
+
+    await expect(assistant.classify("暂停一下", { messages: [], queue: [] })).resolves.toEqual({
+      type: "pause"
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ thinking: { type: "disabled" } });
+    expect(assistant.status().lastError).toBeUndefined();
   });
 
   it("builds a real role-ordered conversation without duplicating the current message", () => {

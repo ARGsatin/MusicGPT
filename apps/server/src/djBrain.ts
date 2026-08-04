@@ -5,6 +5,7 @@ import {
   generateAcceptedOpenEndedReply,
   type OpenEndedReplyRejection
 } from "./openEndedReply.js";
+import { withAiProviderCompatibility } from "./aiProviderCompatibility.js";
 
 const DJ_BANNED_WORDS = ["违法", "低俗", "辱骂"];
 const DJ_MAX_LENGTH = 90;
@@ -20,17 +21,20 @@ interface DjBrainOptions {
   apiKey?: string | undefined;
   baseUrl?: string | undefined;
   model?: string | undefined;
+  provider?: string | undefined;
   client?: OpenAI | undefined;
 }
 
 export class DjBrain {
   private readonly client?: OpenAI;
   private readonly model: string;
+  private readonly provider: string;
   private readonly recentScripts: string[] = [];
 
   constructor(options: DjBrainOptions | string = {}) {
-    const resolved = typeof options === "string" ? { apiKey: options } : options;
+    const resolved: DjBrainOptions = typeof options === "string" ? { apiKey: options } : options;
     this.model = resolved.model ?? "gpt-4.1-mini";
+    this.provider = resolved.provider ?? "openai";
     if (resolved.client) {
       this.client = resolved.client;
     } else if (resolved.apiKey) {
@@ -82,7 +86,7 @@ export class DjBrain {
       return "";
     }
     const prompt = [
-      "你是私人 AI 电台 DJ，回复简短中文播报。直接说明当前曲目与下一首的衔接依据，不先夸歌，不使用固定口癖或抽象气氛话。",
+      "你是与用户长期相处的私人电台 DJ，在两首歌之间像真人一样随口说一两句。文字会被直接朗读：使用自然口语和长短不一的句子，不要主播腔、客服腔、书面通知或完整总结。直接说明当前曲目与下一首的衔接依据，不先夸歌，不使用固定口癖或抽象气氛话。",
       `DJ语气: ${toneInstruction(input.settings?.tone)}`,
       `用户偏好摘要: ${input.profile.summary}`,
       `当前歌曲: ${input.nowTrack.title} - ${input.nowTrack.artists.join(", ")}`,
@@ -90,7 +94,7 @@ export class DjBrain {
         .slice(0, 2)
         .map((item) => `${item.track.title}-${item.track.artists.join("/")}`)
         .join("; ")}`,
-      "要求：80字以内，不使用营销腔；不得使用“分寸感”“情绪刚刚好”“重点到了”“扑得太满”等空泛评价。",
+      "要求：80字以内，不使用营销腔，不刻意添加语气词；不得使用“分寸感”“情绪刚刚好”“重点到了”“扑得太满”等空泛评价。",
       ...(rejection
         ? [
             `上一版被拒绝，原因：${rejection.issues.join(", ")}。`,
@@ -100,13 +104,16 @@ export class DjBrain {
         : [])
     ].join("\n");
 
-    const response = await this.client.responses.create({
-      model: this.model,
-      input: prompt,
-      temperature: 0.7
-    });
+    const response = await this.client.chat.completions.create(
+      withAiProviderCompatibility(this.provider, {
+        model: this.model,
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0.7,
+        max_tokens: 150
+      })
+    );
 
-    return response.output_text ?? "";
+    return response.choices[0]?.message.content?.trim() ?? "";
   }
 }
 

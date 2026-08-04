@@ -47,15 +47,26 @@ describe("DjBrain", () => {
       "当前曲目的短鼓点接到下一首的合成器长音，节拍会从紧凑转为舒展。"
     ];
     let calls = 0;
+    const prompts: string[] = [];
+    const requests: Array<Record<string, unknown>> = [];
     const client = {
-      responses: {
-        create: async () => {
-          calls += 1;
-          return { output_text: drafts.shift() ?? "" };
+      chat: {
+        completions: {
+          create: async (request: Record<string, unknown>) => {
+            calls += 1;
+            requests.push(request);
+            const messages = request.messages as Array<{ content: string }>;
+            prompts.push(messages[0]?.content ?? "");
+            return { choices: [{ message: { content: drafts.shift() ?? "" } }] };
+          }
         }
       }
     } as unknown as OpenAI;
-    const brain = new DjBrain({ model: "test-model", client });
+    const brain = new DjBrain({
+      model: "deepseek-v4-flash",
+      provider: "deepseek",
+      client
+    });
 
     const script = await brain.generate({
       profile,
@@ -72,5 +83,11 @@ describe("DjBrain", () => {
     expect(script?.text).toBe("当前曲目的短鼓点接到下一首的合成器长音，节拍会从紧凑转为舒展。");
     expect(script?.text).not.toContain("分寸感");
     expect(calls).toBe(2);
+    expect(prompts[0]).toContain("自然口语");
+    expect(prompts[0]).toContain("不要主播腔、客服腔");
+    expect(requests[0]).toMatchObject({
+      model: "deepseek-v4-flash",
+      thinking: { type: "disabled" }
+    });
   });
 });

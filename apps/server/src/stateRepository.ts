@@ -7,7 +7,6 @@ import type {
   ChatMemory,
   ChatMemoryCategory,
   ChatMessage,
-  ChatSpeech,
   DjSettings,
   DjScript,
   EnvironmentContext,
@@ -442,8 +441,7 @@ export class StateRepository {
         message.text,
         message.at,
         JSON.stringify({
-          trackSuggestion: message.trackSuggestion,
-          speech: message.speech
+          trackSuggestion: message.trackSuggestion
         })
       );
     return { ...message, id: Number(result.lastInsertRowid) };
@@ -478,19 +476,6 @@ export class StateRepository {
         }
       | undefined;
     return row ? this.mapChatMessage(row) : undefined;
-  }
-
-  saveChatSpeech(id: number, speech: ChatSpeech): ChatMessage | undefined {
-    const message = this.getChatMessage(id);
-    if (!message) {
-      return undefined;
-    }
-    const metadata = {
-      trackSuggestion: message.trackSuggestion,
-      speech
-    };
-    this.db.prepare("UPDATE chat_messages SET metadata_json = ? WHERE id = ?").run(JSON.stringify(metadata), id);
-    return { ...message, speech };
   }
 
   clearChatMessages(): void {
@@ -579,7 +564,6 @@ export class StateRepository {
   }): ChatMessage {
     const metadata = parseJson<{
       trackSuggestion?: ChatMessage["trackSuggestion"];
-      speech?: ChatSpeech;
     }>(row.metadata_json ?? null, {});
     const message: ChatMessage = {
       id: row.id,
@@ -589,9 +573,6 @@ export class StateRepository {
     };
     if (metadata.trackSuggestion) {
       message.trackSuggestion = metadata.trackSuggestion;
-    }
-    if (metadata.speech) {
-      message.speech = metadata.speech;
     }
     return message;
   }

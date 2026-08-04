@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
@@ -16,23 +13,21 @@ import { EnvironmentService as OpenMeteoEnvironmentService } from "./environment
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
 import { RadioPlanner } from "./radioPlanner.js";
+import {
+  createRealtimeSession,
+  REALTIME_MODEL,
+  REALTIME_VOICE
+} from "./realtimeSession.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
 import { TasteEngine } from "./tasteEngine.js";
-import { TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
 const chatSchema = z.object({
   message: z.string().min(1)
 });
 
-const chatStreamSchema = chatSchema.extend({
-  synthesizeSpeech: z.boolean().optional()
-});
-
-const chatSpeechParamsSchema = z.object({
-  messageId: z.coerce.number().int().positive()
-});
+const chatStreamSchema = chatSchema;
 
 const chatMemoryParamsSchema = z.object({
   memoryId: z.coerce.number().int().positive()
@@ -99,11 +94,13 @@ interface CreateServerOptions {
   tasteEngine?: TasteEngine;
   djBrain?: DjBrain;
   aiDjAssistant?: AiDjAssistant;
-  ttsPipeline?: TtsPipeline;
   environmentService?: EnvironmentRuntime;
   recommendationImporter?: RecommendationImporter;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
+  realtimeApiKey?: string;
+  realtimeBaseUrl?: string;
+  realtimeFetch?: typeof fetch;
 }
 
 export async function createServer(options: CreateServerOptions = {}) {
@@ -112,8 +109,9 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
   await app.register(cors, { origin: true });
   await app.register(websocket);
-
-  fs.mkdirSync(config.ttsCacheDir, { recursive: true });
+  app.addContentTypeParser("application/sdp", { parseAs: "string" }, (_request, body, done) => {
+    done(null, body);
+  });
 
   const repo = options.repo ?? new StateRepository(config.dbPath);
   const ncm =
@@ -130,7 +128,8 @@ export async function createServer(options: CreateServerOptions = {}) {
       new DjBrain({
         apiKey: config.openAiApiKey,
         baseUrl: config.openAiBaseUrl,
-        model: config.openAiModel
+        model: config.openAiModel,
+        provider: config.aiProvider
       }),
     options.aiDjAssistant ??
       new OpenAiDjAssistant({
@@ -140,7 +139,6 @@ export async function createServer(options: CreateServerOptions = {}) {
         provider: config.aiProvider,
         chatMaxTokens: config.aiDjChatMaxTokens
       }),
-    options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
     options.djBroadcastInterval ?? config.djBroadcastInterval,
     config.aiDjMemoryTurns,
@@ -154,6 +152,36 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/api/realtime/session", async () => ({
+    enabled: Boolean(options.realtimeApiKey ?? config.openAiRealtimeApiKey),
+    model: REALTIME_MODEL,
+    voice: REALTIME_VOICE
+  }));
+
+  app.post("/api/realtime/session", async (request, reply) => {
+    const apiKey = options.realtimeApiKey ?? config.openAiRealtimeApiKey;
+    if (!apiKey) {
+      return reply.status(503).send({ error: "openai_realtime_not_configured" });
+    }
+    if (typeof request.body !== "string" || request.body.trim().length === 0) {
+      return reply.status(400).send({ error: "invalid_sdp_offer" });
+    }
+
+    try {
+      const realtimeBaseUrl = options.realtimeBaseUrl ?? config.openAiRealtimeBaseUrl;
+      const answerSdp = await createRealtimeSession({
+        apiKey,
+        ...(realtimeBaseUrl ? { baseUrl: realtimeBaseUrl } : {}),
+        offerSdp: request.body,
+        ...(options.realtimeFetch ? { fetchFn: options.realtimeFetch } : {})
+      });
+      return reply.status(201).type("application/sdp").send(answerSdp);
+    } catch (error) {
+      request.log.error({ err: error }, "OpenAI Realtime session setup failed");
+      return reply.status(502).send({ error: "realtime_session_failed" });
+    }
+  });
 
   app.get("/api/now", async () => orchestrator.getNow());
 
@@ -212,9 +240,7 @@ export async function createServer(options: CreateServerOptions = {}) {
 
     try {
       await orchestrator.handleChatStream(parsed.data.message, {
-        synthesizeSpeech: parsed.data.synthesizeSpeech ?? true,
         onTextDelta: (delta) => writeEvent({ type: "text_delta", delta }),
-        onSpeech: (segment) => writeEvent({ type: "speech", ...segment }),
         onResult: (response) => writeEvent({ type: "result", response })
       });
     } catch {
@@ -243,28 +269,6 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.delete("/api/chat/memories", async () => orchestrator.clearChatMemories());
-
-  app.post("/api/chat/:messageId/speech", async (request, reply) => {
-    const parsed = chatSpeechParamsSchema.safeParse(request.params);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
-    }
-    const result = await orchestrator.synthesizeChatMessage(parsed.data.messageId);
-    switch (result.status) {
-      case "ok":
-        return {
-          messageId: result.messageId,
-          audioUrl: result.audioUrl,
-          segments: result.segments
-        };
-      case "not_found":
-        return reply.status(404).send({ error: "chat_message_not_found" });
-      case "not_assistant":
-        return reply.status(422).send({ error: "chat_message_not_assistant" });
-      case "unavailable":
-        return reply.status(503).send({ error: "speech_unavailable" });
-    }
-  });
 
   app.delete("/api/chat/history", async () => orchestrator.clearChatHistory());
 
@@ -331,16 +335,6 @@ export async function createServer(options: CreateServerOptions = {}) {
     calendar: { enabled: false },
     upnp: { enabled: false }
   }));
-
-  app.get("/tts-cache/:file", async (request, reply) => {
-    const filename = path.basename((request.params as { file: string }).file);
-    const filePath = path.resolve(config.ttsCacheDir, filename);
-    if (!fs.existsSync(filePath)) {
-      return reply.status(404).send({ error: "not_found" });
-    }
-    reply.header("Cache-Control", "public, max-age=31536000, immutable");
-    return reply.send(fs.createReadStream(filePath));
-  });
 
   app.get("/ws/stream", { websocket: true }, (socket) => {
     wsHub.addSocket(socket);

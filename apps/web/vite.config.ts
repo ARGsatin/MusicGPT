@@ -10,8 +10,7 @@ export default defineConfig({
       "/ws": {
         target: "ws://127.0.0.1:8787",
         ws: true
-      },
-      "/tts-cache": "http://127.0.0.1:8787"
+      }
     }
   }
 });

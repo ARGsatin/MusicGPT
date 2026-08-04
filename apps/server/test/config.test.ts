@@ -11,6 +11,7 @@ beforeEach(() => {
   for (const name of [
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
+    "OPENAI_REALTIME_BASE_URL",
     "OPENAI_MODEL",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
@@ -45,6 +46,18 @@ describe("config", () => {
     const { config } = await import("../src/config.js");
 
     expect(config.openAiBaseUrl).toBeUndefined();
+  });
+
+  it("keeps the Realtime relay base URL separate from the text model base URL", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.OPENAI_API_KEY = "relay-key";
+    process.env.OPENAI_BASE_URL = "https://text-relay.example.com/v1";
+    process.env.OPENAI_REALTIME_BASE_URL = "https://voice-relay.example.com/v1";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.openAiBaseUrl).toBe("https://text-relay.example.com/v1");
+    expect(config.openAiRealtimeBaseUrl).toBe("https://voice-relay.example.com/v1");
   });
 
   it("lets the project .env override inherited process environment variables", async () => {

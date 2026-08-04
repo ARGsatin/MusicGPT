@@ -29,7 +29,6 @@ import { NcmConnector, NcmImportError } from "./ncmConnector.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
-import { SpeechTextSegmenter } from "./speechSegmenter.js";
 import { TasteEngine } from "./tasteEngine.js";
 import { currentPeriod } from "./time.js";
 import {
@@ -39,7 +38,6 @@ import {
   tagsFromContextText,
   weatherLabel
 } from "./trackTags.js";
-import { prepareSpeechText, TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
 const PLAN_WINDOW_SIZE = 10;
@@ -56,7 +54,7 @@ const AI_COMMENT_REPLY_FAILED =
 export const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
-  voice: "zh-CN-XiaoxiaoNeural"
+  voice: "marin"
 };
 
 type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation"> & {
@@ -64,9 +62,7 @@ type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocatio
 };
 
 export interface ChatStreamCallbacks {
-  synthesizeSpeech: boolean;
   onTextDelta(delta: string): void;
-  onSpeech(segment: { sequence: number; text: string; audioUrl: string }): void;
   onResult(response: ChatResponse): void;
 }
 
@@ -88,7 +84,6 @@ export class RadioOrchestrator {
     private readonly planner: RadioPlanner,
     private readonly djBrain: DjBrain,
     private readonly aiDjAssistant: AiDjAssistant,
-    private readonly ttsPipeline: TtsPipeline,
     private readonly wsHub: WsHub,
     private readonly djBroadcastInterval: number,
     private readonly memoryTurns: number,
@@ -202,13 +197,15 @@ export class RadioOrchestrator {
   }
 
   async updateDjSettings(settings: DjSettings): Promise<DjSettings> {
+    const requestedVoice = settings.voice.trim();
     const normalized: DjSettings = {
       tone: settings.tone,
       voiceGender: settings.voiceGender,
-      voice: settings.voice.trim() || DEFAULT_DJ_SETTINGS.voice
+      voice: !requestedVoice || requestedVoice.includes("Neural")
+        ? DEFAULT_DJ_SETTINGS.voice
+        : requestedVoice
     };
     this.repo.saveDjSettings(normalized);
-    this.ttsPipeline.setVoice(normalized.voice);
     await this.broadcastSystemStatus();
     return normalized;
   }
@@ -228,42 +225,6 @@ export class RadioOrchestrator {
   clearChatMemories(): { ok: true; memories: [] } {
     this.chatMemoryService.clear();
     return { ok: true, memories: [] };
-  }
-
-  async synthesizeChatMessage(messageId: number): Promise<
-    | {
-        status: "ok";
-        messageId: number;
-        audioUrl: string;
-        segments: NonNullable<ChatResponse["messages"][number]["speech"]>["segments"];
-      }
-    | { status: "not_found" | "not_assistant" | "unavailable" }
-  > {
-    const message = this.repo.getChatMessage(messageId);
-    if (!message) {
-      return { status: "not_found" };
-    }
-    if (message.role !== "assistant") {
-      return { status: "not_assistant" };
-    }
-    if (isOpenEndedFailureReply(message.text)) {
-      return { status: "unavailable" };
-    }
-    const speech = await this.ttsPipeline.synthesizeSegments(message.text);
-    if (!speech.audioUrl || speech.segments.length === 0) {
-      return { status: "unavailable" };
-    }
-    this.repo.saveChatSpeech(messageId, {
-      audioUrl: speech.audioUrl,
-      profileKey: speech.profileKey,
-      segments: speech.segments
-    });
-    return {
-      status: "ok",
-      messageId,
-      audioUrl: speech.audioUrl,
-      segments: speech.segments
-    };
   }
 
   clearChatHistory(): { ok: true; messages: [] } {
@@ -464,25 +425,6 @@ export class RadioOrchestrator {
     const intent = await this.classifySafely(message, context);
     const response = await this.handleChatIntent(message, context, intent);
     callbacks.onTextDelta(response.reply);
-    if (callbacks.synthesizeSpeech && !isOpenEndedFailureReply(response.reply)) {
-      const segmenter = new SpeechTextSegmenter({ minSoftBreakChars: 16, maxChars: 80 });
-      const speechText = prepareSpeechText(response.reply);
-      const segments = [...segmenter.push(speechText), ...segmenter.finish()];
-      let speechSequence = 0;
-      for (const segment of segments) {
-        await this.ttsPipeline.synthesizeText(segment).then((speech) => {
-          if (speech.audioUrl) {
-            callbacks.onSpeech({
-              sequence: speechSequence,
-              text: segment,
-              audioUrl: speech.audioUrl
-            });
-            speechSequence += 1;
-          }
-        }).catch(() => undefined);
-      }
-    }
-
     callbacks.onResult(response);
     if (!isOpenEndedFailureReply(response.reply)) {
       this.chatMemoryService.enqueueCapture(message, response.reply);
@@ -811,10 +753,9 @@ export class RadioOrchestrator {
     if (!script) {
       return;
     }
-    const voiced = await this.ttsPipeline.synthesize(script);
-    this.state.djScript = voiced;
-    this.repo.saveDjScript(voiced);
-    this.wsHub.broadcast({ event: "dj_tts_ready", data: voiced });
+    this.state.djScript = script;
+    this.repo.saveDjScript(script);
+    this.wsHub.broadcast({ event: "dj_script_ready", data: script });
   }
 
   private startImportRetryLoop(): void {
@@ -897,9 +838,14 @@ export class RadioOrchestrator {
   }
 
   private ensureDjSettings(): DjSettings {
-    const settings = this.repo.getDjSettings() ?? DEFAULT_DJ_SETTINGS;
+    const stored = this.repo.getDjSettings();
+    const settings = stored
+      ? {
+          ...stored,
+          voice: stored.voice.includes("Neural") ? DEFAULT_DJ_SETTINGS.voice : stored.voice
+        }
+      : DEFAULT_DJ_SETTINGS;
     this.repo.saveDjSettings(settings);
-    this.ttsPipeline.setVoice(settings.voice);
     return settings;
   }
 

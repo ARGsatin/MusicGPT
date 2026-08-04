@@ -62,7 +62,24 @@ Notes:
   - `npm run ncm:cookie`
   - `npm run ncm:check`
 
-## 4) Quick health checklist
+## 4) DeepSeek reports a connection error or returns AI fallback
+
+### Check
+1. Run `npm run deepseek:check` from the project root.
+2. Confirm the MusicGPT process can connect to `api.deepseek.com:443`.
+3. Open `http://127.0.0.1:8787/api/system/status` and inspect `aiDjProvider`, `aiDjModel`, and `aiDjLastError`.
+
+### Interpretation
+- Socket errors such as `EPERM` indicate that the server process cannot open the outbound connection.
+- HTTP `401` means the API key was rejected.
+- HTTP `402` means the account has insufficient balance.
+- HTTP `429` means the account exceeded its current concurrency limit.
+- DeepSeek V4 enables thinking by default; MusicGPT disables it for short DJ responses and JSON intent parsing.
+- DeepSeek JSON Output can occasionally return empty content; MusicGPT retries that response once.
+
+Never commit a real `DEEPSEEK_API_KEY`. If a key ever entered Git history, rotate it even after removing it from the current file.
+
+## 5) Quick health checklist
 
 Run these checks in order:
 1. On Windows, double-click `一键启动.cmd` (recommended).
@@ -72,7 +89,7 @@ Run these checks in order:
    - `http://127.0.0.1:3001/login/status`
    - `http://127.0.0.1:8787/health`
 
-## 5) NCM import error meanings
+## 6) NCM import error meanings
 
 - `ncm_unreachable`: the local NCM API is down or unreachable; the one-click launcher repairs this state.
 - `ncm_cookie_missing`: `.env` has no usable Cookie; QR login starts during full startup.

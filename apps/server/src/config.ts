@@ -33,6 +33,7 @@ const optionalUrl = () => z.preprocess((value) => (value === "" ? undefined : va
 const schema = z.object({
   OPENAI_API_KEY: optionalString(),
   OPENAI_BASE_URL: optionalUrl(),
+  OPENAI_REALTIME_BASE_URL: optionalUrl(),
   OPENAI_MODEL: optionalString(),
   DEEPSEEK_API_KEY: optionalString(),
   DEEPSEEK_BASE_URL: optionalUrl(),
@@ -41,7 +42,6 @@ const schema = z.object({
   AI_DJ_CHAT_MAX_TOKENS: z.coerce.number().int().min(200).max(2_000).default(800),
   NCM_COOKIE: optionalString(),
   NCM_BASE_URL: z.string().url().default("http://127.0.0.1:3001"),
-  TTS_VOICE: z.string().default("zh-CN-XiaoxiaoNeural"),
   DB_PATH: z.string().default("./state/musicgpt.db"),
   DJ_BROADCAST_INTERVAL: z.coerce.number().int().min(1).max(10).default(4),
   SERVER_PORT: z.coerce.number().int().min(1).max(65535).default(8787)
@@ -89,20 +89,18 @@ const resolvedDbPath = path.isAbsolute(parsed.DB_PATH)
   ? parsed.DB_PATH
   : path.resolve(process.cwd(), parsed.DB_PATH);
 
-const resolvedTtsDir = path.resolve(path.dirname(resolvedDbPath), "../tts-cache");
-
 export const config = {
   aiProvider: aiProvider.provider,
   openAiApiKey: aiProvider.apiKey,
   openAiBaseUrl: aiProvider.baseUrl,
   openAiModel: aiProvider.model,
+  openAiRealtimeApiKey: parsed.OPENAI_API_KEY,
+  openAiRealtimeBaseUrl: parsed.OPENAI_REALTIME_BASE_URL,
   aiDjMemoryTurns: parsed.AI_DJ_MEMORY_TURNS,
   aiDjChatMaxTokens: parsed.AI_DJ_CHAT_MAX_TOKENS,
   ncmCookie: parsed.NCM_COOKIE,
   ncmBaseUrl: parsed.NCM_BASE_URL,
-  ttsVoice: parsed.TTS_VOICE,
   dbPath: resolvedDbPath,
-  ttsCacheDir: resolvedTtsDir,
   djBroadcastInterval: parsed.DJ_BROADCAST_INTERVAL,
   serverPort: parsed.SERVER_PORT
 };

@@ -15,7 +15,7 @@ export const API_ROUTES = {
   chatHistory: "/api/chat/history",
   chatMemories: "/api/chat/memories",
   chatMemory: (memoryId: number) => `/api/chat/memories/${memoryId}`,
-  chatSpeech: (messageId: number) => `/api/chat/${messageId}/speech`,
+  realtimeSession: "/api/realtime/session",
   now: "/api/now",
   next: "/api/next",
   playTrack: "/api/play-track",

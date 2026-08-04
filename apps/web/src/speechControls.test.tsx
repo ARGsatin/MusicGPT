@@ -4,12 +4,15 @@ import { describe, expect, it } from "vitest";
 import App from "./App";
 
 describe("speech controls", () => {
-  it("renders auto speech on by default with one shared speech output", () => {
+  it("renders one shared gpt-realtime-2.1 voice output without Edge TTS", () => {
     const html = renderToStaticMarkup(<App />);
 
-    expect(html).toContain("自动朗读");
-    expect(html).toContain("全程小晓声线");
-    expect(html).not.toContain("Sonia");
+    expect(html).toContain("文字自动播报");
+    expect(html).toContain("开启实时语音");
+    expect(html).toContain("GPT Realtime · Marin");
+    expect(html).not.toContain("小晓");
+    expect(html).not.toContain("Edge");
+    expect(html).not.toContain("tts-cache");
     expect(html).toContain('class="speech-audio"');
     expect(html).not.toContain('class="dj-audio"');
   });

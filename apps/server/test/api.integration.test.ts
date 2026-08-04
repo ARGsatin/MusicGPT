@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
-import { TtsPipeline } from "../src/ttsPipeline.js";
 
 const servers: Array<{ close: () => Promise<unknown> }> = [];
 
@@ -54,14 +53,10 @@ describe("API integration", () => {
   it("syncs chat replan with now endpoint and ws stream", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
-    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-      fs.writeFileSync(filePath, "audio");
-    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch);
     const app = await createServer({
       repo,
       ncm,
-      ttsPipeline: tts,
       djBroadcastInterval: 3
     });
     servers.push(app);

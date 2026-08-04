@@ -8,10 +8,10 @@
 - 自动电台续播（10 首窗口按 5 首熟悉口味 + 5 首新风格交错规划）
 - 网易云每日推荐、环境搜索与轮换风格组成的探索候选池
 - 自由聊天：可以聊任何日常话题，开放式回复通过套话与近期重复检查后再显示
-- 女声朗读：聊天回复完整分段朗读；定时 DJ 播报默认每 4 首尝试一次，AI 不可用时直接跳过
+- 原生实时语音：`gpt-realtime-2.1` 直接理解和生成音频，支持自然轮次、随时打断与语音点歌
 - 长期人物记忆：自动提炼稳定偏好、习惯与背景，可在“她记得的我”中逐条或全部忘记
 - PWA 播放器：播放控制、歌词窗口、聊天历史、人物记忆、偏好面板与推荐导入
-- 本地持久化：SQLite 保存聊天、人物记忆、播放事件、口味画像和语音元数据
+- 本地持久化：SQLite 保存聊天、人物记忆、播放事件和口味画像
 
 ## 自由聊天与长期记忆
 
@@ -24,23 +24,21 @@
 
 ## 语音体验
 
-- 默认音色：`zh-CN-XiaoxiaoNeural`
-- 默认参数：语速 `+6%`、音调 `+2Hz`、音量 `+0%`
-- 中文和英文都使用同一个小晓音色，避免中英混读时声线突然变化
-- 自动朗读默认开启，可在页面中关闭；设备偏好保存在浏览器 `localStorage`
-- 每条 AI 消息都可手动播放、暂停或重播；最近一次 DJ 播报也可重播
-- 长回复按自然标点切成最多 80 字的有序语音段，完整播放并缓存；旧客户端仍可使用第一段 `audioUrl`
-- 聊天语音优先于定时 DJ 播报，手动点击会立即切换到所选消息
-- 朗读时音乐临时降到当前音量的 25%；原本静音时不会自行出声，结束或中断后恢复
-- 浏览器阻止自动播放时保留文字回复并提示手动播放，不使用静音音频绕过限制
+- 模型固定为 `gpt-realtime-2.1`，默认使用官方推荐的 `marin` 音色
+- 浏览器通过 WebRTC 直接传输麦克风和模型音频，不经过“转文字 → Edge TTS → MP3”链路
+- `semantic_vad` 负责自然判断说话轮次；用户开口时可打断 DJ，未播放的模型音频会由 Realtime 自动截断
+- 点击“开启实时语音”后才申请麦克风权限；关闭页面或结束语音会立即停止麦克风轨道
+- 语音中的点歌、切歌、队列、当前曲目和偏好问题会调用现有 MusicGPT 控制层，执行结果再由 Realtime 自然说出
+- 文字聊天继续独立可用；实时会话已连接时，可自动播报文字回复，也可手动让 Realtime 说出某条消息或最近 DJ 播报
+- DJ 说话或聆听用户时，音乐临时降到当前音量的 25%，结束后恢复
 
-语音由现有 Edge TTS 管线生成，不需要额外的 Azure Speech 密钥。聊天文字会先返回，TTS 失败不会覆盖或撤销文字回复。MP3 默认缓存 30 天、最多保留 500 个文件；缓存键包含文本、音色、语速、音调和音量。
+标准 OpenAI API Key 只保存在服务端。浏览器把 SDP offer 发给 `/api/realtime/session`，服务端使用统一 Realtime 接口完成一次握手并只返回 SDP answer，不会把 Key 或临时令牌交给前端。语音用量按 OpenAI API 账户计费，与 ChatGPT 订阅分开。
 
 ## 目录结构
 
 ```text
 apps/
-  server/   Fastify + SQLite + NCM + AI DJ + TTS
+  server/   Fastify + SQLite + NCM + AI DJ + Realtime WebRTC 会话代理
   web/      React + Vite PWA
 packages/
   shared/   共享类型和 API 契约
@@ -70,12 +68,15 @@ cp .env.example .env
 
 - `NCM_COOKIE`：你的网易云 Cookie（本地使用）
 - `DEEPSEEK_API_KEY`：推荐，用于 GPT DJ 对话和意图理解；默认会使用 `https://api.deepseek.com` 和 `deepseek-v4-flash`
-- `OPENAI_API_KEY`：可选，也可以使用 OpenAI 兼容配置；如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，优先使用 `OPENAI_API_KEY`
-- `TTS_VOICE`：可选，默认 `zh-CN-XiaoxiaoNeural`
+- `OPENAI_API_KEY`：启用 `gpt-realtime-2.1` 原生语音所必需；使用官方服务时填写 OpenAI Key，使用中转站时填写中转站分配的 Key。如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，文字 AI 也优先使用 OpenAI
+- `OPENAI_BASE_URL`：只用于 OpenAI 兼容的文字模型请求
+- `OPENAI_REALTIME_BASE_URL`：可选的 Realtime 中转地址，默认 `https://api.openai.com/v1`。通常填写到 `/v1`，例如 `https://relay.example.com/v1`；也可以直接填写完整的 `/v1/realtime/calls` 地址。中转站必须支持 Realtime WebRTC unified interface，而不能只支持 Chat Completions
 - `AI_DJ_MEMORY_TURNS`：可选，模型近期上下文轮数，默认 `20`
 - `AI_DJ_CHAT_MAX_TOKENS`：可选，普通聊天最大输出 token，默认 `800`
 
 如果前端状态条显示 `AI FALLBACK`，说明服务端没有读到 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY`；开放式聊天和点评会明确提示不可用，不会用本地套话冒充模型回复。若已配置但仍收到“没能生成可信的回复”，请在系统状态中查看错误，并检查 key、余额、网络或模型名。
+
+DeepSeek V4 默认开启思考模式；MusicGPT 会在短对话、意图识别和自动 DJ 播报中显式关闭它，并在 JSON Output 偶发返回空内容时重试一次。可以运行 `npm run deepseek:check` 单独检查当前网络、密钥、模型名和 Chat Completions 请求。
 
 3. 启动
 
@@ -92,8 +93,9 @@ npm run dev
 ## API 概览
 
 - `POST /api/chat`（兼容的非流式聊天接口）
-- `POST /api/chat/stream`（NDJSON：文本增量、短句语音与最终持久化结果）
-- `POST /api/chat/:messageId/speech`（为已保存的 assistant 消息生成或复用语音）
+- `POST /api/chat/stream`（NDJSON：文本增量与最终持久化结果）
+- `GET /api/realtime/session`（检查原生语音是否已配置，不申请麦克风权限）
+- `POST /api/realtime/session`（`application/sdp`：创建 `gpt-realtime-2.1` WebRTC 会话）
 - `GET /api/chat/history`
 - `DELETE /api/chat/history`
 - `GET /api/chat/memories`
@@ -112,6 +114,7 @@ npm run dev
 - `POST /api/recommendations/import`
 - `GET /api/dj/settings`
 - `POST /api/dj/settings`
+- `GET /api/providers`（查看 `weather / calendar / upnp` 预留 provider 的启用状态）
 - `GET /ws/stream`
 
 ## 开发校验
