@@ -3,7 +3,6 @@ export interface DeepSeekThinkingControl {
     type: "disabled";
   };
 }
-
 export function withAiProviderCompatibility<T extends object>(
   provider: string,
   request: T
@@ -17,3 +16,4 @@ export function withAiProviderCompatibility<T extends object>(
     thinking: { type: "disabled" }
   };
 }
+

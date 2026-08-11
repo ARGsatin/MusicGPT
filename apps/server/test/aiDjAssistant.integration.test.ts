@@ -8,9 +8,13 @@ import type { ChatMessage, Track, TrackStat } from "@musicgpt/shared";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
-import { currentPeriod } from "../src/time.js";
-import { periodLabel } from "../src/trackTags.js";
-import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "../src/aiDjAssistant.js";
+import {
+  OpenAiDjAssistant,
+  type AiDjAssistant,
+  type AiDjContext,
+  type AiDjIntent,
+  type TrackSelection
+} from "../src/aiDjAssistant.js";
 
 const servers: Array<{ close: () => Promise<unknown> }> = [];
 
@@ -24,6 +28,19 @@ afterEach(async () => {
 });
 
 describe("AI DJ assistant chat", () => {
+  it("never exposes a local canned review for a direct request when AI is unavailable", async () => {
+    const fixture = await createFixture({
+      assistant: new OpenAiDjAssistant({ model: "test-model" }),
+      searchTracks: [{ id: 1, title: "In The End", artists: ["Linkin Park"] }]
+    });
+
+    const response = await postChat(fixture.base, "播放 《In The End》");
+
+    expect(response.action).toBe("play_specific");
+    expect(response.reply).toBe("找到《In The End》— Linkin Park。");
+    expect(response.reply).not.toMatch(/分寸感|重点到了|扑得太满/);
+  });
+
   it("streams model text before returning the persisted result", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
@@ -389,12 +406,11 @@ describe("AI DJ assistant chat", () => {
       dayPeriod: "morning",
       updatedAt: new Date().toISOString()
     });
-    const reason = `晴天 · ${periodLabel(currentPeriod())} · 熟悉偏好`;
-
     const regular = await postChat(fixture.base, "根据现在的天气和时间点歌");
     expect(regular.action).toBe("play_atmosphere");
-    expect(regular.reply).toBe(`${reason}，选了《Morning Signal》— North Loop。`);
-    expect(regular.messages.at(-1)?.trackSuggestion?.reason).toBe(reason);
+    const regularReason = regular.messages.at(-1)?.trackSuggestion?.reason;
+    expect(regularReason).toMatch(/^晴天 · (早晨|午后|傍晚|深夜) · 熟悉偏好$/);
+    expect(regular.reply).toBe(`${regularReason}，选了《Morning Signal》— North Loop。`);
 
     const streamResponse = await fetch(`${fixture.base}/api/chat/stream`, {
       method: "POST",
@@ -408,11 +424,13 @@ describe("AI DJ assistant chat", () => {
         type: string;
         delta?: string;
         response?: { messages: ChatMessage[] };
-    });
+      });
+    const streamedReason = events.find((event) => event.type === "result")
+      ?.response?.messages.at(-1)?.trackSuggestion?.reason;
+    expect(streamedReason).toMatch(/^晴天 · (早晨|午后|傍晚|深夜) · 熟悉偏好$/);
     expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
-      `${reason}，选了《Morning Signal》— North Loop。`
+      `${streamedReason}，选了《Morning Signal》— North Loop。`
     ]);
-    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.reason).toBe(reason);
     expect(assistant.commentTrackCalls).toBe(0);
   });
 });

@@ -9,6 +9,8 @@ import type {
   FavoriteResponse,
   FeedbackRequest,
   ImportNcmResponse,
+  MusicCommandRequest,
+  MusicCommandResult,
   RecommendationImportResponse,
   NowPlayingState,
   NcmImportErrorCode,
@@ -18,14 +20,17 @@ import type {
   TasteProfile,
   Track,
   TrackLyrics,
-  TrackSuggestion
+  TrackSuggestion,
+  VoiceTurnCompleteRequest,
+  VoiceTurnStartRequest
 } from "@musicgpt/shared";
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
 import { fallbackClassify } from "./aiDjAssistant.js";
-import { ChatMemoryService } from "./chatMemoryService.js";
+import { ConversationKernel } from "./conversationKernel.js";
 import { DjBrain } from "./djBrain.js";
 import { EnvironmentService, isWeatherFresh } from "./environmentService.js";
 import { NcmConnector, NcmImportError } from "./ncmConnector.js";
+import { MusicCommandModule } from "./musicCommand.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
@@ -75,7 +80,9 @@ export class RadioOrchestrator {
   private lastImportAt: string | undefined;
   private lastImportError: string | undefined;
   private lastImportErrorCode: NcmImportErrorCode | undefined;
-  private readonly chatMemoryService: ChatMemoryService;
+  private realtimeLastError: string | undefined;
+  private readonly conversation: ConversationKernel;
+  private readonly musicCommands: MusicCommandModule;
 
   constructor(
     private readonly repo: StateRepository,
@@ -89,13 +96,45 @@ export class RadioOrchestrator {
     private readonly memoryTurns: number,
     private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS,
     private readonly environmentService: EnvironmentRuntime = new EnvironmentService(),
-    private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm)
+    private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm),
+    private readonly realtimeConversationMode: "unified" | "legacy" = "unified"
   ) {
-    const extractor = aiDjAssistant.extractMemories
-      ? aiDjAssistant.extractMemories.bind(aiDjAssistant)
-      : undefined;
-    this.chatMemoryService = new ChatMemoryService(repo, extractor, (memories) => {
-      this.wsHub.broadcast({ event: "chat_memory_updated", data: { memories } });
+    this.conversation = new ConversationKernel(repo, aiDjAssistant, wsHub, memoryTurns);
+    this.musicCommands = new MusicCommandModule(repo, {
+      getNow: () => this.state,
+      classify: async (request) => {
+        const context = this.buildAiContext(request);
+        return this.classifySafely(request, context);
+      },
+      searchSongs: (query) => this.ncm.searchSongs(query),
+      playTrack: (track, reason) => this.playSuggestedTrack(track, reason),
+      setFavorite: async (trackId, favorite) => {
+        await this.setFavorite(trackId, favorite);
+      },
+      replay: async (trackId) => {
+        await this.handleFeedback({ type: "replay", trackId });
+      },
+      handleIntent: async (request, intent, mode) => {
+        const context = this.buildAiContext(request);
+        const response = await this.handleChatIntent(request, context, intent);
+        const suggestion = response.messages[0]?.trackSuggestion;
+        if (
+          mode === "voice_direct" &&
+          suggestion &&
+          (response.action === "play_by_description" || response.action === "play_atmosphere")
+        ) {
+          const now = await this.playSuggestedTrack(suggestion.track, suggestion.reason);
+          return { action: response.action, outcome: "executed", summary: response.reply, now };
+        }
+        const executed = ["skip", "pause", "resume", "replan"].includes(response.action);
+        return {
+          action: response.action,
+          outcome: executed ? "executed" : "answered",
+          summary: response.reply,
+          now: response.now,
+          ...(suggestion ? { suggestion } : {})
+        };
+      }
     });
   }
 
@@ -136,7 +175,7 @@ export class RadioOrchestrator {
 
   async close(): Promise<void> {
     this.stopImportRetryLoop();
-    await this.chatMemoryService.waitForIdle();
+    await this.conversation.waitForIdle();
   }
 
   async importFromNcm(): Promise<number> {
@@ -211,24 +250,47 @@ export class RadioOrchestrator {
   }
 
   getChatHistory(): { messages: ChatResponse["messages"] } {
-    return { messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT) };
+    return this.conversation.getHistory();
+  }
+
+  startVoiceTurn(input: VoiceTurnStartRequest) {
+    return this.conversation.startVoiceTurn(input);
+  }
+
+  completeVoiceTurn(turnId: string, input: VoiceTurnCompleteRequest) {
+    return this.conversation.completeVoiceTurn(turnId, input);
+  }
+
+  buildRealtimeContext(sessionId: string, baselineRevision?: number) {
+    const taste = this.repo.getTasteProfile();
+    return this.conversation.buildRealtimeContext({
+      sessionId,
+      ...(baselineRevision !== undefined ? { baselineRevision } : {}),
+      now: this.state,
+      ...(taste ? { taste } : {}),
+      environment: this.getEnvironment()
+    });
+  }
+
+  executeMusicCommand(request: MusicCommandRequest): Promise<MusicCommandResult> {
+    return this.musicCommands.execute(request);
   }
 
   getChatMemories(): { memories: ChatMemory[] } {
-    return { memories: this.chatMemoryService.list() };
+    return this.conversation.getMemories();
   }
 
   deleteChatMemory(memoryId: number): boolean {
-    return this.chatMemoryService.delete(memoryId);
+    return this.conversation.deleteMemory(memoryId);
   }
 
   clearChatMemories(): { ok: true; memories: [] } {
-    this.chatMemoryService.clear();
+    this.conversation.clearMemories();
     return { ok: true, memories: [] };
   }
 
   clearChatHistory(): { ok: true; messages: [] } {
-    this.repo.clearChatMessages();
+    this.conversation.clearHistory();
     return { ok: true, messages: [] };
   }
 
@@ -240,7 +302,9 @@ export class RadioOrchestrator {
       aiDjConfigured: aiDjStatus.configured,
       aiDjProvider: aiDjStatus.provider,
       trackStatsCount: this.repo.getTrackStatsCount(),
-      queueLength: this.state.queue.length
+      queueLength: this.state.queue.length,
+      realtimeConversationMode: this.realtimeConversationMode,
+      inputTranscriptionEnabled: this.realtimeConversationMode === "unified"
     };
     if (aiDjStatus.model) {
       status.aiDjModel = aiDjStatus.model;
@@ -260,9 +324,17 @@ export class RadioOrchestrator {
     if (this.lastImportErrorCode) {
       status.lastImportErrorCode = this.lastImportErrorCode;
     }
+    if (this.realtimeLastError) {
+      status.realtimeLastError = this.realtimeLastError;
+    }
     status.environment = this.getEnvironment();
     status.djSettings = this.getDjSettings();
     return status;
+  }
+
+  async reportRealtimeError(code: string): Promise<void> {
+    this.realtimeLastError = code.trim().slice(0, 200);
+    await this.broadcastSystemStatus();
   }
 
   async refreshTasteProfile(): Promise<TasteProfile> {
@@ -344,6 +416,15 @@ export class RadioOrchestrator {
     return this.nextTrack();
   }
 
+  async playQueuedTrack(trackId: number): Promise<NowPlayingState | undefined> {
+    const queueIndex = this.state.queue.findIndex((item) => item.track.id === trackId);
+    if (queueIndex < 0) {
+      return undefined;
+    }
+    this.state.queue.splice(0, queueIndex);
+    return this.nextTrack();
+  }
+
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {
     const environment = this.getEnvironment();
     const event: PlayEvent = {
@@ -408,27 +489,39 @@ export class RadioOrchestrator {
     return { favorite: this.repo.isTrackFavorite(trackId), taste };
   }
 
-  async handleChat(message: string): Promise<ChatResponse> {
-    this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext(message);
-    const intent = await this.classifySafely(message, context);
-    const response = await this.handleChatIntent(message, context, intent);
-    if (!isOpenEndedFailureReply(response.reply)) {
-      this.chatMemoryService.enqueueCapture(message, response.reply);
-    }
-    return response;
+  async handleChat(message: string, turnId?: string): Promise<ChatResponse> {
+    const model = this.aiDjAssistant.status().model;
+    return this.conversation.respondText(
+      {
+        message,
+        now: this.state,
+        ...(turnId ? { turnId } : {}),
+        ...(model ? { model } : {})
+      },
+      async () => {
+        const context = this.buildAiContext(message);
+        const intent = await this.classifySafely(message, context);
+        const response = await this.handleChatIntent(message, context, intent);
+        return {
+          action: response.action,
+          reply: response.reply,
+          now: response.now,
+          ...(response.messages[0]?.trackSuggestion
+            ? { trackSuggestion: response.messages[0].trackSuggestion }
+            : {})
+        };
+      }
+    );
   }
 
-  async handleChatStream(message: string, callbacks: ChatStreamCallbacks): Promise<ChatResponse> {
-    this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext(message);
-    const intent = await this.classifySafely(message, context);
-    const response = await this.handleChatIntent(message, context, intent);
+  async handleChatStream(
+    message: string,
+    callbacks: ChatStreamCallbacks,
+    turnId?: string
+  ): Promise<ChatResponse> {
+    const response = await this.handleChat(message, turnId);
     callbacks.onTextDelta(response.reply);
     callbacks.onResult(response);
-    if (!isOpenEndedFailureReply(response.reply)) {
-      this.chatMemoryService.enqueueCapture(message, response.reply);
-    }
     return response;
   }
 
@@ -513,12 +606,12 @@ export class RadioOrchestrator {
 
   private buildAiContext(message = ""): AiDjContext {
     return {
-      messages: this.repo.getRecentMessages(this.chatContextLimit()).map(({ role, text, at }) => ({
+      messages: this.conversation.recentContextMessages(this.chatContextLimit()).map(({ role, text, at }) => ({
         role,
         text,
         at
       })),
-      memories: this.chatMemoryService.relevantTo(message),
+      memories: this.conversation.relevantMemories(message),
       nowTrack: this.state.track,
       queue: this.state.queue.slice(0, 10),
       taste: this.repo.getTasteProfile(),
@@ -742,6 +835,10 @@ export class RadioOrchestrator {
     if (!this.state.track) {
       return;
     }
+    if (this.conversation.hasActiveTurn()) {
+      return;
+    }
+    const trackId = this.state.track.id;
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const script = await this.djBrain.generate({
       profile,
@@ -750,7 +847,7 @@ export class RadioOrchestrator {
       settings: this.getDjSettings()
     });
     this.completedTracksSinceLastDj = 0;
-    if (!script) {
+    if (!script || this.conversation.hasActiveTurn() || this.state.track?.id !== trackId) {
       return;
     }
     this.state.djScript = script;
@@ -887,12 +984,11 @@ export class RadioOrchestrator {
     trackSuggestion?: TrackSuggestion
   ): ChatResponse {
     const message = { role: "assistant" as const, text: reply, at: new Date().toISOString() };
-    this.repo.addChatMessage(trackSuggestion ? { ...message, trackSuggestion } : message);
     return {
       action,
       reply,
       now,
-      messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT)
+      messages: [trackSuggestion ? { ...message, trackSuggestion } : message]
     };
   }
 }

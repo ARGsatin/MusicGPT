@@ -132,7 +132,7 @@ describe("Realtime voice protocol", () => {
           session: {
             modalities: ["text", "audio"],
             voice: "Tina",
-            turn_detection: { type: "semantic_vad" }
+            turn_detection: { type: "server_vad" }
           }
         }), {
           headers: { "content-type": "application/json" }
@@ -165,10 +165,26 @@ describe("Realtime voice protocol", () => {
     expect(audio.autoplay).toBe(true);
     expect(JSON.parse(sentEvents[0] ?? "{}")).toMatchObject({
       type: "session.update",
-      session: { voice: "Tina", turn_detection: { type: "semantic_vad" } }
+      session: { voice: "Tina", turn_detection: { type: "server_vad" } }
     });
     expect(replaceTrackCalls).toEqual([null, track]);
     expect(track.enabled).toBe(true);
+
+    channel.dispatchEvent(new MessageEvent("message", {
+      data: JSON.stringify({ type: "response.created", response: { id: "response-new" } })
+    }));
+    channel.dispatchEvent(new MessageEvent("message", {
+      data: JSON.stringify({ type: "input_audio_buffer.speech_started" })
+    }));
+    channel.dispatchEvent(new MessageEvent("message", {
+      data: JSON.stringify({
+        type: "response.done",
+        response: { id: "response-old", status: "completed", output: [] }
+      })
+    }));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(controller.status).toBe("listening");
     controller.stop();
   });
 

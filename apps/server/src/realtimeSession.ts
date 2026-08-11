@@ -36,15 +36,23 @@ export function isRealtimeSessionConfigured(
   return Boolean(apiKey?.trim() && (baseUrl?.trim() || workspaceId?.trim()));
 }
 
-export function buildRealtimeSessionConfig() {
+export function buildRealtimeSessionConfig(
+  contextInstructions?: string,
+  mode: "unified" | "legacy" = "unified"
+) {
+  const sharedContext = contextInstructions?.trim();
   return {
     modalities: ["text", "audio"],
     voice: REALTIME_VOICE,
     input_audio_format: "pcm" as const,
     output_audio_format: "pcm" as const,
+    ...(mode === "unified"
+      ? { input_audio_transcription: { model: "qwen3-asr-flash-realtime" } }
+      : {}),
     turn_detection: {
-      type: "semantic_vad" as const,
+      type: mode === "unified" ? "server_vad" as const : "semantic_vad" as const,
       threshold: 0.5,
+      prefix_padding_ms: 300,
       silence_duration_ms: 800,
       create_response: true,
       interrupt_response: true
@@ -61,13 +69,14 @@ export function buildRealtimeSessionConfig() {
       "# Preambles",
       "音乐工具很快，不要在调用前说‘我来处理’、‘稍等’或类似流程提示，直接调用即可。",
       "# Tools",
-      "涉及当前歌曲、队列、播放/暂停/切歌、点歌、偏好记录或音乐推荐时，调用 run_music_command，request 保留用户原话。",
+      "任何涉及当前歌曲、队列、播放/暂停/切歌/重播、收藏、点歌、偏好、环境选歌或音乐推荐的内容都必须调用 run_music_command，request 保留用户原话。",
       "工具返回后先依据结果自然回应；不要逐字朗读 JSON，也不要声称执行了工具没有完成的动作。",
       "# Background Audio",
       "如果最新音频只是背景音乐、环境声、沉默、电视声、旁人交谈或显然没有在对你说话，调用 wait_for_user 并保持安静。",
       "调用 wait_for_user 后不要再给口头回应。只有用户明显在对你说话或提出请求时才恢复正常回应。",
       "# Unclear Audio",
-      "音频明显是在对你说话但内容听不清时，用一句简短中文请用户重复；不要猜测，不要调用音乐工具。"
+      "音频明显是在对你说话但内容听不清时，用一句简短中文请用户重复；不要猜测，不要调用音乐工具。",
+      ...(sharedContext ? ["# Shared Conversation Context", sharedContext] : [])
     ].join("\n"),
     tools: [
       {
@@ -82,6 +91,14 @@ export function buildRealtimeSessionConfig() {
               request: {
                 type: "string",
                 description: "The user's original music-related request, preserving names and details."
+              },
+              confirmationToken: {
+                type: "string",
+                description: "A confirmation token returned by an earlier ambiguous music search."
+              },
+              selectedTrackId: {
+                type: "number",
+                description: "The selected track ID when confirming an earlier ambiguous search."
               }
             },
             required: ["request"]

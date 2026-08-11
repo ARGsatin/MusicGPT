@@ -1,5 +1,72 @@
 # UI fluidity performance report
 
+## Aurora Deck follow-up
+
+Date: 2026-08-03
+Branch: `aurora-ui`
+
+The Aurora redesign reintroduced a different performance regression after the original React render
+split. The same real Vite application and live local API were measured at 1280×720 with Chromium
+CPU throttled 4×. Two consecutive baseline and verification runs used eight stored messages, the
+current track, the live queue, five seconds of idle frame sampling, sequential typing, a queue-tab
+switch, and twenty synthetic media `timeupdate` events.
+
+### Root causes
+
+- Twenty-three infinite CSS animations were active while the page was idle: three full-screen,
+  blurred aurora bands, eighteen dust particles, the ON AIR pulse, and the ticker. Playback added
+  the vinyl and seven equalizer animations. The idle page recalculated styles on nearly every frame.
+- Chat input lived in the root `App`, so every character reconciled the application root and passed
+  a new `input` prop through the full chat panel.
+- Every streamed text delta copied the complete message array and rerendered the full message list;
+  long conversations made generation progressively more expensive.
+- Persistent large-area backdrop filters and an animated SVG drop shadow amplified paint and
+  compositing work.
+
+### Changes
+
+- Replaced the expensive infinite ambient animations with static Aurora composition and short state
+  transitions. The turntable, equalizer, status dot, and particles retain their visual state without
+  perpetual work.
+- Kept the status ticker as the single allowed infinite animation. It moves only an isolated
+  `transform` layer, while its accessible static rail remains available to assistive technology and
+  becomes visible when reduced motion is requested. Persistent backdrop filters were removed from
+  the chat panel, ticker, and mobile navigation.
+- Moved composer input state into `ChatPanel`, keeping keystrokes below the root render boundary.
+- Added a small `useSyncExternalStore` text store so stream deltas update only the active assistant
+  bubble. The final response replaces the array once; partial text is materialized only on stop or error.
+- Coalesced stream auto-scroll work to one `requestAnimationFrame` callback.
+- Added regression tests for the stream store and a CSS budget that rejects every infinite primary
+  UI animation except the compositor-only status ticker.
+
+### Results
+
+Desktop Chromium, 4× CPU throttle, 1280×720:
+
+| Scenario | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| Infinite animations while idle | 23 | 1 | 96% fewer |
+| Idle main-thread task time / 5s | 2.83–2.95s | 0.50–0.64s | 78–83% lower |
+| Idle frame P95 | 18.2ms | 6.2ms | 66% lower |
+| Idle maximum frame | 30.2–30.4ms | 6.3–7.3ms | 76–79% lower |
+| Sequential typing to next paint | 1.85–1.93s | 0.90–0.91s | 51–53% lower |
+| Queue switch to next paint | 238–306ms | 140–170ms | 29–54% lower |
+| Playback main-thread task time / 3s | 1.86–1.90s | 0.44–0.45s | about 76% lower |
+| Playback frame P95 | 18.2ms | 6.2ms | 66% lower |
+
+A separate stress fixture rendered 300 messages and 1,828 DOM elements. Typing remained 903ms,
+essentially identical to the eight-message result, and a mocked 120-delta response plus the final
+302-message render reached the next paint in 801ms. This confirms that input latency no longer grows
+with chat history and streaming no longer rewrites the history array for every delta.
+
+The timing rows were captured during the zero-animation verification pass. The subsequently restored
+ticker changes only a compositor `transform` and is covered by the motion-budget regression test.
+
+Desktop and 390×844 mobile browser passes verified the turntable, chat, queue, local input state,
+status rail, mobile navigation, and absence of horizontal overflow.
+
+## Original render-boundary investigation
+
 Date: 2026-07-28
 Branch: `codex/ui-ux-fluidity`
 

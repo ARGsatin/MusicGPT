@@ -11,11 +11,11 @@
 - 原生实时语音：`qwen3.5-omni-plus-realtime` 直接理解和生成音频，支持自然轮次、随时打断与语音点歌
 - 长期人物记忆：自动提炼稳定偏好、习惯与背景，可在“她记得的我”中逐条或全部忘记
 - PWA 播放器：播放控制、歌词窗口、聊天历史、人物记忆、偏好面板与推荐导入
-- 本地持久化：SQLite 保存聊天、人物记忆、播放事件和口味画像
+- 本地持久化：SQLite 保存文字与有效语音转写、人物记忆、播放事件和口味画像；不保存原始音频
 
 ## 自由聊天与长期记忆
 
-- 普通聊天采用真实的 `user` / `assistant` 历史角色，默认携带最近 20 轮对话；页面独立展示最近 100 条消息
+- 文字和有效语音共用同一份 `user` / `assistant` 历史与长期记忆；文字模型默认携带最近 20 轮对话，页面展示最近 100 条消息
 - 简单闲聊保持轻盈，复杂问题可以自然展开；默认聊天输出上限由 `AI_DJ_CHAT_MAX_TOKENS=800` 控制
 - 机器人可以主动追问、开玩笑或温和表达不同意见，遇到严肃话题会认真回应
 - 只有明确提出点歌、切歌、暂停等操作时才进入音乐控制；单纯谈到“播放”“推荐”“歌”仍会继续聊天
@@ -26,10 +26,12 @@
 
 - 模型固定为 `qwen3.5-omni-plus-realtime`，默认使用官方默认的 `Tina` 音色
 - 浏览器通过 WebRTC 直接传输麦克风和模型音频，不经过“转文字 → Edge TTS → MP3”链路
-- `semantic_vad` 负责自然判断说话轮次；用户开口时可打断 DJ，未播放的模型音频会由 Realtime 自动截断
+- `server_vad` 使用 800ms 静音窗口判断说话轮次，并开启 Qwen 实时输入转写；用户开口时可打断 DJ，已收到的互动回复片段会标为“已打断”
 - 点击“开启实时语音”后才申请麦克风权限；关闭页面或结束语音会立即停止麦克风轨道
-- 语音中的点歌、切歌、队列、当前曲目和偏好问题会调用现有 MusicGPT 控制层，执行结果再由 Realtime 自然说出
-- 文字聊天继续独立可用；实时会话已连接时，可自动播报文字回复，也可手动让 Realtime 说出某条消息或最近 DJ 播报
+- 语音中的点歌、切歌、队列、当前曲目和偏好问题统一调用 Music Command；`call_id` 幂等保证重试不会重复切歌或收藏
+- 普通语音答案直接使用 Qwen 的输出转写显示并持久化，不再生成一份 DeepSeek 助手副本
+- 实时会话已连接时，可选择“朗读文字回复”，也可手动朗读某条消息或最近 DJ 播报；这些 narration 不写入聊天历史
+- 背景声和 `wait_for_user` 不进入历史；输入转写失败的轮次也不会落库
 - DJ 说话或聆听用户时，音乐临时降到当前音量的 25%，结束后恢复
 
 百炼 `DASHSCOPE_API_KEY` 只保存在服务端。浏览器把 SDP offer 发给 `/api/realtime/session`，服务端向百炼 WebRTC 接口完成握手并只返回 SDP answer，不会把 Key 交给前端。语音用量由阿里云百炼账户按量计费。
@@ -73,6 +75,7 @@ cp .env.example .env
 - `DASHSCOPE_API_KEY`：启用 `qwen3.5-omni-plus-realtime` 原生语音所必需，在阿里云百炼控制台创建
 - `DASHSCOPE_WORKSPACE_ID`：使用默认华北 2（北京）端点时必填，填写百炼业务空间 ID；服务端据此生成工作空间专属 WebRTC 地址
 - `DASHSCOPE_REALTIME_BASE_URL`：完整 WebRTC SDP 地址覆盖项；使用新加坡地域或自定义代理时填写，并可替代 `DASHSCOPE_WORKSPACE_ID`
+- `REALTIME_CONVERSATION_MODE`：默认 `unified`，启用统一文字/语音账本；现场协议异常时可临时设为 `legacy` 回退
 - `AI_DJ_MEMORY_TURNS`：可选，模型近期上下文轮数，默认 `20`
 - `AI_DJ_CHAT_MAX_TOKENS`：可选，普通聊天最大输出 token，默认 `800`
 
@@ -99,6 +102,9 @@ npm run dev
 - `POST /api/chat`（兼容的非流式聊天接口）
 - `POST /api/chat/stream`（NDJSON：文本增量与最终持久化结果）
 - `GET /api/realtime/session`（检查原生语音是否已配置，不申请麦克风权限）
+- `GET /api/realtime/context`（按统一账本刷新当前 Realtime 会话上下文）
+- `POST /api/conversation/voice/turns` 与 `POST /api/conversation/voice/turns/:turnId/complete`（幂等保存有效语音轮次）
+- `POST /api/music/commands`（幂等执行文字或语音音乐命令）
 - `POST /api/realtime/session`（`application/sdp`：创建 `qwen3.5-omni-plus-realtime` WebRTC 会话）
 - `GET /api/chat/history`
 - `DELETE /api/chat/history`

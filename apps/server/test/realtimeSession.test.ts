@@ -75,23 +75,33 @@ describe("Realtime speech session", () => {
     );
   });
 
-  it("builds the Qwen session update with semantic VAD, Tina, and nested function tools", () => {
-    expect(buildRealtimeSessionConfig()).toMatchObject({
+  it("builds the Qwen session update with server VAD, transcription, shared context, and nested tools", () => {
+    expect(buildRealtimeSessionConfig("recent shared turn")).toMatchObject({
       modalities: ["text", "audio"],
       voice: "Tina",
       input_audio_format: "pcm",
       output_audio_format: "pcm",
-      turn_detection: { type: "semantic_vad" },
+      input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
+      turn_detection: { type: "server_vad", silence_duration_ms: 800 },
       tools: [
         { type: "function", function: { name: "run_music_command" } },
         { type: "function", function: { name: "wait_for_user" } }
       ]
     });
+    expect(buildRealtimeSessionConfig("recent shared turn").instructions)
+      .toContain("recent shared turn");
   });
 
   it("rejects an unsafe workspace ID before constructing a hostname", () => {
     expect(() => resolveRealtimeSessionUrl(undefined, "bad.example.com/path"))
       .toThrow("invalid_dashscope_workspace_id");
+  });
+
+  it("keeps a legacy session config available for field rollback", () => {
+    expect(buildRealtimeSessionConfig(undefined, "legacy")).toMatchObject({
+      turn_detection: { type: "semantic_vad" }
+    });
+    expect(buildRealtimeSessionConfig(undefined, "legacy")).not.toHaveProperty("input_audio_transcription");
   });
 
   it("requires an API key and either a workspace ID or an explicit endpoint", () => {
@@ -163,7 +173,8 @@ describe("Realtime speech session", () => {
       voice: "Tina",
       session: {
         voice: "Tina",
-        turn_detection: { type: "semantic_vad" }
+        input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
+        turn_detection: { type: "server_vad" }
       }
     });
     expect(response.body).not.toContain("server-secret");

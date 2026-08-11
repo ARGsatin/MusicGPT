@@ -176,13 +176,22 @@ export interface NowPlayingState {
 
 export interface ChatRequest {
   message: string;
+  turnId?: string;
 }
+
+export type ConversationSource = "text" | "voice";
+export type ConversationTurnStatus = "completed" | "interrupted" | "failed";
 
 export interface ChatMessage {
   id?: number;
   role: "user" | "assistant";
   text: string;
   at: string;
+  turnId?: string;
+  source?: ConversationSource;
+  status?: ConversationTurnStatus;
+  model?: string;
+  sessionId?: string;
   trackSuggestion?: TrackSuggestion;
 }
 
@@ -222,6 +231,66 @@ export interface ChatResponse {
   reply: string;
   now: NowPlayingState;
   messages: ChatMessage[];
+}
+
+export type MusicAction = ChatResponse["action"] | "replay" | "like" | "unlike" | "query_current" | "query_queue";
+export type MusicCommandOutcome = "executed" | "answered" | "needs_confirmation" | "failed";
+
+export interface MusicCommandRequest {
+  turnId: string;
+  commandId: string;
+  request: string;
+  mode: "text_suggest" | "voice_direct";
+  confirmationToken?: string;
+  selectedTrackId?: number;
+}
+
+export interface MusicCommandResult {
+  action: MusicAction;
+  outcome: MusicCommandOutcome;
+  summary: string;
+  now: NowPlayingState;
+  suggestion?: TrackSuggestion;
+  candidates?: Track[];
+  confirmationToken?: string;
+}
+
+export interface VoiceTurnStartRequest {
+  sessionId: string;
+  clientTurnId: string;
+  transcript: string;
+  at: string;
+}
+
+export interface VoiceTurnStartResponse {
+  turnId: string;
+  revision: number;
+  messages: ChatMessage[];
+}
+
+export interface VoiceTurnCompleteRequest {
+  transcript?: string;
+  model: string;
+  responseId?: string;
+  status: ConversationTurnStatus;
+  at: string;
+}
+
+export interface RealtimeContextResponse {
+  sessionId: string;
+  contextRevision: number;
+  instructions: string;
+  session: Record<string, unknown>;
+}
+
+export interface RealtimeSessionResponse {
+  enabled: boolean;
+  model: string;
+  voice: string;
+  session: Record<string, unknown>;
+  sessionId: string;
+  contextRevision: number;
+  conversationMode: "unified" | "legacy";
 }
 
 export interface FeedbackRequest {
@@ -279,6 +348,9 @@ export interface SystemStatus {
   lastImportErrorCode?: NcmImportErrorCode;
   environment?: EnvironmentContext;
   djSettings?: DjSettings;
+  realtimeConversationMode?: "unified" | "legacy";
+  inputTranscriptionEnabled?: boolean;
+  realtimeLastError?: string;
 }
 
 export interface ImportNcmResponse {
@@ -295,6 +367,7 @@ export interface WsPayload {
     | "queue_updated"
     | "dj_script_ready"
     | "system_status"
-    | "chat_memory_updated";
+    | "chat_memory_updated"
+    | "conversation_updated";
   data: unknown;
 }

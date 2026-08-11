@@ -1,5 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
   ChatMemory,
@@ -8,14 +7,15 @@ import type {
   DjSettings,
   EnvironmentContext,
   NowPlayingState,
+  RadioPlanItem,
   SystemStatus,
   TasteProfile,
-  TrackLyrics,
   WsPayload
 } from "@musicgpt/shared";
 import {
   clearChatMemories,
   clearChatHistory,
+  completeVoiceTurn,
   deleteChatMemory,
   fetchDjSettings,
   fetchEnvironment,
@@ -27,93 +27,35 @@ import {
   importRecommendations,
   importFromNcm,
   playSuggestedTrack,
+  playQueuedTrack,
   requestNext,
+  reportRealtimeError,
+  runMusicCommand,
   setFavorite as updateFavorite,
   sendChat,
   sendChatStream,
   sendFeedback,
   updateDjSettings,
-  updateEnvironmentLocation
+  updateEnvironmentLocation,
+  startVoiceTurn
 } from "./api";
-import aiDjAvatarUrl from "./assets/ai-dj-avatar.svg";
-import { ChatMemoryPanel } from "./ChatMemoryPanel";
-import { ChatStreamFeedbackNotice } from "./ChatStreamFeedbackNotice";
-import {
-  settleChatStreamFailure,
-  type ChatStreamFeedback
-} from "./chatStream";
-import { findActiveLyricIndex, selectLyricWindow } from "./lyrics";
+import { AmbientBackdrop } from "./components/AmbientBackdrop";
+import { ChatPanel, type PanelTab } from "./components/ChatPanel";
+import { SignalTicker, StatusRibbon } from "./components/StatusRibbon";
+import { TurntableStage } from "./components/TurntableStage";
+import { settleChatStreamFailure, type ChatStreamFeedback } from "./chatStream";
+import { createStreamingTextStore } from "./streamingTextStore";
 import {
   RealtimeVoiceController,
   type RealtimeVoiceStatus
 } from "./realtimeVoice";
 import { useWsStream } from "./useWsStream";
-import {
-  applyPlayerVolume,
-  DEFAULT_PLAYER_VOLUME,
-  fadePlayerVolume,
-  loadPlayerVolume,
-  normalizeVolumeLevel,
-  savePlayerVolume
-} from "./volume";
-import {
-  getDuckedPlayerVolume,
-  loadAutoSpeak,
-  saveAutoSpeak,
-  SPEECH_DUCKING_FADE_MS
-} from "./speech";
-
-function formatArtists(artists: string[] | undefined): string {
-  if (!artists || artists.length === 0) {
-    return "未知艺术家";
-  }
-  return artists.join(" / ");
-}
-
-function formatDate(now: Date): string {
-  const weekday = new Intl.DateTimeFormat("en-US", { weekday: "long" }).format(now);
-  const day = new Intl.DateTimeFormat("en-US", { day: "2-digit" }).format(now);
-  const month = new Intl.DateTimeFormat("en-US", { month: "short" }).format(now);
-  const year = new Intl.DateTimeFormat("en-US", { year: "numeric" }).format(now);
-  return `${weekday} / ${day} ${month.toUpperCase()} ${year}`;
-}
-
-function formatClock(now: Date): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(now);
-}
-
-function formatTime(value: string | undefined): string {
-  if (!value) {
-    return "未导入";
-  }
-  return new Date(value).toLocaleString();
-}
-
-function formatWeather(environment: EnvironmentContext | null): string {
-  if (!environment) {
-    return "WEATHER --";
-  }
-  const labels: Record<EnvironmentContext["weather"], string> = {
-    clear: "CLEAR",
-    cloudy: "CLOUDY",
-    rain: "RAIN",
-    snow: "SNOW",
-    fog: "FOG",
-    storm: "STORM",
-    unknown: "WEATHER --"
-  };
-  const temp = typeof environment.temperature === "number" ? ` ${environment.temperature}C` : "";
-  return `${labels[environment.weather]}${temp}`;
-}
+import { loadAutoSpeak, saveAutoSpeak } from "./speech";
 
 const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
-  voice: "marin"
+  voice: "Tina"
 };
 
 const REALTIME_STATUS_LABELS: Record<RealtimeVoiceStatus, string> = {
@@ -134,13 +76,10 @@ interface ActiveChatStream {
   token: number;
 }
 
-function formatDuration(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0:00";
-  }
-  const minutes = Math.floor(value / 60);
-  const seconds = Math.floor(value % 60);
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+function materializeStreamingText(messages: ChatMessage[], stream: ActiveChatStream): ChatMessage[] {
+  return messages.map((message) =>
+    message.at === stream.streamAt ? { ...message, text: stream.receivedText } : message
+  );
 }
 
 function getBrowserStorage(): Storage | undefined {
@@ -154,473 +93,38 @@ function getBrowserStorage(): Storage | undefined {
   }
 }
 
-const EMPTY_LYRIC_LINES: TrackLyrics["lines"] = [];
-
-const WeatherParticles = memo(function WeatherParticles() {
-  return (
-    <div className="weather-particles" aria-hidden="true">
-      {Array.from({ length: 24 }, (_, index) => (
-        <span key={index} />
-      ))}
-    </div>
-  );
-});
-
-const StationClock = memo(function StationClock({ isLive }: { isLive: boolean }) {
-  const [clock, setClock] = useState(() => new Date());
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setClock(new Date()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  return (
-    <section className="clock-stage" aria-label="On air status">
-      <div className="clock-card">
-        <p className="micro-label">Station time</p>
-        <h1>{formatClock(clock)}</h1>
-        <p className="date-line">{formatDate(clock)}</p>
-      </div>
-      <div className={isLive ? "live-signal is-live" : "live-signal"}>
-        <span aria-hidden="true" />
-        {isLive ? "ON AIR" : "OFFLINE"}
-      </div>
-    </section>
-  );
-});
-
-interface LyricsWindowProps {
-  activeIndex: number;
-  lyrics: TrackLyrics | undefined;
-}
-
-interface LyricLineRowProps {
-  isActive: boolean;
-  line: TrackLyrics["lines"][number];
-  pulse: number | undefined;
-}
-
-const LyricLineRow = memo(function LyricLineRow({ isActive, line, pulse }: LyricLineRowProps) {
-  return (
-    <div
-      className={isActive ? `lyric-line is-active pulse-${pulse ?? 0}` : "lyric-line"}
-      aria-current={isActive ? "true" : undefined}
-    >
-      <p className="lyric-original">{line.text}</p>
-      {line.translation ? <span className="lyric-translation">{line.translation}</span> : null}
-    </div>
-  );
-});
-
-const LyricsWindow = memo(function LyricsWindow({ activeIndex, lyrics }: LyricsWindowProps) {
-  const [pulseKey, setPulseKey] = useState(0);
-  const lines = lyrics?.lines ?? EMPTY_LYRIC_LINES;
-  const visibleLines = useMemo(
-    () => selectLyricWindow(lines, activeIndex),
-    [activeIndex, lines]
-  );
-
-  useEffect(() => {
-    if (activeIndex < 0) {
-      return undefined;
-    }
-    setPulseKey((key) => key + 1);
-    return undefined;
-  }, [activeIndex, lyrics?.trackId]);
-
-  if (lyrics?.pureMusic) {
-    return (
-      <div className="lyrics-window">
-        <div className="lyric-line pure-music is-active">Pure music, please enjoy</div>
-      </div>
-    );
+function formatTime(value: string | undefined): string {
+  if (!value) {
+    return "未导入";
   }
-
-  return (
-    <div className="lyrics-window">
-      {visibleLines.length > 0 ? (
-        visibleLines.map(({ index, line }) => {
-          const isActive = index === activeIndex;
-          return (
-            <LyricLineRow
-              key={`${index}-${line.timeMs}-${line.text}`}
-              isActive={isActive}
-              line={line}
-              pulse={isActive ? pulseKey % 2 : undefined}
-            />
-          );
-        })
-      ) : (
-        <div className="lyric-line pure-music">Waiting for lyrics</div>
-      )}
-    </div>
-  );
-});
-
-interface MessageListProps {
-  activeSpeechKey: string | undefined;
-  chatLoading: boolean;
-  failedSpeechId: number | null;
-  loadingSpeechId: number | null;
-  messages: ChatMessage[];
-  onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => Promise<void>;
-  onSpeakMessage: (message: ChatMessage) => Promise<void>;
-  streamingMessageAt: string | null;
-  suggestionLoadingId: string | null;
+  return new Date(value).toLocaleString("zh-CN");
 }
 
-const MessageList = memo(function MessageList({
-  activeSpeechKey,
-  chatLoading,
-  failedSpeechId,
-  loadingSpeechId,
-  messages,
-  onPlaySuggestion,
-  onSpeakMessage,
-  streamingMessageAt,
-  suggestionLoadingId
-}: MessageListProps) {
-  const messageThreadRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const thread = messageThreadRef.current;
-    if (!thread) {
-      return;
-    }
-    thread.scrollTop = thread.scrollHeight;
-  }, [messages.length, messages.at(-1)?.text, chatLoading]);
-
-  return (
-    <div className="message-thread" ref={messageThreadRef}>
-      {messages.map((message, index) => {
-        const isStreaming = message.at === streamingMessageAt;
-        return (
-        <div
-          className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
-          key={`${message.at}-${index}`}
-        >
-          {message.role === "assistant" ? (
-            <div className="avatar small dj-avatar" aria-hidden="true">
-              <img alt="" src={aiDjAvatarUrl} />
-            </div>
-          ) : null}
-          <div className={message.role === "assistant" ? "message-bubble" : "message-bubble user-bubble"}>
-            <div className="message-copy-row">
-              <p>
-                {message.text}
-                {isStreaming ? <span className="streaming-caret" aria-label="正在生成回复" /> : null}
-              </p>
-              {message.role === "assistant" && message.id ? (
-                <button
-                  className="speech-button"
-                  type="button"
-                  aria-label={
-                    activeSpeechKey === `chat:${message.id}`
-                      ? "停止朗读"
-                      : failedSpeechId === message.id
-                        ? "重试朗读"
-                        : "朗读这条回复"
-                  }
-                  aria-pressed={activeSpeechKey === `chat:${message.id}`}
-                  onClick={() => void onSpeakMessage(message)}
-                  disabled={loadingSpeechId === message.id}
-                >
-                  {loadingSpeechId === message.id
-                    ? "…"
-                    : activeSpeechKey === `chat:${message.id}`
-                      ? "■"
-                      : failedSpeechId === message.id
-                        ? "↻"
-                        : "▶"}
-                </button>
-              ) : null}
-            </div>
-            {message.role === "assistant" && message.trackSuggestion ? (
-              <button
-                className="track-suggestion"
-                type="button"
-                onClick={() => void onPlaySuggestion(message.trackSuggestion!)}
-                disabled={Boolean(suggestionLoadingId)}
-              >
-                <span className="suggestion-cover" aria-hidden="true">
-                  {message.trackSuggestion.track.coverUrl ? (
-                    <img alt="" src={message.trackSuggestion.track.coverUrl} />
-                  ) : (
-                    "♪"
-                  )}
-                </span>
-                <span className="suggestion-copy">
-                  <strong>{message.trackSuggestion.track.title}</strong>
-                  <em>{formatArtists(message.trackSuggestion.track.artists)}</em>
-                  <small>{message.trackSuggestion.reason}</small>
-                </span>
-                <span className="suggestion-action">
-                  {suggestionLoadingId === message.trackSuggestion.id ? "切换中" : "切到这首"}
-                </span>
-              </button>
-            ) : null}
-          </div>
-        </div>
-        );
-      })}
-    </div>
-  );
-});
-
-interface PlayerStackProps {
-  now: NowPlayingState;
-  onFeedback: (type: "skip" | "like" | "replay" | "complete") => Promise<void>;
-  onFavorite: (favorite: boolean) => Promise<void>;
-  onPlaybackStateChange: (paused: boolean) => void;
-  onRequestNext: (recordSkip?: boolean) => Promise<void>;
-  onTrackEnded: () => Promise<void>;
-  speechActive: boolean;
+function formatWeather(environment: EnvironmentContext | null): string {
+  if (!environment) {
+    return "天气 --";
+  }
+  const labels: Record<EnvironmentContext["weather"], string> = {
+    clear: "晴",
+    cloudy: "多云",
+    rain: "雨",
+    snow: "雪",
+    fog: "雾",
+    storm: "风暴",
+    unknown: "天气 --"
+  };
+  const temp = typeof environment.temperature === "number" ? ` ${environment.temperature}°C` : "";
+  return `${labels[environment.weather]}${temp}`;
 }
 
-export const PlayerStack = memo(function PlayerStack({
-  now,
-  onFeedback,
-  onFavorite,
-  onPlaybackStateChange,
-  onRequestNext,
-  onTrackEnded,
-  speechActive
-}: PlayerStackProps) {
-  const [playbackPaused, setPlaybackPaused] = useState(true);
-  const [audioTime, setAudioTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(0);
-  const [favorite, setFavorite] = useState(Boolean(now.isFavorite));
-  const [favoritePending, setFavoritePending] = useState(false);
-  const [favoriteError, setFavoriteError] = useState<string | null>(null);
-  const [playerVolume, setPlayerVolume] = useState(() => loadPlayerVolume(getBrowserStorage()));
-  const audioRef = useRef<HTMLAudioElement>(null);
-  const lastAudibleVolumeRef = useRef(
-    playerVolume.level > 0 ? playerVolume.level : DEFAULT_PLAYER_VOLUME.level
-  );
-  const previousSpeechActiveRef = useRef(speechActive);
-  const lyricLines = now.lyrics?.lines ?? EMPTY_LYRIC_LINES;
-  const activeLyricIndex = useMemo(
-    () => findActiveLyricIndex(lyricLines, audioTime * 1000),
-    [audioTime, lyricLines]
-  );
+const PERIOD_LABELS: Record<string, string> = {
+  morning: "清晨",
+  afternoon: "午后",
+  evening: "傍晚",
+  late_night: "深夜"
+};
 
-  useEffect(() => {
-    setAudioTime(0);
-    setAudioDuration(0);
-    setFavorite(Boolean(now.isFavorite));
-    setFavoriteError(null);
-  }, [now.track]);
-
-  useEffect(() => {
-    setFavorite(Boolean(now.isFavorite));
-  }, [now.isFavorite]);
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    const speechStateChanged = previousSpeechActiveRef.current !== speechActive;
-    previousSpeechActiveRef.current = speechActive;
-    let cancelFade: (() => void) | undefined;
-    if (audio) {
-      const targetVolume = getDuckedPlayerVolume(playerVolume, speechActive);
-      if (speechStateChanged) {
-        cancelFade = fadePlayerVolume(audio, targetVolume, SPEECH_DUCKING_FADE_MS);
-      } else {
-        applyPlayerVolume(audio, targetVolume);
-      }
-    }
-    savePlayerVolume(getBrowserStorage(), playerVolume);
-    return cancelFade;
-  }, [playerVolume, speechActive]);
-
-  const onTogglePlayback = async () => {
-    if (!audioRef.current) {
-      return;
-    }
-    if (playbackPaused) {
-      try {
-        await audioRef.current.play();
-        setPlaybackPaused(false);
-        onPlaybackStateChange(false);
-      } catch {
-        setPlaybackPaused(true);
-      }
-      return;
-    }
-    audioRef.current.pause();
-    setPlaybackPaused(true);
-    onPlaybackStateChange(true);
-  };
-
-  const onSeek = (value: number) => {
-    if (!audioRef.current) {
-      return;
-    }
-    audioRef.current.currentTime = value;
-    setAudioTime(value);
-  };
-
-  const onReplay = async () => {
-    await onFeedback("replay");
-    if (!audioRef.current) {
-      return;
-    }
-    audioRef.current.currentTime = 0;
-    await audioRef.current.play().catch(() => undefined);
-  };
-
-  const onToggleFavorite = async () => {
-    if (!now.track || favoritePending) {
-      return;
-    }
-    const nextFavorite = !favorite;
-    setFavorite(nextFavorite);
-    setFavoritePending(true);
-    setFavoriteError(null);
-    try {
-      await onFavorite(nextFavorite);
-    } catch {
-      setFavorite(!nextFavorite);
-      setFavoriteError("收藏失败，请稍后重试");
-    } finally {
-      setFavoritePending(false);
-    }
-  };
-
-  const onChangeVolume = (percent: number) => {
-    const level = normalizeVolumeLevel(percent / 100);
-    if (level > 0) {
-      lastAudibleVolumeRef.current = level;
-    }
-    setPlayerVolume({ level, muted: level === 0 });
-  };
-
-  const onToggleMute = () => {
-    setPlayerVolume((current) => {
-      const isSilent = current.muted || current.level === 0;
-      if (!isSilent) {
-        return { ...current, muted: true };
-      }
-      const level = current.level > 0 ? current.level : lastAudibleVolumeRef.current;
-      return { level, muted: false };
-    });
-  };
-
-  const volumePercent = Math.round(playerVolume.level * 100);
-  const volumeMuted = playerVolume.muted || volumePercent === 0;
-
-  return (
-    <section className="player-stack" aria-label="Audio and lyrics">
-      <article className="player-card">
-        <header className="card-header">
-          <div>
-            <p className="micro-label">Now playing</p>
-            <h2>{now.track?.title ?? "等待开播"}</h2>
-          </div>
-          <span className="status-chip">{playbackPaused ? "PAUSED" : "PLAYING"}</span>
-        </header>
-        <div className="player-body">
-          <div className="cover-frame" aria-hidden="true">
-            {now.track?.coverUrl ? <img alt="" src={now.track.coverUrl} /> : <span>NW</span>}
-          </div>
-          <div className="track-deck">
-            <p className="artist-line">{formatArtists(now.track?.artists)}</p>
-            <div className="equalizer" aria-hidden="true">
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-            </div>
-            <div className="controls" aria-label="Playback controls">
-              <button type="button" aria-label="Replay" onClick={() => void onReplay()}>
-                <span aria-hidden="true">|&lt;</span>
-              </button>
-              <button
-                type="button"
-                aria-label="Play or pause"
-                className="control-primary"
-                onClick={() => void onTogglePlayback()}
-              >
-                <span aria-hidden="true">{playbackPaused ? ">" : "||"}</span>
-              </button>
-              <button type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
-                <span aria-hidden="true">&gt;|</span>
-              </button>
-              <button
-                type="button"
-                className={favorite ? "control-favorite is-active" : "control-favorite"}
-                aria-label={favorite ? "取消收藏" : "收藏当前歌曲"}
-                aria-pressed={favorite}
-                disabled={!now.track || favoritePending}
-                onClick={() => void onToggleFavorite()}
-              >
-                <span aria-hidden="true">{favoritePending ? "…" : favorite ? "♥" : "♡"}</span>
-              </button>
-            </div>
-            {favoriteError ? <p className="favorite-error" role="status">{favoriteError}</p> : null}
-            <div className="volume-control">
-              <button
-                type="button"
-                className="volume-button"
-                aria-label={volumeMuted ? "Unmute" : "Mute"}
-                aria-pressed={volumeMuted}
-                onClick={onToggleMute}
-              >
-                <span aria-hidden="true">{volumeMuted ? "×" : "◖"}</span>
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={1}
-                value={volumePercent}
-                onChange={(event) => onChangeVolume(Number(event.currentTarget.value))}
-                aria-label="Playback volume"
-                aria-valuetext={`${volumePercent}%`}
-              />
-              <output aria-live="polite">{volumePercent}%</output>
-            </div>
-          </div>
-        </div>
-        <div className="progress-row">
-          <span>{formatDuration(audioTime)}</span>
-          <input
-            type="range"
-            min={0}
-            max={audioDuration || 0}
-            value={Math.min(audioTime, audioDuration || 0)}
-            step={1}
-            onChange={(event) => onSeek(Number(event.currentTarget.value))}
-            aria-label="Seek current track"
-          />
-          <span>{formatDuration(audioDuration)}</span>
-        </div>
-        <audio
-          ref={audioRef}
-          autoPlay
-          src={now.track?.songUrl}
-          onEnded={() => void onTrackEnded()}
-          onPlay={() => setPlaybackPaused(false)}
-          onPause={() => setPlaybackPaused(true)}
-          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
-          onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
-          className="audio"
-        />
-      </article>
-
-      <article className="lyrics-card" aria-label="Lyrics preview">
-        <header className="card-header compact">
-          <div>
-            <p className="micro-label">Lyrics</p>
-            <h2>Scrolling window</h2>
-          </div>
-          <span className="status-chip muted">{now.lyrics?.pureMusic ? "PURE" : "SYNC"}</span>
-        </header>
-        <LyricsWindow activeIndex={activeLyricIndex} lyrics={now.lyrics} />
-      </article>
-    </section>
-  );
-});
+type MobileView = "stage" | "panel";
 
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
@@ -629,12 +133,13 @@ export default function App() {
   const [djSettings, setDjSettings] = useState<DjSettings>(DEFAULT_DJ_SETTINGS);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [voicePreview, setVoicePreview] = useState<ChatMessage | null>(null);
+  const [voiceAssistantDraft, setVoiceAssistantDraft] = useState<ChatMessage | null>(null);
   const [chatMemories, setChatMemories] = useState<ChatMemory[]>([]);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [busyMemoryId, setBusyMemoryId] = useState<number | null>(null);
   const [memoryClearing, setMemoryClearing] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
-  const [input, setInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatStreamFeedback, setChatStreamFeedback] = useState<ChatStreamFeedback | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
@@ -648,13 +153,14 @@ export default function App() {
   const [speechNotice, setSpeechNotice] = useState<string | null>(null);
   const [streamingMessageAt, setStreamingMessageAt] = useState<string | null>(null);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
+  const [queueLoadingTrackId, setQueueLoadingTrackId] = useState<number | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [weatherLoading, setWeatherLoading] = useState(false);
   const [recommendationLoading, setRecommendationLoading] = useState(false);
   const [v15Error, setV15Error] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [queueOpen, setQueueOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState<PanelTab>("chat");
+  const [mobileView, setMobileView] = useState<MobileView>("stage");
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
   const speechAudioRef = useRef<HTMLAudioElement>(null);
@@ -664,6 +170,7 @@ export default function App() {
   const activeChatStreamRef = useRef<ActiveChatStream | null>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const autoSpeakRef = useRef(autoSpeak);
+  const [streamingTextStore] = useState(createStreamingTextStore);
 
   const refresh = useCallback(async () => {
     const [
@@ -697,9 +204,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    refresh()
-      .catch(() => undefined)
-      .finally(() => setLoading(false));
+    refresh().catch(() => undefined);
   }, [refresh]);
 
   useEffect(() => {
@@ -720,23 +225,79 @@ export default function App() {
         }
       },
       onError: (error) => {
+        void reportRealtimeError(error.message).catch(() => undefined);
         const notice = error.message === "dashscope_realtime_not_configured"
           ? "实时语音需要在服务端配置 DASHSCOPE_API_KEY。"
           : error.message === "dashscope_realtime_endpoint_not_configured"
             ? "实时语音需要配置 DASHSCOPE_WORKSPACE_ID 或完整的 DASHSCOPE_REALTIME_BASE_URL。"
           : error.message.includes("Permission") || error.message.includes("permission")
             ? "没有拿到麦克风权限；请允许访问后再试。"
+            : error.message.includes("Voice turn") || error.message.includes("Music command")
+              ? "实时语音仍可继续，但这轮没有同步到统一历史；稍后可以重试。"
             : "实时语音连接失败，文字聊天仍可继续。";
         setSpeechNotice(notice);
       },
-      onMusicCommand: async (request) => {
-        const response = await sendChat(request);
+      onUserPreview: (itemId, text) => {
+        setVoicePreview({
+          role: "user",
+          text,
+          at: `voice-preview:${itemId}`,
+          source: "voice",
+          status: "completed"
+        });
+      },
+      onUserDiscarded: (itemId) => {
+        setVoicePreview((current) => current?.at === `voice-preview:${itemId}` ? null : current);
+      },
+      onTranscriptionUnavailable: () => {
+        setSpeechNotice("这次语音没有拿到可靠转写，未写入会话历史；可以继续说或重新连接。 ");
+      },
+      onVoiceTurnStart: async (input) => {
+        const response = await startVoiceTurn(input);
+        setVoicePreview(null);
         setMessages(response.messages);
+        return { turnId: response.turnId };
+      },
+      onAssistantDelta: (turnId, delta) => {
+        setVoiceAssistantDraft((current) => current?.turnId === turnId
+          ? { ...current, text: current.text + delta }
+          : {
+              role: "assistant",
+              text: delta,
+              at: `voice-assistant:${turnId}`,
+              turnId,
+              source: "voice",
+              status: "completed"
+            });
+      },
+      onVoiceTurnComplete: async ({ turnId, transcript, responseId, status, at }) => {
+        const nextMessages = await completeVoiceTurn(turnId, {
+          model: "qwen3.5-omni-plus-realtime",
+          status,
+          at,
+          ...(transcript ? { transcript } : {}),
+          ...(responseId ? { responseId } : {})
+        });
+        setVoiceAssistantDraft(null);
+        setMessages(nextMessages);
+      },
+      onMusicCommand: async (call) => {
+        const response = await runMusicCommand({
+          turnId: call.turnId,
+          commandId: call.callId,
+          request: call.request,
+          mode: "voice_direct",
+          ...(call.confirmationToken ? { confirmationToken: call.confirmationToken } : {}),
+          ...(call.selectedTrackId !== undefined ? { selectedTrackId: call.selectedTrackId } : {})
+        });
         setNow(response.now);
         await refreshTaste().catch(() => undefined);
         return {
           action: response.action,
-          reply: response.reply,
+          outcome: response.outcome,
+          summary: response.summary,
+          ...(response.candidates ? { candidates: response.candidates.slice(0, 3) } : {}),
+          ...(response.confirmationToken ? { confirmationToken: response.confirmationToken } : {}),
           now: {
             paused: response.now.paused,
             track: response.now.track
@@ -749,6 +310,12 @@ export default function App() {
             queueLength: response.now.queue.length
           }
         };
+      },
+      onLegacyMusicCommand: async (request) => {
+        const response = await sendChat(request);
+        setMessages(response.messages);
+        setNow(response.now);
+        return { action: response.action, summary: response.reply, now: response.now };
       }
     });
     realtimeVoiceRef.current = controller;
@@ -775,7 +342,7 @@ export default function App() {
     chatStreamTokenRef.current += 1;
     activeStream.abortController.abort();
     setMessages((current) =>
-      settleChatStreamFailure(current, {
+      settleChatStreamFailure(materializeStreamingText(current, activeStream), {
         kind: "stopped",
         streamAt: activeStream.streamAt,
         retryMessage: activeStream.retryMessage
@@ -788,6 +355,7 @@ export default function App() {
     });
     setStreamingMessageAt(null);
     setChatLoading(false);
+    realtimeVoiceRef.current?.setMicrophoneEnabled(true);
   }, []);
 
   const playAssistantMessage = useCallback(async (message: ChatMessage, manual = false) => {
@@ -837,40 +405,51 @@ export default function App() {
     }
   }, []);
 
-  const onWsPayload = useCallback((payload: WsPayload) => {
-    if (payload.event === "now_playing_updated") {
-      setNow(payload.data as NowPlayingState);
-    } else if (payload.event === "queue_updated") {
-      setNow((current) => ({ ...current, queue: payload.data as NowPlayingState["queue"] }));
-    } else if (payload.event === "dj_script_ready") {
-      const script = payload.data as NowPlayingState["djScript"];
-      setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
-      if (script && autoSpeakRef.current) {
-        void playDjScript(script);
+  const onWsPayload = useCallback(
+    (payload: WsPayload) => {
+      if (payload.event === "now_playing_updated") {
+        setNow(payload.data as NowPlayingState);
+      } else if (payload.event === "queue_updated") {
+        setNow((current) => ({ ...current, queue: payload.data as NowPlayingState["queue"] }));
+      } else if (payload.event === "dj_script_ready") {
+        const script = payload.data as NowPlayingState["djScript"];
+        setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
+        const voiceStatus = realtimeVoiceRef.current?.status;
+        const conversationBusy = Boolean(activeChatStreamRef.current) ||
+          voiceStatus === "listening" || voiceStatus === "thinking" || voiceStatus === "speaking";
+        if (script && autoSpeakRef.current && !conversationBusy) {
+          void playDjScript(script);
+        }
+      } else if (payload.event === "system_status") {
+        const status = payload.data as SystemStatus;
+        setSystemStatus(status);
+        if (status.environment) {
+          setEnvironment(status.environment);
+        }
+        if (status.djSettings) {
+          setDjSettings(status.djSettings);
+        }
+      } else if (payload.event === "chat_memory_updated") {
+        const data = payload.data as { memories?: ChatMemory[] };
+        if (Array.isArray(data.memories)) {
+          setChatMemories(data.memories);
+        }
+      } else if (payload.event === "conversation_updated") {
+        const data = payload.data as {
+          source?: "text" | "voice";
+          sessionId?: string;
+          messages?: ChatMessage[];
+        };
+        if (!(data.source === "voice" && realtimeVoiceRef.current?.isCurrentSession(data.sessionId))) {
+          if (Array.isArray(data.messages)) setMessages(data.messages);
+          void realtimeVoiceRef.current?.refreshContext().catch(() => undefined);
+        }
       }
-    } else if (payload.event === "system_status") {
-      const status = payload.data as SystemStatus;
-      setSystemStatus(status);
-      if (status.environment) {
-        setEnvironment(status.environment);
-      }
-      if (status.djSettings) {
-        setDjSettings(status.djSettings);
-      }
-    } else if (payload.event === "chat_memory_updated") {
-      const data = payload.data as { memories?: ChatMemory[] };
-      if (Array.isArray(data.memories)) {
-        setChatMemories(data.memories);
-      }
-    }
-  }, [playDjScript]);
+    },
+    [playDjScript]
+  );
 
   useWsStream(onWsPayload);
-
-  const onSubmitChat = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await submitChat(input);
-  };
 
   const submitChat = async (rawMessage: string) => {
     if (chatLoading) {
@@ -880,7 +459,15 @@ export default function App() {
       return;
     }
     const message = rawMessage.trim();
-    const optimistic: ChatMessage = { role: "user", text: message, at: new Date().toISOString() };
+    const turnId = globalThis.crypto?.randomUUID?.() ?? `text-${Date.now()}-${Math.random()}`;
+    const optimistic: ChatMessage = {
+      role: "user",
+      text: message,
+      at: new Date().toISOString(),
+      turnId,
+      source: "text",
+      status: "completed"
+    };
     const streamAt = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const streamingAssistant: ChatMessage = {
       role: "assistant",
@@ -900,15 +487,17 @@ export default function App() {
       token: streamToken
     };
     activeChatStreamRef.current = activeStream;
-    setInput("");
+    streamingTextStore.clear();
     setChatError(null);
     setChatStreamFeedback(null);
     setSpeechNotice(null);
     setChatLoading(true);
+    realtimeVoiceRef.current?.setMicrophoneEnabled(false);
     setStreamingMessageAt(streamAt);
     setMessages((current) => [...current, optimistic, streamingAssistant]);
     try {
       await sendChatStream(message, {
+        turnId,
         signal: abortController.signal,
         onEvent: (event: ChatStreamEvent) => {
           if (chatStreamTokenRef.current !== streamToken) {
@@ -916,13 +505,7 @@ export default function App() {
           }
           if (event.type === "text_delta") {
             activeStream.receivedText += event.delta;
-            setMessages((current) =>
-              current.map((item) =>
-                item.at === streamAt
-                  ? { ...item, text: `${item.text}${event.delta}` }
-                  : item
-              )
-            );
+            streamingTextStore.append(event.delta);
           } else if (event.type === "result") {
             if (activeChatStreamRef.current?.token === streamToken) {
               activeChatStreamRef.current = null;
@@ -930,6 +513,7 @@ export default function App() {
             setMessages(event.response.messages);
             setNow(event.response.now);
             setStreamingMessageAt(null);
+            realtimeVoiceRef.current?.setMicrophoneEnabled(true);
             if (autoSpeakRef.current && realtimeVoiceRef.current?.connected) {
               setActiveSpeechKey(streamKey);
               void realtimeVoiceRef.current.speakText(event.response.reply, streamKey).catch(() => {
@@ -943,7 +527,7 @@ export default function App() {
     } catch {
       if (!abortController.signal.aborted && chatStreamTokenRef.current === streamToken) {
         setMessages((current) =>
-          settleChatStreamFailure(current, {
+          settleChatStreamFailure(materializeStreamingText(current, activeStream), {
             kind: "error",
             streamAt,
             retryMessage: message
@@ -965,26 +549,30 @@ export default function App() {
         }
         setStreamingMessageAt(null);
         setChatLoading(false);
+        realtimeVoiceRef.current?.setMicrophoneEnabled(true);
       }
     }
   };
 
-  const onPlaySuggestion = useCallback(async (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => {
-    if (suggestionLoadingId) {
-      return;
-    }
-    setSuggestionLoadingId(suggestion.id);
-    setChatError(null);
-    try {
-      const response = await playSuggestedTrack(suggestion.track, suggestion.reason);
-      setNow(response.now);
-      await refreshTaste();
-    } catch (error) {
-      setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
-    } finally {
-      setSuggestionLoadingId(null);
-    }
-  }, [refreshTaste, suggestionLoadingId]);
+  const onPlaySuggestion = useCallback(
+    async (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => {
+      if (suggestionLoadingId) {
+        return;
+      }
+      setSuggestionLoadingId(suggestion.id);
+      setChatError(null);
+      try {
+        const response = await playSuggestedTrack(suggestion.track, suggestion.reason);
+        setNow(response.now);
+        await refreshTaste();
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
+      } finally {
+        setSuggestionLoadingId(null);
+      }
+    },
+    [refreshTaste, suggestionLoadingId]
+  );
 
   const onClearChatHistory = async () => {
     if (chatLoading || chatClearing || messages.length === 0) {
@@ -1002,6 +590,8 @@ export default function App() {
     try {
       await clearChatHistory();
       setMessages([]);
+      setVoicePreview(null);
+      setVoiceAssistantDraft(null);
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "聊天记录清空失败，请稍后再试。");
     } finally {
@@ -1029,9 +619,7 @@ export default function App() {
     if (memoryClearing || busyMemoryId !== null || chatMemories.length === 0) {
       return;
     }
-    const confirmed = window.confirm(
-      "确定让她忘记全部长期记忆吗？聊天记录会继续保留。"
-    );
+    const confirmed = window.confirm("确定让她忘记全部长期记忆吗？聊天记录会继续保留。");
     if (!confirmed) {
       return;
     }
@@ -1059,17 +647,42 @@ export default function App() {
     }
   }, []);
 
-  const onRequestNext = useCallback(async (recordSkip = false) => {
-    await runWithAdvanceLock(async () => {
-      const currentTrack = currentTrackRef.current;
-      if (recordSkip && currentTrack) {
-        await sendFeedback({ type: "skip", trackId: currentTrack.id });
+  const onPlayQueueTrack = useCallback(
+    async (trackId: RadioPlanItem["track"]["id"]) => {
+      if (queueLoadingTrackId !== null) {
+        return;
       }
-      const response = await requestNext();
-      setNow(response.now);
-      await refreshTaste();
-    });
-  }, [refreshTaste, runWithAdvanceLock]);
+      setQueueLoadingTrackId(trackId);
+      setChatError(null);
+      try {
+        await runWithAdvanceLock(async () => {
+          const response = await playQueuedTrack(trackId);
+          setNow(response.now);
+          await refreshTaste();
+        });
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
+      } finally {
+        setQueueLoadingTrackId(null);
+      }
+    },
+    [queueLoadingTrackId, refreshTaste, runWithAdvanceLock]
+  );
+
+  const onRequestNext = useCallback(
+    async (recordSkip = false) => {
+      await runWithAdvanceLock(async () => {
+        const currentTrack = currentTrackRef.current;
+        if (recordSkip && currentTrack) {
+          await sendFeedback({ type: "skip", trackId: currentTrack.id });
+        }
+        const response = await requestNext();
+        setNow(response.now);
+        await refreshTaste();
+      });
+    },
+    [refreshTaste, runWithAdvanceLock]
+  );
 
   const onTrackEnded = useCallback(async () => {
     await runWithAdvanceLock(async () => {
@@ -1084,18 +697,21 @@ export default function App() {
     });
   }, [refreshTaste, runWithAdvanceLock]);
 
-  const onFeedback = useCallback(async (type: "skip" | "like" | "replay" | "complete") => {
-    const currentTrack = currentTrackRef.current;
-    if (!currentTrack) {
-      return;
-    }
-    await sendFeedback({ type, trackId: currentTrack.id });
-    if (type === "skip") {
-      await onRequestNext();
-      return;
-    }
-    await refreshTaste();
-  }, [onRequestNext, refreshTaste]);
+  const onFeedback = useCallback(
+    async (type: "skip" | "like" | "replay" | "complete") => {
+      const currentTrack = currentTrackRef.current;
+      if (!currentTrack) {
+        return;
+      }
+      await sendFeedback({ type, trackId: currentTrack.id });
+      if (type === "skip") {
+        await onRequestNext();
+        return;
+      }
+      await refreshTaste();
+    },
+    [onRequestNext, refreshTaste]
+  );
 
   const onFavorite = useCallback(async (favorite: boolean) => {
     const currentTrack = currentTrackRef.current;
@@ -1104,9 +720,7 @@ export default function App() {
     }
     const result = await updateFavorite(currentTrack.id, favorite);
     setNow((current) =>
-      current.track?.id === currentTrack.id
-        ? { ...current, isFavorite: result.favorite }
-        : current
+      current.track?.id === currentTrack.id ? { ...current, isFavorite: result.favorite } : current
     );
     setTaste(result.taste);
   }, []);
@@ -1204,23 +818,21 @@ export default function App() {
     }
   };
 
-  const favoritePeriod = useMemo(
-    () => taste?.favoritePeriods[0]?.period ?? "night",
-    [taste?.favoritePeriods]
-  );
-  const topTasteTags = useMemo(
-    () => taste?.preferenceTags?.slice(0, 6) ?? [],
-    [taste?.preferenceTags]
-  );
+  const topTasteTags = useMemo(() => taste?.preferenceTags?.slice(0, 6) ?? [], [taste?.preferenceTags]);
 
   const trackTitle = now.track?.title ?? "等待开播";
   const isLive = Boolean(systemStatus?.ncmReachable);
-  const queuePreview = now.queue.slice(0, 10);
-  const nextTrack = now.queue[0]?.track;
+  const favoritePeriod = taste?.favoritePeriods[0]?.period ?? "late_night";
+
   const visibleMessages = useMemo(
-    () =>
-      messages.length > 0
-        ? messages
+    () => {
+      const unifiedMessages = [
+        ...messages,
+        ...(voicePreview ? [voicePreview] : []),
+        ...(voiceAssistantDraft ? [voiceAssistantDraft] : [])
+      ];
+      return unifiedMessages.length > 0
+        ? unifiedMessages
         : [
             {
               role: "assistant" as const,
@@ -1229,247 +841,167 @@ export default function App() {
                 "嗨，我在这儿呀～告诉我你现在的心情或想听的感觉，我来陪你挑首合适的歌！",
               at: "station-intro"
             }
-          ],
-    [messages, now.djScript?.text]
+          ];
+    },
+    [messages, now.djScript?.text, voiceAssistantDraft, voicePreview]
+  );
+
+  const tickerItems = useMemo(() => {
+    const items = [
+      `曲库 ${systemStatus?.trackStatsCount ?? 0}`,
+      `窗口 ${systemStatus?.queueLength ?? 0}`,
+      systemStatus?.aiDjConfigured
+        ? `AI ${systemStatus.aiDjProvider.toUpperCase()} ${systemStatus.aiDjModel ?? "ONLINE"}`
+        : "AI FALLBACK",
+      `偏好时段 ${PERIOD_LABELS[favoritePeriod] ?? favoritePeriod}`,
+      ...topTasteTags.map((tag) => `#${tag.value}`),
+      formatWeather(environment),
+      `DJ ${djSettings.tone.toUpperCase()} / ${djSettings.voiceGender.toUpperCase()}`,
+      `上次导入 ${formatTime(systemStatus?.lastImportAt)}`
+    ];
+    return items;
+  }, [systemStatus, favoritePeriod, topTasteTags, environment, djSettings]);
+
+  const tickerErrors = useMemo(
+    () =>
+      [
+        systemStatus?.aiDjLastError ? `AI ${systemStatus.aiDjLastError}` : null,
+        systemStatus?.lastImportError ?? null,
+        importError,
+        v15Error
+      ].filter((item): item is string => Boolean(item)),
+    [systemStatus, importError, v15Error]
   );
 
   return (
-    <main className={`radio-shell weather-${environment?.weather ?? "unknown"}`}>
-      <div className="breathing-light" aria-hidden="true" />
-      <WeatherParticles />
-      <header className="topbar" aria-label="Neonwave FM station header">
-        <div className="brand">
-          <div className="avatar brand-avatar" aria-hidden="true">
-            <img alt="" src={aiDjAvatarUrl} />
-          </div>
-          <div>
-            <div className="wordmark">Neonwave FM</div>
-            <p className="brand-subline">{isLive ? "ON AIR" : "LOCAL SIGNAL"}</p>
-          </div>
-        </div>
-        <nav className="station-actions" aria-label="Station actions">
-          <button className="pill muted" type="button">
-            Login
-          </button>
-          <button className="pill active" type="button">
-            Dark
-          </button>
-          <button className="pill muted" type="button" onClick={() => void onImportNcm()} disabled={importing}>
-            {importing ? "Importing" : "Sync"}
-          </button>
-          <button className="pill muted" type="button" onClick={() => void onSyncWeather()} disabled={weatherLoading}>
-            {weatherLoading ? "Weather..." : "Weather"}
-          </button>
-          <button
-            className="pill muted"
-            type="button"
-            onClick={() => void onImportRecommendations()}
-            disabled={recommendationLoading}
-          >
-            {recommendationLoading ? "Tuning..." : "Expand"}
-          </button>
-        </nav>
-      </header>
+    <main className="deck" data-weather={environment?.weather ?? "unknown"} data-mobile-view={mobileView}>
+      <AmbientBackdrop weather={environment?.weather} />
 
-      <StationClock isLive={isLive} />
+      <StatusRibbon
+        importing={importing}
+        isLive={isLive}
+        recommendationLoading={recommendationLoading}
+        weatherLoading={weatherLoading}
+        onImportNcm={() => void onImportNcm()}
+        onImportRecommendations={() => void onImportRecommendations()}
+        onSyncWeather={() => void onSyncWeather()}
+      />
 
-      <section className="console-grid" aria-label="Neonwave main console">
-        <PlayerStack
-          now={now}
-          onFeedback={onFeedback}
-          onFavorite={onFavorite}
-          onPlaybackStateChange={onPlaybackStateChange}
-          onRequestNext={onRequestNext}
-          onTrackEnded={onTrackEnded}
-          speechActive={speechActive}
-        />
-
-        <article className="dj-console" aria-label="Qwen DJ conversation">
-          <header className="card-header">
-            <div>
-              <p className="micro-label">Qwen DJ window</p>
-              <h2>Conversation</h2>
-            </div>
-            <div className="dj-settings-bar">
-              <select
-                value={djSettings.tone}
-                onChange={(event) => void onChangeDjTone(event.currentTarget.value as DjSettings["tone"])}
-                aria-label="DJ tone"
-              >
-                <option value="lively">活泼</option>
-                <option value="calm">温和</option>
-                <option value="professional">专业</option>
-              </select>
-              <label className="speech-toggle">
-                <input
-                  type="checkbox"
-                  checked={autoSpeak}
-                  onChange={(event) => onToggleAutoSpeak(event.currentTarget.checked)}
-                />
-                文字自动播报
-              </label>
-              <button
-                className={realtimeStatus === "idle" || realtimeStatus === "error"
-                  ? "realtime-voice-button"
-                  : "realtime-voice-button is-active"}
-                type="button"
-                aria-pressed={realtimeStatus !== "idle" && realtimeStatus !== "error"}
-                onClick={() => void onToggleRealtimeVoice()}
-                disabled={realtimeStatus === "connecting"}
-              >
-                {REALTIME_STATUS_LABELS[realtimeStatus]}
-              </button>
-              <span className="context-chip">Qwen Realtime · Tina</span>
-              <button
-                className="memory-toggle"
-                type="button"
-                aria-expanded={memoryOpen}
-                onClick={() => setMemoryOpen((open) => !open)}
-              >
-                她记得的我 {chatMemories.length}
-              </button>
-            </div>
-          </header>
-          <div className="chat-memory-slot" hidden={!memoryOpen}>
-            <ChatMemoryPanel
-              memories={chatMemories}
-              busyMemoryId={busyMemoryId}
-              clearing={memoryClearing}
-              error={memoryError}
-              onForget={(memory) => void onForgetMemory(memory)}
-              onClear={() => void onClearMemories()}
-            />
-          </div>
-          <MessageList
-            activeSpeechKey={activeSpeechKey}
-            chatLoading={chatLoading}
-            failedSpeechId={failedSpeechId}
-            loadingSpeechId={loadingSpeechId}
-            messages={visibleMessages}
-            onPlaySuggestion={onPlaySuggestion}
-            onSpeakMessage={(message) => playAssistantMessage(message, true)}
-            streamingMessageAt={streamingMessageAt}
-            suggestionLoadingId={suggestionLoadingId}
+      <div className="deck-grid">
+        <div className="stage-column">
+          <TurntableStage
+            now={now}
+            onFeedback={onFeedback}
+            onFavorite={onFavorite}
+            onPlaybackStateChange={onPlaybackStateChange}
+            onRequestNext={onRequestNext}
+            onTrackEnded={onTrackEnded}
+            speechActive={speechActive}
           />
-          <p className="now-caption">Now playing: {trackTitle}</p>
-          <div className="chat-actions" aria-label="GPT DJ quick actions">
-            <button type="button" onClick={() => void submitChat("点评当前这首")} disabled={chatLoading || !now.track}>
-              点评当前
-            </button>
-            <button type="button" onClick={() => void submitChat("来点适合现在氛围的歌")} disabled={chatLoading}>
-              氛围点歌
-            </button>
-            {now.djScript?.text ? (
-              <button type="button" onClick={() => void playDjScript(now.djScript!, true)}>
-                重播最近播报
-              </button>
-            ) : null}
-            <button
-              className="clear-chat-button"
-              type="button"
-              onClick={() => void onClearChatHistory()}
-              disabled={chatLoading || chatClearing || messages.length === 0}
-            >
-              {chatClearing ? "清空中…" : "清空历史"}
-            </button>
-          </div>
-          {chatStreamFeedback ? (
-            <ChatStreamFeedbackNotice
-              feedback={chatStreamFeedback}
-              onContinue={() => {
-                setChatStreamFeedback(null);
-                chatInputRef.current?.focus();
-              }}
-              onRetry={() => {
-                const retryMessage = chatStreamFeedback.retryMessage;
-                setChatStreamFeedback(null);
-                void submitChat(retryMessage);
-              }}
-            />
-          ) : null}
-          {chatError ? <p className="chat-error">{chatError}</p> : null}
-          {speechNotice ? <p className="speech-notice">{speechNotice}</p> : null}
-          <form onSubmit={onSubmitChat} className="chat-form">
-            <input
-              ref={chatInputRef}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder="想聊什么都可以；需要点歌时直接告诉我～"
-              aria-label="Message Neonwave FM"
-              disabled={chatLoading}
-            />
-            {chatLoading ? (
-              <button
-                className="stop-chat-button"
-                type="button"
-                aria-label="停止生成回复"
-                title="停止生成回复"
-                onClick={stopActiveChatStream}
-              >
-                ■
-              </button>
-            ) : (
-              <button type="submit" aria-label="Send message">
-                →
-              </button>
-            )}
-          </form>
-          <audio ref={speechAudioRef} className="speech-audio" preload="none" />
-        </article>
-      </section>
-
-      <aside className="signal-strip" aria-label="Station details">
-        <span>Library {systemStatus?.trackStatsCount ?? 0}</span>
-        <span>Window {systemStatus?.queueLength ?? 0}</span>
-        <span>
-          {systemStatus?.aiDjConfigured
-            ? `AI ${systemStatus.aiDjProvider.toUpperCase()} ${systemStatus.aiDjModel ?? "ONLINE"}`
-            : "AI FALLBACK"}
-        </span>
-        <span>Taste {favoritePeriod}</span>
-        {topTasteTags.length > 0 ? (
-          <span className="taste-tag-group" aria-label="偏好标签">
-            {topTasteTags.map((tag) => (
-              <em key={`${tag.category}:${tag.value}`}>{tag.value}</em>
-            ))}
-          </span>
-        ) : null}
-        <span>{formatWeather(environment)}</span>
-        <span>DJ {djSettings.tone.toUpperCase()} / {djSettings.voiceGender.toUpperCase()}</span>
-        <span>Import {formatTime(systemStatus?.lastImportAt)}</span>
-        {systemStatus?.aiDjLastError ? <span className="error-text">AI {systemStatus.aiDjLastError}</span> : null}
-        {systemStatus?.lastImportError ? <span className="error-text">{systemStatus.lastImportError}</span> : null}
-        {importError ? <span className="error-text">{importError}</span> : null}
-        {v15Error ? <span className="error-text">{v15Error}</span> : null}
-      </aside>
-
-      <section className={queueOpen ? "queue-drawer is-open" : "queue-drawer"} aria-label="Queue drawer">
-        <button className="queue-summary" type="button" onClick={() => setQueueOpen((open) => !open)}>
-          <span>QUEUE</span>
-          <strong>{now.queue.length} TRACKS</strong>
-          <em>NEXT: {nextTrack ? `${nextTrack.title} / ${formatArtists(nextTrack.artists)}` : "waiting for signal"}</em>
-          <b aria-hidden="true">{queueOpen ? "×" : "+"}</b>
-        </button>
-        <div className="queue-panel">
-          <ol>
-            {queuePreview.length > 0 ? (
-              queuePreview.map((item, index) => (
-                <li key={item.track.id}>
-                  <span>{String(index + 1).padStart(2, "0")}</span>
-                  <strong>{item.track.title}</strong>
-                  <em>{formatArtists(item.track.artists)}</em>
-                </li>
-              ))
-            ) : (
-              <li className="empty-queue">
-                <span>00</span>
-                <strong>{loading ? "Tuning library" : "Queue empty"}</strong>
-                <em>Neonwave will refill the window on the next request</em>
-              </li>
-            )}
-          </ol>
         </div>
-      </section>
+
+        <ChatPanel
+          activeSpeechKey={activeSpeechKey}
+          activeTab={panelTab}
+          autoSpeak={autoSpeak}
+          canReplayDj={Boolean(now.djScript)}
+          chatClearing={chatClearing}
+          chatError={chatError}
+          chatLoading={chatLoading}
+          chatStreamFeedback={chatStreamFeedback}
+          djSettings={djSettings}
+          failedSpeechId={failedSpeechId}
+          hasTrack={Boolean(now.track)}
+          historyEmpty={messages.length === 0}
+          loadingSpeechId={loadingSpeechId}
+          memories={chatMemories}
+          memoryBusyId={busyMemoryId}
+          memoryClearing={memoryClearing}
+          memoryError={memoryError}
+          memoryOpen={memoryOpen}
+          messages={visibleMessages}
+          nowTitle={trackTitle}
+          queue={now.queue}
+          queueLoadingTrackId={queueLoadingTrackId}
+          realtimeStatus={realtimeStatus}
+          realtimeStatusLabel={REALTIME_STATUS_LABELS[realtimeStatus]}
+          speechNotice={speechNotice}
+          streamingMessageAt={streamingMessageAt}
+          streamingTextStore={streamingTextStore}
+          suggestionLoadingId={suggestionLoadingId}
+          inputRef={chatInputRef}
+          onChangeTab={setPanelTab}
+          onChangeTone={(tone) => void onChangeDjTone(tone)}
+          onClearHistory={() => void onClearChatHistory()}
+          onClearMemories={() => void onClearMemories()}
+          onFeedbackContinue={() => {
+            setChatStreamFeedback(null);
+            chatInputRef.current?.focus();
+          }}
+          onFeedbackRetry={() => {
+            const retryMessage = chatStreamFeedback?.retryMessage;
+            setChatStreamFeedback(null);
+            if (retryMessage) {
+              void submitChat(retryMessage);
+            }
+          }}
+          onForgetMemory={(memory) => void onForgetMemory(memory)}
+          onPlaySuggestion={(suggestion) => void onPlaySuggestion(suggestion)}
+          onPlayQueueTrack={(trackId) => void onPlayQueueTrack(trackId)}
+          onQuickPrompt={(prompt) => void submitChat(prompt)}
+          onReplayDj={() => {
+            if (now.djScript) {
+              void playDjScript(now.djScript, true);
+            }
+          }}
+          onSpeakMessage={(message) => void playAssistantMessage(message, true)}
+          onStopStream={stopActiveChatStream}
+          onSubmit={(message) => void submitChat(message)}
+          onToggleAutoSpeak={onToggleAutoSpeak}
+          onToggleRealtimeVoice={() => void onToggleRealtimeVoice()}
+          onToggleMemory={() => setMemoryOpen((open) => !open)}
+        />
+      </div>
+
+      <SignalTicker items={tickerItems} errors={tickerErrors} />
+
+      <nav className="mobile-nav" aria-label="移动端导航">
+        <button
+          type="button"
+          className={mobileView === "stage" ? "mobile-nav-btn is-active" : "mobile-nav-btn"}
+          aria-pressed={mobileView === "stage"}
+          onClick={() => setMobileView("stage")}
+        >
+          <span aria-hidden="true">◉</span>
+          唱机
+        </button>
+        <button
+          type="button"
+          className={mobileView === "panel" && panelTab === "chat" ? "mobile-nav-btn is-active" : "mobile-nav-btn"}
+          aria-pressed={mobileView === "panel" && panelTab === "chat"}
+          onClick={() => {
+            setPanelTab("chat");
+            setMobileView("panel");
+          }}
+        >
+          <span aria-hidden="true">✦</span>
+          对话
+        </button>
+        <button
+          type="button"
+          className={mobileView === "panel" && panelTab === "queue" ? "mobile-nav-btn is-active" : "mobile-nav-btn"}
+          aria-pressed={mobileView === "panel" && panelTab === "queue"}
+          onClick={() => {
+            setPanelTab("queue");
+            setMobileView("panel");
+          }}
+        >
+          <span aria-hidden="true">≡</span>
+          队列
+        </button>
+      </nav>
+
+      <audio ref={speechAudioRef} className="speech-audio" preload="none" />
     </main>
   );
 }

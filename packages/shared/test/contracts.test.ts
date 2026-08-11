@@ -56,6 +56,16 @@ describe("contracts", () => {
     expect(API_ROUTES.realtimeSession).toBe("/api/realtime/session");
   });
 
+  it("exposes unified conversation and idempotent music routes", () => {
+    expect(API_ROUTES.realtimeContext).toBe("/api/realtime/context");
+    expect(API_ROUTES.realtimeErrors).toBe("/api/realtime/errors");
+    expect(API_ROUTES.voiceTurns).toBe("/api/conversation/voice/turns");
+    expect(API_ROUTES.voiceTurnComplete("voice/a")).toBe(
+      "/api/conversation/voice/turns/voice%2Fa/complete"
+    );
+    expect(API_ROUTES.musicCommands).toBe("/api/music/commands");
+  });
+
   it("validates favorite payload and builds its route", () => {
     expect(isFavoriteRequest({ favorite: true })).toBe(true);
     expect(isFavoriteRequest({ favorite: "yes" })).toBe(false);
