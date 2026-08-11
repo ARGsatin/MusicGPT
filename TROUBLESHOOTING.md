@@ -62,7 +62,24 @@ Notes:
   - `npm run ncm:cookie`
   - `npm run ncm:check`
 
-## 4) DeepSeek reports a connection error or returns AI fallback
+## 4) Qwen Realtime is unavailable or fails after microphone permission
+
+### Check
+1. Confirm `.env` contains `DASHSCOPE_API_KEY`.
+2. Configure either `DASHSCOPE_WORKSPACE_ID` for the default Beijing endpoint or a complete `DASHSCOPE_REALTIME_BASE_URL` for another region or proxy.
+3. Open `http://127.0.0.1:8787/api/realtime/session`; `enabled` must be `true` before the browser requests microphone permission.
+4. Confirm that the API key, workspace, and endpoint belong to the same Alibaba Cloud region.
+
+### Interpretation
+- `dashscope_realtime_not_configured`: the API key is missing.
+- `dashscope_realtime_endpoint_not_configured`: neither a workspace ID nor a complete endpoint is configured.
+- HTTP `401` or `403`: check the key, workspace permissions, and region.
+- HTTP `404`: check the workspace ID or the full WebRTC endpoint.
+- `realtime_answer_missing_sdp`: the upstream request succeeded without returning a usable Answer SDP.
+
+The API key stays on the server. Do not place it in browser code, screenshots, or committed files.
+
+## 5) DeepSeek reports a connection error or returns AI fallback
 
 ### Check
 1. Run `npm run deepseek:check` from the project root.
@@ -79,7 +96,7 @@ Notes:
 
 Never commit a real `DEEPSEEK_API_KEY`. If a key ever entered Git history, rotate it even after removing it from the current file.
 
-## 5) Quick health checklist
+## 6) Quick health checklist
 
 Run these checks in order:
 1. On Windows, double-click `一键启动.cmd` (recommended).
@@ -89,7 +106,7 @@ Run these checks in order:
    - `http://127.0.0.1:3001/login/status`
    - `http://127.0.0.1:8787/health`
 
-## 6) NCM import error meanings
+## 7) NCM import error meanings
 
 - `ncm_unreachable`: the local NCM API is down or unreachable; the one-click launcher repairs this state.
 - `ncm_cookie_missing`: `.env` has no usable Cookie; QR login starts during full startup.

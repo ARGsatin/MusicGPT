@@ -16,6 +16,7 @@ import { RadioPlanner } from "./radioPlanner.js";
 import {
   buildRealtimeSessionConfig,
   createRealtimeSession,
+  isRealtimeSessionConfigured,
   REALTIME_MODEL,
   REALTIME_VOICE
 } from "./realtimeSession.js";
@@ -155,25 +156,33 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/health", async () => ({ ok: true }));
 
-  app.get("/api/realtime/session", async () => ({
-    enabled: Boolean(options.realtimeApiKey ?? config.dashScopeRealtimeApiKey),
-    model: REALTIME_MODEL,
-    voice: REALTIME_VOICE,
-    session: buildRealtimeSessionConfig()
-  }));
+  app.get("/api/realtime/session", async () => {
+    const apiKey = options.realtimeApiKey ?? config.dashScopeRealtimeApiKey;
+    const baseUrl = options.realtimeBaseUrl ?? config.dashScopeRealtimeBaseUrl;
+    const workspaceId = options.realtimeWorkspaceId ?? config.dashScopeWorkspaceId;
+    return {
+      enabled: isRealtimeSessionConfigured(apiKey, baseUrl, workspaceId),
+      model: REALTIME_MODEL,
+      voice: REALTIME_VOICE,
+      session: buildRealtimeSessionConfig()
+    };
+  });
 
   app.post("/api/realtime/session", async (request, reply) => {
     const apiKey = options.realtimeApiKey ?? config.dashScopeRealtimeApiKey;
     if (!apiKey) {
       return reply.status(503).send({ error: "dashscope_realtime_not_configured" });
     }
+    const realtimeBaseUrl = options.realtimeBaseUrl ?? config.dashScopeRealtimeBaseUrl;
+    const realtimeWorkspaceId = options.realtimeWorkspaceId ?? config.dashScopeWorkspaceId;
+    if (!realtimeBaseUrl && !realtimeWorkspaceId) {
+      return reply.status(503).send({ error: "dashscope_realtime_endpoint_not_configured" });
+    }
     if (typeof request.body !== "string" || request.body.trim().length === 0) {
       return reply.status(400).send({ error: "invalid_sdp_offer" });
     }
 
     try {
-      const realtimeBaseUrl = options.realtimeBaseUrl ?? config.dashScopeRealtimeBaseUrl;
-      const realtimeWorkspaceId = options.realtimeWorkspaceId ?? config.dashScopeWorkspaceId;
       const answerSdp = await createRealtimeSession({
         apiKey,
         ...(realtimeBaseUrl ? { baseUrl: realtimeBaseUrl } : {}),

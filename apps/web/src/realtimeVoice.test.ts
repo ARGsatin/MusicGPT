@@ -4,10 +4,15 @@ import {
   createSpokenTextEvents,
   findMusicFunctionCalls,
   findWaitFunctionCallIds,
+  normalizeAnswerSdp,
   RealtimeVoiceController
 } from "./realtimeVoice";
 
 describe("Realtime voice protocol", () => {
+  it("normalizes the Answer SDP to CRLF before WebRTC consumes it", () => {
+    expect(normalizeAnswerSdp("v=0\no=qwen-answer\n")).toBe("v=0\r\no=qwen-answer\r\n");
+  });
+
   it("asks the native audio model to speak text without an Edge TTS audio URL", () => {
     const events = createSpokenTextEvents("这首歌的鼓点很松，别急着切。", "dj-script-1");
 

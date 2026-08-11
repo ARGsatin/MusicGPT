@@ -1,5 +1,3 @@
-const DEFAULT_REALTIME_BASE_URL = "https://dashscope.aliyuncs.com/api/v1/webrtc/realtime";
-
 export const REALTIME_MODEL = "qwen3.5-omni-plus-realtime";
 export const REALTIME_VOICE = "Tina";
 
@@ -21,10 +19,21 @@ export function resolveRealtimeSessionUrl(
   }
   const resolvedBaseUrl = baseUrl?.trim() || (normalizedWorkspaceId
     ? `https://${normalizedWorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime`
-    : DEFAULT_REALTIME_BASE_URL);
+    : undefined);
+  if (!resolvedBaseUrl) {
+    throw new Error("dashscope_realtime_endpoint_not_configured");
+  }
   const url = new URL(resolvedBaseUrl);
   url.searchParams.set("model", REALTIME_MODEL);
   return url.toString();
+}
+
+export function isRealtimeSessionConfigured(
+  apiKey?: string,
+  baseUrl?: string,
+  workspaceId?: string
+): boolean {
+  return Boolean(apiKey?.trim() && (baseUrl?.trim() || workspaceId?.trim()));
 }
 
 export function buildRealtimeSessionConfig() {

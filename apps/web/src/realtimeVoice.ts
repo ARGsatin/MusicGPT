@@ -29,6 +29,14 @@ export interface RealtimeVoiceDependencies {
 type RealtimeClientEvent = Record<string, unknown>;
 type RealtimeSessionConfig = Record<string, unknown>;
 
+export function normalizeAnswerSdp(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  return `${trimmed.replace(/\r?\n/g, "\r\n")}\r\n`;
+}
+
 export function createSpokenTextEvents(text: string, requestId: string): RealtimeClientEvent[] {
   return [
     {
@@ -295,11 +303,11 @@ export class RealtimeVoiceController {
         headers: { "content-type": "application/sdp" },
         body: offerSdp
       });
-      const answerSdp = await response.text();
+      const responseBody = await response.text();
       if (!response.ok) {
         let message = `realtime_session_failed:${response.status}`;
         try {
-          const payload = JSON.parse(answerSdp) as { error?: unknown };
+          const payload = JSON.parse(responseBody) as { error?: unknown };
           if (typeof payload.error === "string") {
             message = payload.error;
           }
@@ -307,6 +315,10 @@ export class RealtimeVoiceController {
           // The status code remains enough context for non-JSON failures.
         }
         throw new Error(message);
+      }
+      const answerSdp = normalizeAnswerSdp(responseBody);
+      if (!answerSdp) {
+        throw new Error("realtime_answer_missing_sdp");
       }
       const sessionReady = this.waitForSessionReady();
       void sessionReady.catch(() => undefined);

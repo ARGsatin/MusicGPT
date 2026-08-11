@@ -722,6 +722,8 @@ export default function App() {
       onError: (error) => {
         const notice = error.message === "dashscope_realtime_not_configured"
           ? "实时语音需要在服务端配置 DASHSCOPE_API_KEY。"
+          : error.message === "dashscope_realtime_endpoint_not_configured"
+            ? "实时语音需要配置 DASHSCOPE_WORKSPACE_ID 或完整的 DASHSCOPE_REALTIME_BASE_URL。"
           : error.message.includes("Permission") || error.message.includes("permission")
             ? "没有拿到麦克风权限；请允许访问后再试。"
             : "实时语音连接失败，文字聊天仍可继续。";

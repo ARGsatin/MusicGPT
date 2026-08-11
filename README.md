@@ -71,14 +71,16 @@ cp .env.example .env
 - `OPENAI_API_KEY`：可选，只用于 OpenAI 兼容的文字模型；如果同时配置 `OPENAI_API_KEY` 和 `DEEPSEEK_API_KEY`，文字 AI 优先使用 OpenAI
 - `OPENAI_BASE_URL`：可选，只用于 OpenAI 兼容的文字模型请求
 - `DASHSCOPE_API_KEY`：启用 `qwen3.5-omni-plus-realtime` 原生语音所必需，在阿里云百炼控制台创建
-- `DASHSCOPE_WORKSPACE_ID`：可选但推荐，填写百炼业务空间 ID 后使用华北 2（北京）的工作空间专属域名；不填时使用 `dashscope.aliyuncs.com` 公共域名
-- `DASHSCOPE_REALTIME_BASE_URL`：可选，用于覆盖完整的 WebRTC SDP 交换地址；通常保持为空
+- `DASHSCOPE_WORKSPACE_ID`：使用默认华北 2（北京）端点时必填，填写百炼业务空间 ID；服务端据此生成工作空间专属 WebRTC 地址
+- `DASHSCOPE_REALTIME_BASE_URL`：完整 WebRTC SDP 地址覆盖项；使用新加坡地域或自定义代理时填写，并可替代 `DASHSCOPE_WORKSPACE_ID`
 - `AI_DJ_MEMORY_TURNS`：可选，模型近期上下文轮数，默认 `20`
 - `AI_DJ_CHAT_MAX_TOKENS`：可选，普通聊天最大输出 token，默认 `800`
 
 如果前端状态条显示 `AI FALLBACK`，说明服务端没有读到 `DEEPSEEK_API_KEY` 或 `OPENAI_API_KEY`；开放式聊天和点评会明确提示不可用，不会用本地套话冒充模型回复。若已配置但仍收到“没能生成可信的回复”，请在系统状态中查看错误，并检查 key、余额、网络或模型名。
 
 DeepSeek V4 默认开启思考模式；MusicGPT 会在短对话、意图识别和自动 DJ 播报中显式关闭它，并在 JSON Output 偶发返回空内容时重试一次。可以运行 `npm run deepseek:check` 单独检查当前网络、密钥、模型名和 Chat Completions 请求。
+
+Realtime 语音要求同时配置 `DASHSCOPE_API_KEY`，以及 `DASHSCOPE_WORKSPACE_ID` 或 `DASHSCOPE_REALTIME_BASE_URL` 其中之一。`GET /api/realtime/session` 只有在密钥和端点都完整时才返回 `enabled: true`，因此不会在配置不完整时提前申请麦克风权限。
 
 3. 启动
 

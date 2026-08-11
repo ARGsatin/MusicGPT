@@ -8,6 +8,7 @@ import { NcmConnector } from "../src/ncmConnector.js";
 import {
   buildRealtimeSessionConfig,
   createRealtimeSession,
+  isRealtimeSessionConfigured,
   resolveRealtimeSessionUrl
 } from "../src/realtimeSession.js";
 import { createServer } from "../src/server.js";
@@ -32,13 +33,14 @@ describe("Realtime speech session", () => {
 
     const answer = await createRealtimeSession({
       apiKey: "server-secret",
+      workspaceId: "llm-aurora123",
       offerSdp: "v=0\r\no=browser-offer",
       fetchFn
     });
 
     expect(answer).toBe("v=0\r\no=qwen-answer");
     expect(fetchFn).toHaveBeenCalledWith(
-      "https://dashscope.aliyuncs.com/api/v1/webrtc/realtime?model=qwen3.5-omni-plus-realtime",
+      "https://llm-aurora123.cn-beijing.maas.aliyuncs.com/api/v1/webrtc/realtime?model=qwen3.5-omni-plus-realtime",
       expect.objectContaining({
         method: "POST",
         headers: {
@@ -92,6 +94,13 @@ describe("Realtime speech session", () => {
       .toThrow("invalid_dashscope_workspace_id");
   });
 
+  it("requires an API key and either a workspace ID or an explicit endpoint", () => {
+    expect(() => resolveRealtimeSessionUrl()).toThrow("dashscope_realtime_endpoint_not_configured");
+    expect(isRealtimeSessionConfigured("key-only")).toBe(false);
+    expect(isRealtimeSessionConfigured("key", undefined, "llm-aurora123")).toBe(true);
+    expect(isRealtimeSessionConfigured("key", "https://voice.example.com/realtime")).toBe(true);
+  });
+
   it("exposes the SDP exchange through the app without returning the DashScope key", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-realtime-route-"));
     const realtimeFetch = vi.fn<typeof fetch>(async () =>
@@ -106,10 +115,12 @@ describe("Realtime speech session", () => {
         new Response("{}", { headers: { "content-type": "application/json" } })
       ),
       realtimeApiKey: "must-stay-on-server",
+      realtimeWorkspaceId: "llm-aurora123",
       realtimeFetch,
       importRetryIntervalMs: 60_000
     } as Parameters<typeof createServer>[0] & {
       realtimeApiKey: string;
+      realtimeWorkspaceId: string;
       realtimeFetch: typeof fetch;
     });
     servers.push(app);
@@ -135,8 +146,12 @@ describe("Realtime speech session", () => {
         new Response("{}", { headers: { "content-type": "application/json" } })
       ),
       realtimeApiKey: "server-secret",
+      realtimeWorkspaceId: "llm-aurora123",
       importRetryIntervalMs: 60_000
-    } as Parameters<typeof createServer>[0] & { realtimeApiKey: string });
+    } as Parameters<typeof createServer>[0] & {
+      realtimeApiKey: string;
+      realtimeWorkspaceId: string;
+    });
     servers.push(app);
 
     const response = await app.inject({ method: "GET", url: "/api/realtime/session" });
@@ -152,5 +167,32 @@ describe("Realtime speech session", () => {
       }
     });
     expect(response.body).not.toContain("server-secret");
+  });
+
+  it("stays disabled when the API key has no workspace endpoint", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-realtime-incomplete-"));
+    const app = await createServer({
+      repo: new StateRepository(path.join(tmp, "state.db")),
+      ncm: new NcmConnector("http://mock-ncm", "cookie=abc", async () =>
+        new Response("{}", { headers: { "content-type": "application/json" } })
+      ),
+      realtimeApiKey: "server-secret",
+      realtimeBaseUrl: "",
+      realtimeWorkspaceId: "",
+      importRetryIntervalMs: 60_000
+    });
+    servers.push(app);
+
+    const status = await app.inject({ method: "GET", url: "/api/realtime/session" });
+    expect(status.json()).toMatchObject({ enabled: false });
+
+    const exchange = await app.inject({
+      method: "POST",
+      url: "/api/realtime/session",
+      headers: { "content-type": "application/sdp" },
+      payload: "v=0\r\no=browser-offer"
+    });
+    expect(exchange.statusCode).toBe(503);
+    expect(exchange.json()).toEqual({ error: "dashscope_realtime_endpoint_not_configured" });
   });
 });
