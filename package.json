@@ -13,6 +13,7 @@
     "dev:ncm": "node scripts/start-ncm.mjs",
     "ncm:cookie": "node scripts/setup-ncm-cookie.mjs",
     "ncm:check": "node scripts/check-ncm-cookie.mjs",
+    "deepseek:check": "node scripts/check-deepseek.mjs",
     "dev:full": "concurrently --kill-others -n ncm,server,web -c green,cyan,magenta \"npm run dev:ncm\" \"node scripts/wait-for-ncm.mjs && node scripts/ensure-ncm-login.mjs && npm run dev:server\" \"node scripts/wait-for-server.mjs && npm run dev:web\"",
     "dev:server": "npm run dev -w @musicgpt/server",
     "dev:web": "npm run dev -w @musicgpt/web",

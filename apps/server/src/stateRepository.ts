@@ -7,7 +7,6 @@ import type {
   ChatMemory,
   ChatMemoryCategory,
   ChatMessage,
-  ChatSpeech,
   DjSettings,
   DjScript,
   EnvironmentContext,
@@ -77,7 +76,21 @@ export class StateRepository {
         role TEXT NOT NULL,
         text TEXT NOT NULL,
         at TEXT NOT NULL,
-        metadata_json TEXT
+        metadata_json TEXT,
+        turn_id TEXT,
+        source TEXT NOT NULL DEFAULT 'text',
+        status TEXT NOT NULL DEFAULT 'completed',
+        model TEXT,
+        session_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS conversation_tool_calls (
+        command_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        consumed_at TEXT
       );
       CREATE TABLE IF NOT EXISTS chat_memories (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +110,8 @@ export class StateRepository {
       );
     `);
     this.ensureChatMetadataColumn();
+    this.ensureConversationColumns();
+    this.ensureConversationRevision();
     this.ensureTrackStatsColumns();
     this.migrateLegacyLocalFavorites();
   }
@@ -132,6 +147,44 @@ export class StateRepository {
     if (!columns.some((column) => column.name === "metadata_json")) {
       this.db.exec("ALTER TABLE chat_messages ADD COLUMN metadata_json TEXT");
     }
+  }
+
+  private ensureConversationColumns(): void {
+    const columns = this.db.prepare("PRAGMA table_info(chat_messages)").all() as Array<{ name: string }>;
+    const additions: Array<[string, string]> = [
+      ["turn_id", "TEXT"],
+      ["source", "TEXT NOT NULL DEFAULT 'text'"],
+      ["status", "TEXT NOT NULL DEFAULT 'completed'"],
+      ["model", "TEXT"],
+      ["session_id", "TEXT"]
+    ];
+    for (const [name, type] of additions) {
+      if (!columns.some((column) => column.name === name)) {
+        this.db.exec(`ALTER TABLE chat_messages ADD COLUMN ${name} ${type}`);
+      }
+    }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_turn_role
+      ON chat_messages(turn_id, role)
+      WHERE turn_id IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS conversation_tool_calls (
+        command_id TEXT PRIMARY KEY,
+        turn_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        consumed_at TEXT
+      );
+    `);
+  }
+
+  private ensureConversationRevision(): void {
+    if (this.getAppState<number>("conversation_revision") !== undefined) return;
+    const row = this.db.prepare("SELECT COALESCE(MAX(id), 0) AS revision FROM chat_messages").get() as {
+      revision: number;
+    };
+    this.saveAppState("conversation_revision", row.revision);
   }
 
   upsertTrackStats(stats: TrackStat[]): void {
@@ -434,31 +487,71 @@ export class StateRepository {
     return row ? parseJson<DjScript | undefined>(row.script_json, undefined) : undefined;
   }
 
-  addChatMessage(message: ChatMessage): ChatMessage {
+  addChatMessage(message: ChatMessage & { metadata?: Record<string, unknown> }): ChatMessage {
+    if (message.turnId) {
+      const existing = this.db
+        .prepare(`
+          SELECT id, role, text, at, metadata_json, turn_id, source, status, model, session_id
+          FROM chat_messages WHERE turn_id = ? AND role = ?
+        `)
+        .get(message.turnId, message.role) as ChatMessageRow | undefined;
+      if (existing) {
+        return this.mapChatMessage(existing);
+      }
+    }
     const result = this.db
-      .prepare("INSERT INTO chat_messages(role, text, at, metadata_json) VALUES(?, ?, ?, ?)")
+      .prepare(`
+        INSERT INTO chat_messages(
+          role, text, at, metadata_json, turn_id, source, status, model, session_id
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
       .run(
         message.role,
         message.text,
         message.at,
         JSON.stringify({
-          trackSuggestion: message.trackSuggestion,
-          speech: message.speech
-        })
+          ...message.metadata,
+          trackSuggestion: message.trackSuggestion
+        }),
+        message.turnId ?? null,
+        message.source ?? "text",
+        message.status ?? "completed",
+        message.model ?? null,
+        message.sessionId ?? null
       );
+    this.bumpConversationRevision();
     return { ...message, id: Number(result.lastInsertRowid) };
+  }
+
+  updateChatMessageForTurn(
+    turnId: string,
+    role: ChatMessage["role"],
+    patch: Pick<ChatMessage, "text" | "at"> & Partial<Pick<ChatMessage, "status" | "model">>
+  ): ChatMessage | undefined {
+    const result = this.db.prepare(`
+      UPDATE chat_messages
+      SET text = ?, at = ?, status = COALESCE(?, status), model = COALESCE(?, model)
+      WHERE turn_id = ? AND role = ?
+    `).run(patch.text, patch.at, patch.status ?? null, patch.model ?? null, turnId, role);
+    if (Number(result.changes) > 0) this.bumpConversationRevision();
+    return this.getChatMessageForTurn(turnId, role);
+  }
+
+  getChatMessageForTurn(turnId: string, role: ChatMessage["role"]): ChatMessage | undefined {
+    const row = this.db.prepare(`
+      SELECT id, role, text, at, metadata_json, turn_id, source, status, model, session_id
+      FROM chat_messages WHERE turn_id = ? AND role = ?
+    `).get(turnId, role) as ChatMessageRow | undefined;
+    return row ? this.mapChatMessage(row) : undefined;
   }
 
   getRecentMessages(limit = 30): ChatMessage[] {
     const rows = this.db
-      .prepare("SELECT id, role, text, at, metadata_json FROM chat_messages ORDER BY id DESC LIMIT ?")
-      .all(limit) as Array<{
-        id: number;
-        role: ChatMessage["role"];
-        text: string;
-        at: string;
-        metadata_json?: string | null;
-      }>;
+      .prepare(`
+        SELECT id, role, text, at, metadata_json, turn_id, source, status, model, session_id
+        FROM chat_messages ORDER BY id DESC LIMIT ?
+      `)
+      .all(limit) as unknown as ChatMessageRow[];
     return rows
       .slice()
       .reverse()
@@ -467,34 +560,94 @@ export class StateRepository {
 
   getChatMessage(id: number): ChatMessage | undefined {
     const row = this.db
-      .prepare("SELECT id, role, text, at, metadata_json FROM chat_messages WHERE id = ?")
-      .get(id) as
-      | {
-          id: number;
-          role: ChatMessage["role"];
-          text: string;
-          at: string;
-          metadata_json?: string | null;
-        }
-      | undefined;
+      .prepare(`
+        SELECT id, role, text, at, metadata_json, turn_id, source, status, model, session_id
+        FROM chat_messages WHERE id = ?
+      `)
+      .get(id) as ChatMessageRow | undefined;
     return row ? this.mapChatMessage(row) : undefined;
   }
 
-  saveChatSpeech(id: number, speech: ChatSpeech): ChatMessage | undefined {
-    const message = this.getChatMessage(id);
-    if (!message) {
-      return undefined;
+  clearChatMessages(): void {
+    this.db.exec("BEGIN");
+    try {
+      this.db.prepare("DELETE FROM chat_messages").run();
+      this.db.prepare("DELETE FROM conversation_tool_calls").run();
+      this.bumpConversationRevision();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    const metadata = {
-      trackSuggestion: message.trackSuggestion,
-      speech
-    };
-    this.db.prepare("UPDATE chat_messages SET metadata_json = ? WHERE id = ?").run(JSON.stringify(metadata), id);
-    return { ...message, speech };
   }
 
-  clearChatMessages(): void {
-    this.db.prepare("DELETE FROM chat_messages").run();
+  getConversationRevision(): number {
+    return this.getAppState<number>("conversation_revision") ?? 0;
+  }
+
+  saveConversationToolCall(input: {
+    commandId: string;
+    turnId: string;
+    toolName: string;
+    request: unknown;
+    result: unknown;
+    createdAt: string;
+  }): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO conversation_tool_calls(
+        command_id, turn_id, tool_name, request_json, result_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      input.commandId,
+      input.turnId,
+      input.toolName,
+      JSON.stringify(input.request),
+      JSON.stringify(input.result),
+      input.createdAt
+    );
+  }
+
+  getConversationToolCall(commandId: string): {
+    commandId: string;
+    turnId: string;
+    toolName: string;
+    request: unknown;
+    result: unknown;
+    createdAt: string;
+    consumedAt?: string;
+  } | undefined {
+    const row = this.db.prepare(`
+      SELECT command_id, turn_id, tool_name, request_json, result_json, created_at, consumed_at
+      FROM conversation_tool_calls WHERE command_id = ?
+    `).get(commandId) as {
+      command_id: string;
+      turn_id: string;
+      tool_name: string;
+      request_json: string;
+      result_json: string;
+      created_at: string;
+      consumed_at: string | null;
+    } | undefined;
+    if (!row) {
+      return undefined;
+    }
+    return {
+      commandId: row.command_id,
+      turnId: row.turn_id,
+      toolName: row.tool_name,
+      request: parseJson(row.request_json, undefined),
+      result: parseJson(row.result_json, undefined),
+      createdAt: row.created_at,
+      ...(row.consumed_at ? { consumedAt: row.consumed_at } : {})
+    };
+  }
+
+  consumeConversationToolCall(commandId: string, at = new Date().toISOString()): boolean {
+    const result = this.db.prepare(`
+      UPDATE conversation_tool_calls SET consumed_at = ?
+      WHERE command_id = ? AND consumed_at IS NULL
+    `).run(at, commandId);
+    return Number(result.changes) > 0;
   }
 
   upsertChatMemory(input: {
@@ -570,28 +723,23 @@ export class StateRepository {
     `).run(limit);
   }
 
-  private mapChatMessage(row: {
-    id: number;
-    role: ChatMessage["role"];
-    text: string;
-    at: string;
-    metadata_json?: string | null;
-  }): ChatMessage {
+  private mapChatMessage(row: ChatMessageRow): ChatMessage {
     const metadata = parseJson<{
       trackSuggestion?: ChatMessage["trackSuggestion"];
-      speech?: ChatSpeech;
     }>(row.metadata_json ?? null, {});
     const message: ChatMessage = {
       id: row.id,
       role: row.role,
       text: row.text,
-      at: row.at
+      at: row.at,
+      source: row.source === "voice" ? "voice" : "text",
+      status: row.status === "interrupted" || row.status === "failed" ? row.status : "completed"
     };
+    if (row.turn_id) message.turnId = row.turn_id;
+    if (row.model) message.model = row.model;
+    if (row.session_id) message.sessionId = row.session_id;
     if (metadata.trackSuggestion) {
       message.trackSuggestion = metadata.trackSuggestion;
-    }
-    if (metadata.speech) {
-      message.speech = metadata.speech;
     }
     return message;
   }
@@ -604,6 +752,12 @@ export class StateRepository {
       .run(key, JSON.stringify(value));
   }
 
+  private bumpConversationRevision(): number {
+    const revision = this.getConversationRevision() + 1;
+    this.saveAppState("conversation_revision", revision);
+    return revision;
+  }
+
   private getAppState<T>(key: string): T | undefined {
     const row = this.db
       .prepare("SELECT value_json FROM app_state WHERE key = ?")
@@ -613,6 +767,19 @@ export class StateRepository {
     }
     return parseJson<T | undefined>(row.value_json, undefined);
   }
+}
+
+interface ChatMessageRow {
+  id: number;
+  role: ChatMessage["role"];
+  text: string;
+  at: string;
+  metadata_json?: string | null;
+  turn_id: string | null;
+  source: string;
+  status: string;
+  model: string | null;
+  session_id: string | null;
 }
 
 interface ChatMemoryRow {

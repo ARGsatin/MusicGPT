@@ -7,7 +7,7 @@
 :root {
   --bg: #070a14;
   --bg-raise: #0d1224;
-  --panel: rgba(15, 20, 40, 0.62);
+  --panel: rgba(15, 20, 40, 0.92);
   --panel-strong: rgba(19, 25, 48, 0.88);
   --line: rgba(148, 163, 255, 0.14);
   --line-strong: rgba(148, 163, 255, 0.28);
@@ -139,18 +139,18 @@ select:focus-visible {
 
 .band-a {
   background: linear-gradient(100deg, var(--aurora-1), transparent 55%);
-  animation: aurora-drift-a 26s ease-in-out infinite alternate;
+  transform: translateX(-54%) rotate(-2deg) scaleY(1.12);
 }
 
 .band-b {
   background: linear-gradient(100deg, transparent 30%, var(--aurora-2) 65%, transparent);
-  animation: aurora-drift-b 32s ease-in-out infinite alternate;
+  transform: translateX(-56%) rotate(-1deg) scaleY(1.1);
 }
 
 .band-c {
   background: linear-gradient(100deg, transparent 45%, var(--aurora-3) 80%, transparent);
   opacity: 0.34;
-  animation: aurora-drift-c 38s ease-in-out infinite alternate;
+  transform: translateX(-50%) scaleY(1.03);
 }
 
 /* 天气驱动的极光变色 */
@@ -190,21 +190,6 @@ select:focus-visible {
   --aurora-3: #fbbf24;
 }
 
-@keyframes aurora-drift-a {
-  from { transform: translateX(-58%) rotate(-6deg) scaleY(1); }
-  to { transform: translateX(-46%) rotate(4deg) scaleY(1.25); }
-}
-
-@keyframes aurora-drift-b {
-  from { transform: translateX(-52%) rotate(3deg); }
-  to { transform: translateX(-60%) rotate(-5deg) scaleY(1.2); }
-}
-
-@keyframes aurora-drift-c {
-  from { transform: translateX(-44%) rotate(2deg) scaleY(0.9); }
-  to { transform: translateX(-56%) rotate(-3deg) scaleY(1.15); }
-}
-
 .aurora-dust span {
   position: absolute;
   left: calc(var(--x, 50) * 1%);
@@ -214,7 +199,7 @@ select:focus-visible {
   border-radius: 999px;
   background: rgba(190, 210, 255, 0.5);
   box-shadow: 0 0 8px rgba(140, 180, 255, 0.6);
-  animation: dust-float var(--dur, 9s) ease-in-out var(--delay, 0s) infinite alternate;
+  opacity: 0.62;
 }
 
 .aurora-dust span:nth-child(1) { --x: 8; --y: 22; --size: 2px; --dur: 8s; }
@@ -235,11 +220,6 @@ select:focus-visible {
 .aurora-dust span:nth-child(16) { --x: 68; --y: 88; --size: 2px; --dur: 12s; --delay: -3s; }
 .aurora-dust span:nth-child(17) { --x: 88; --y: 30; --size: 2px; --dur: 9s; --delay: -1s; }
 .aurora-dust span:nth-child(18) { --x: 96; --y: 52; --size: 3px; --dur: 10s; --delay: -5s; }
-
-@keyframes dust-float {
-  from { transform: translateY(0); opacity: 0.35; }
-  to { transform: translateY(-26px); opacity: 0.9; }
-}
 
 .aurora-grain {
   position: absolute;
@@ -329,12 +309,6 @@ select:focus-visible {
 .onair-badge.is-live i {
   background: var(--danger);
   box-shadow: 0 0 10px var(--danger);
-  animation: onair-pulse 1.6s ease-in-out infinite;
-}
-
-@keyframes onair-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.8); }
 }
 
 .ribbon-clock {
@@ -457,8 +431,7 @@ select:focus-visible {
   stroke: var(--aurora-1);
   stroke-width: 3.5;
   stroke-linecap: round;
-  filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.65));
-  transition: stroke-dashoffset 400ms linear;
+  transition: stroke-dashoffset 180ms linear;
 }
 
 .platter {
@@ -481,16 +454,12 @@ select:focus-visible {
   box-shadow:
     inset 0 0 0 1px rgba(148, 163, 255, 0.12),
     inset 0 0 40px rgba(0, 0, 0, 0.65);
-  animation: vinyl-spin 7s linear infinite;
-  animation-play-state: paused;
+  transform: rotate(0deg);
+  transition: transform 420ms ease;
 }
 
 .vinyl.is-spinning {
-  animation-play-state: running;
-}
-
-@keyframes vinyl-spin {
-  to { transform: rotate(360deg); }
+  transform: rotate(8deg);
 }
 
 .vinyl-grooves {
@@ -694,26 +663,20 @@ select:focus-visible {
   transform-origin: bottom;
   transform: scaleY(0.18);
   opacity: 0.4;
-  transition: opacity 300ms ease;
+  transition: opacity 300ms ease, transform 300ms ease;
 }
 
 .equalizer.is-live i {
   opacity: 0.95;
-  animation: eq-bounce 900ms ease-in-out infinite alternate;
 }
 
-.equalizer.is-live i:nth-child(1) { animation-duration: 780ms; }
-.equalizer.is-live i:nth-child(2) { animation-duration: 1020ms; animation-delay: -140ms; }
-.equalizer.is-live i:nth-child(3) { animation-duration: 860ms; animation-delay: -260ms; }
-.equalizer.is-live i:nth-child(4) { animation-duration: 1140ms; animation-delay: -80ms; }
-.equalizer.is-live i:nth-child(5) { animation-duration: 920ms; animation-delay: -320ms; }
-.equalizer.is-live i:nth-child(6) { animation-duration: 1080ms; animation-delay: -200ms; }
-.equalizer.is-live i:nth-child(7) { animation-duration: 840ms; animation-delay: -40ms; }
-
-@keyframes eq-bounce {
-  from { transform: scaleY(0.16); }
-  to { transform: scaleY(1); }
-}
+.equalizer.is-live i:nth-child(1) { transform: scaleY(0.42); }
+.equalizer.is-live i:nth-child(2) { transform: scaleY(0.78); }
+.equalizer.is-live i:nth-child(3) { transform: scaleY(0.58); }
+.equalizer.is-live i:nth-child(4) { transform: scaleY(1); }
+.equalizer.is-live i:nth-child(5) { transform: scaleY(0.68); }
+.equalizer.is-live i:nth-child(6) { transform: scaleY(0.86); }
+.equalizer.is-live i:nth-child(7) { transform: scaleY(0.5); }
 
 /* 歌词悬浮条 */
 
@@ -1157,7 +1120,6 @@ input[type="range"]::-moz-range-track {
   border-radius: var(--radius);
   border: 1px solid var(--line);
   background: var(--panel);
-  backdrop-filter: blur(18px);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -1244,6 +1206,38 @@ input[type="range"]::-moz-range-track {
   border: 1px dashed var(--line-strong);
   color: var(--dim);
   font-size: 11px;
+}
+
+.realtime-voice-button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(34, 211, 238, 0.08);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.realtime-voice-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 22px rgba(34, 211, 238, 0.16);
+}
+
+.realtime-voice-button.is-active {
+  color: #fff;
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--aurora-1), var(--aurora-2));
+  box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.1);
+}
+
+.realtime-voice-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .memory-toggle {
@@ -1392,11 +1386,7 @@ input[type="range"]::-moz-range-track {
   vertical-align: -2px;
   border-radius: 2px;
   background: var(--aurora-1);
-  animation: caret-blink 900ms steps(2) infinite;
-}
-
-@keyframes caret-blink {
-  50% { opacity: 0; }
+  opacity: 0.85;
 }
 
 /* 推荐歌曲卡片 */
@@ -1692,11 +1682,24 @@ input[type="range"]::-moz-range-track {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: rgba(7, 10, 20, 0.45);
+  cursor: pointer;
+  text-align: left;
   transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.message-voice-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  margin-top: 0.38rem;
+  color: var(--muted-text, #8c8c98);
+  font-size: 0.68rem;
+  line-height: 1;
 }
 
 .queue-card:hover {
@@ -1706,6 +1709,11 @@ input[type="range"]::-moz-range-track {
 
 .queue-card.is-explore {
   border-style: dashed;
+}
+
+.queue-card:disabled {
+  cursor: wait;
+  opacity: 0.72;
 }
 
 .queue-index {
@@ -1920,19 +1928,22 @@ input[type="range"]::-moz-range-track {
   bottom: 0;
   z-index: 20;
   border-top: 1px solid var(--line);
-  background: rgba(7, 10, 20, 0.82);
-  backdrop-filter: blur(12px);
+  background: rgba(7, 10, 20, 0.96);
   overflow: hidden;
   padding: 9px 0;
+  contain: paint;
 }
 
 .ticker-track {
   display: flex;
   width: max-content;
+  transform: translate3d(0, 0, 0);
   animation: ticker-scroll 42s linear infinite;
+  will-change: transform;
 }
 
 .ticker-track span {
+  flex: 0 0 auto;
   padding-right: 60px;
   font-size: 11px;
   letter-spacing: 0.14em;
@@ -1941,11 +1952,31 @@ input[type="range"]::-moz-range-track {
 }
 
 @keyframes ticker-scroll {
-  to { transform: translateX(-50%); }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
 }
 
 .ticker-static {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  border: 0;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  list-style: none;
+  padding: 0;
+  white-space: nowrap;
+}
+
+.ticker-static li {
+  flex: 0 0 auto;
+}
+
+.ticker-static .ticker-error {
+  color: var(--danger);
 }
 
 /* ============ 移动端导航 ============ */
@@ -2076,7 +2107,7 @@ input[type="range"]::-moz-range-track {
     border-radius: 20px;
     border: 1px solid var(--line-strong);
     background: rgba(10, 14, 29, 0.88);
-    backdrop-filter: blur(16px);
+    background: rgba(10, 14, 29, 0.97);
     box-shadow: 0 16px 40px rgba(2, 6, 23, 0.6);
   }
 
@@ -2153,6 +2184,12 @@ input[type="range"]::-moz-range-track {
 
   .ticker-static {
     display: flex;
+    position: static;
+    width: auto;
+    height: auto;
+    clip: auto;
+    clip-path: none;
+    overflow: visible;
     flex-wrap: wrap;
     gap: 6px 18px;
     list-style: none;
@@ -2160,6 +2197,7 @@ input[type="range"]::-moz-range-track {
     padding: 0 16px;
     font-size: 11px;
     color: var(--dim);
+    white-space: normal;
   }
 
   .ticker-static .ticker-error {

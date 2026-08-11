@@ -9,6 +9,8 @@ import type {
   FavoriteResponse,
   FeedbackRequest,
   ImportNcmResponse,
+  MusicCommandRequest,
+  MusicCommandResult,
   RecommendationImportResponse,
   NowPlayingState,
   NcmImportErrorCode,
@@ -18,18 +20,20 @@ import type {
   TasteProfile,
   Track,
   TrackLyrics,
-  TrackSuggestion
+  TrackSuggestion,
+  VoiceTurnCompleteRequest,
+  VoiceTurnStartRequest
 } from "@musicgpt/shared";
 import type { AiDjAssistant, AiDjContext, AiDjIntent, TrackSelection } from "./aiDjAssistant.js";
-import { fallbackChatReply, fallbackClassify, fallbackComment } from "./aiDjAssistant.js";
-import { ChatMemoryService } from "./chatMemoryService.js";
+import { fallbackClassify } from "./aiDjAssistant.js";
+import { ConversationKernel } from "./conversationKernel.js";
 import { DjBrain } from "./djBrain.js";
 import { EnvironmentService, isWeatherFresh } from "./environmentService.js";
 import { NcmConnector, NcmImportError } from "./ncmConnector.js";
+import { MusicCommandModule } from "./musicCommand.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
-import { SpeechTextSegmenter } from "./speechSegmenter.js";
 import { TasteEngine } from "./tasteEngine.js";
 import { currentPeriod } from "./time.js";
 import {
@@ -39,7 +43,6 @@ import {
   tagsFromContextText,
   weatherLabel
 } from "./trackTags.js";
-import { prepareSpeechText, TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
 const PLAN_WINDOW_SIZE = 10;
@@ -47,10 +50,16 @@ const QUEUE_TARGET_SIZE = 10;
 const QUEUE_REFILL_THRESHOLD = 6;
 const IMPORT_RETRY_INTERVAL_MS = 60_000;
 const CHAT_HISTORY_DISPLAY_LIMIT = 100;
+const AI_OPEN_ENDED_REPLY_UNCONFIGURED =
+  "尚未连接 DeepSeek/OpenAI，当前无法生成开放式回复。";
+const AI_OPEN_ENDED_REPLY_FAILED =
+  "DeepSeek 暂时没能生成可信的回复，请重试。";
+const AI_COMMENT_REPLY_FAILED =
+  "DeepSeek 暂时没能生成可信的点评；这次不使用本地套话。";
 export const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
-  voice: "zh-CN-XiaoxiaoNeural"
+  voice: "marin"
 };
 
 type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocation"> & {
@@ -58,9 +67,7 @@ type EnvironmentRuntime = Pick<EnvironmentService, "getContext" | "updateLocatio
 };
 
 export interface ChatStreamCallbacks {
-  synthesizeSpeech: boolean;
   onTextDelta(delta: string): void;
-  onSpeech(segment: { sequence: number; text: string; audioUrl: string }): void;
   onResult(response: ChatResponse): void;
 }
 
@@ -73,7 +80,9 @@ export class RadioOrchestrator {
   private lastImportAt: string | undefined;
   private lastImportError: string | undefined;
   private lastImportErrorCode: NcmImportErrorCode | undefined;
-  private readonly chatMemoryService: ChatMemoryService;
+  private realtimeLastError: string | undefined;
+  private readonly conversation: ConversationKernel;
+  private readonly musicCommands: MusicCommandModule;
 
   constructor(
     private readonly repo: StateRepository,
@@ -82,19 +91,50 @@ export class RadioOrchestrator {
     private readonly planner: RadioPlanner,
     private readonly djBrain: DjBrain,
     private readonly aiDjAssistant: AiDjAssistant,
-    private readonly ttsPipeline: TtsPipeline,
     private readonly wsHub: WsHub,
     private readonly djBroadcastInterval: number,
     private readonly memoryTurns: number,
     private readonly importRetryIntervalMs: number = IMPORT_RETRY_INTERVAL_MS,
     private readonly environmentService: EnvironmentRuntime = new EnvironmentService(),
-    private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm)
+    private readonly recommendationImporter: RecommendationImporter = new RecommendationImporter(repo, ncm),
+    private readonly realtimeConversationMode: "unified" | "legacy" = "unified"
   ) {
-    const extractor = aiDjAssistant.extractMemories
-      ? aiDjAssistant.extractMemories.bind(aiDjAssistant)
-      : undefined;
-    this.chatMemoryService = new ChatMemoryService(repo, extractor, (memories) => {
-      this.wsHub.broadcast({ event: "chat_memory_updated", data: { memories } });
+    this.conversation = new ConversationKernel(repo, aiDjAssistant, wsHub, memoryTurns);
+    this.musicCommands = new MusicCommandModule(repo, {
+      getNow: () => this.state,
+      classify: async (request) => {
+        const context = this.buildAiContext(request);
+        return this.classifySafely(request, context);
+      },
+      searchSongs: (query) => this.ncm.searchSongs(query),
+      playTrack: (track, reason) => this.playSuggestedTrack(track, reason),
+      setFavorite: async (trackId, favorite) => {
+        await this.setFavorite(trackId, favorite);
+      },
+      replay: async (trackId) => {
+        await this.handleFeedback({ type: "replay", trackId });
+      },
+      handleIntent: async (request, intent, mode) => {
+        const context = this.buildAiContext(request);
+        const response = await this.handleChatIntent(request, context, intent);
+        const suggestion = response.messages[0]?.trackSuggestion;
+        if (
+          mode === "voice_direct" &&
+          suggestion &&
+          (response.action === "play_by_description" || response.action === "play_atmosphere")
+        ) {
+          const now = await this.playSuggestedTrack(suggestion.track, suggestion.reason);
+          return { action: response.action, outcome: "executed", summary: response.reply, now };
+        }
+        const executed = ["skip", "pause", "resume", "replan"].includes(response.action);
+        return {
+          action: response.action,
+          outcome: executed ? "executed" : "answered",
+          summary: response.reply,
+          now: response.now,
+          ...(suggestion ? { suggestion } : {})
+        };
+      }
     });
   }
 
@@ -135,7 +175,7 @@ export class RadioOrchestrator {
 
   async close(): Promise<void> {
     this.stopImportRetryLoop();
-    await this.chatMemoryService.waitForIdle();
+    await this.conversation.waitForIdle();
   }
 
   async importFromNcm(): Promise<number> {
@@ -196,69 +236,61 @@ export class RadioOrchestrator {
   }
 
   async updateDjSettings(settings: DjSettings): Promise<DjSettings> {
+    const requestedVoice = settings.voice.trim();
     const normalized: DjSettings = {
       tone: settings.tone,
       voiceGender: settings.voiceGender,
-      voice: settings.voice.trim() || DEFAULT_DJ_SETTINGS.voice
+      voice: !requestedVoice || requestedVoice.includes("Neural")
+        ? DEFAULT_DJ_SETTINGS.voice
+        : requestedVoice
     };
     this.repo.saveDjSettings(normalized);
-    this.ttsPipeline.setVoice(normalized.voice);
     await this.broadcastSystemStatus();
     return normalized;
   }
 
   getChatHistory(): { messages: ChatResponse["messages"] } {
-    return { messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT) };
+    return this.conversation.getHistory();
+  }
+
+  startVoiceTurn(input: VoiceTurnStartRequest) {
+    return this.conversation.startVoiceTurn(input);
+  }
+
+  completeVoiceTurn(turnId: string, input: VoiceTurnCompleteRequest) {
+    return this.conversation.completeVoiceTurn(turnId, input);
+  }
+
+  buildRealtimeContext(sessionId: string, baselineRevision?: number) {
+    const taste = this.repo.getTasteProfile();
+    return this.conversation.buildRealtimeContext({
+      sessionId,
+      ...(baselineRevision !== undefined ? { baselineRevision } : {}),
+      now: this.state,
+      ...(taste ? { taste } : {}),
+      environment: this.getEnvironment()
+    });
+  }
+
+  executeMusicCommand(request: MusicCommandRequest): Promise<MusicCommandResult> {
+    return this.musicCommands.execute(request);
   }
 
   getChatMemories(): { memories: ChatMemory[] } {
-    return { memories: this.chatMemoryService.list() };
+    return this.conversation.getMemories();
   }
 
   deleteChatMemory(memoryId: number): boolean {
-    return this.chatMemoryService.delete(memoryId);
+    return this.conversation.deleteMemory(memoryId);
   }
 
   clearChatMemories(): { ok: true; memories: [] } {
-    this.chatMemoryService.clear();
+    this.conversation.clearMemories();
     return { ok: true, memories: [] };
   }
 
-  async synthesizeChatMessage(messageId: number): Promise<
-    | {
-        status: "ok";
-        messageId: number;
-        audioUrl: string;
-        segments: NonNullable<ChatResponse["messages"][number]["speech"]>["segments"];
-      }
-    | { status: "not_found" | "not_assistant" | "unavailable" }
-  > {
-    const message = this.repo.getChatMessage(messageId);
-    if (!message) {
-      return { status: "not_found" };
-    }
-    if (message.role !== "assistant") {
-      return { status: "not_assistant" };
-    }
-    const speech = await this.ttsPipeline.synthesizeSegments(message.text);
-    if (!speech.audioUrl || speech.segments.length === 0) {
-      return { status: "unavailable" };
-    }
-    this.repo.saveChatSpeech(messageId, {
-      audioUrl: speech.audioUrl,
-      profileKey: speech.profileKey,
-      segments: speech.segments
-    });
-    return {
-      status: "ok",
-      messageId,
-      audioUrl: speech.audioUrl,
-      segments: speech.segments
-    };
-  }
-
   clearChatHistory(): { ok: true; messages: [] } {
-    this.repo.clearChatMessages();
+    this.conversation.clearHistory();
     return { ok: true, messages: [] };
   }
 
@@ -270,7 +302,9 @@ export class RadioOrchestrator {
       aiDjConfigured: aiDjStatus.configured,
       aiDjProvider: aiDjStatus.provider,
       trackStatsCount: this.repo.getTrackStatsCount(),
-      queueLength: this.state.queue.length
+      queueLength: this.state.queue.length,
+      realtimeConversationMode: this.realtimeConversationMode,
+      inputTranscriptionEnabled: this.realtimeConversationMode === "unified"
     };
     if (aiDjStatus.model) {
       status.aiDjModel = aiDjStatus.model;
@@ -290,9 +324,17 @@ export class RadioOrchestrator {
     if (this.lastImportErrorCode) {
       status.lastImportErrorCode = this.lastImportErrorCode;
     }
+    if (this.realtimeLastError) {
+      status.realtimeLastError = this.realtimeLastError;
+    }
     status.environment = this.getEnvironment();
     status.djSettings = this.getDjSettings();
     return status;
+  }
+
+  async reportRealtimeError(code: string): Promise<void> {
+    this.realtimeLastError = code.trim().slice(0, 200);
+    await this.broadcastSystemStatus();
   }
 
   async refreshTasteProfile(): Promise<TasteProfile> {
@@ -367,10 +409,19 @@ export class RadioOrchestrator {
     this.state.queue.unshift({
       track: normalizedTrack,
       score: 0.99,
-      reason: reason?.trim() || `Requested from GPT DJ: ${normalizedTrack.title}`,
+      reason: reason?.trim() || `用户点播 · ${normalizedTrack.title}`,
       source: "chat_search",
       bucket: "explore"
     });
+    return this.nextTrack();
+  }
+
+  async playQueuedTrack(trackId: number): Promise<NowPlayingState | undefined> {
+    const queueIndex = this.state.queue.findIndex((item) => item.track.id === trackId);
+    if (queueIndex < 0) {
+      return undefined;
+    }
+    this.state.queue.splice(0, queueIndex);
     return this.nextTrack();
   }
 
@@ -438,198 +489,39 @@ export class RadioOrchestrator {
     return { favorite: this.repo.isTrackFavorite(trackId), taste };
   }
 
-  async handleChat(message: string): Promise<ChatResponse> {
-    this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext(message);
-    const intent = await this.classifySafely(message, context);
-    const response = await this.handleChatIntent(message, context, intent);
-    this.chatMemoryService.enqueueCapture(message, response.reply);
-    return response;
+  async handleChat(message: string, turnId?: string): Promise<ChatResponse> {
+    const model = this.aiDjAssistant.status().model;
+    return this.conversation.respondText(
+      {
+        message,
+        now: this.state,
+        ...(turnId ? { turnId } : {}),
+        ...(model ? { model } : {})
+      },
+      async () => {
+        const context = this.buildAiContext(message);
+        const intent = await this.classifySafely(message, context);
+        const response = await this.handleChatIntent(message, context, intent);
+        return {
+          action: response.action,
+          reply: response.reply,
+          now: response.now,
+          ...(response.messages[0]?.trackSuggestion
+            ? { trackSuggestion: response.messages[0].trackSuggestion }
+            : {})
+        };
+      }
+    );
   }
 
-  async handleChatStream(message: string, callbacks: ChatStreamCallbacks): Promise<ChatResponse> {
-    this.repo.addChatMessage({ role: "user", text: message, at: new Date().toISOString() });
-    const context = this.buildAiContext(message);
-    const intent = await this.classifySafely(message, context);
-    const segmenter = new SpeechTextSegmenter({ minSoftBreakChars: 16, maxChars: 80 });
-    let speechSequence = 0;
-    let speechWork = Promise.resolve();
-
-    const queueSpeech = (segments: string[]) => {
-      if (!callbacks.synthesizeSpeech) {
-        return;
-      }
-      for (const segment of segments) {
-        speechWork = speechWork.then(async () => {
-          const speech = await this.ttsPipeline.synthesizeText(segment);
-          if (speech.audioUrl) {
-            callbacks.onSpeech({
-              sequence: speechSequence,
-              text: segment,
-              audioUrl: speech.audioUrl
-            });
-            speechSequence += 1;
-          }
-        }).catch(() => undefined);
-      }
-    };
-
-    const emitText = (delta: string) => {
-      if (!delta) {
-        return;
-      }
-      callbacks.onTextDelta(delta);
-      queueSpeech(segmenter.push(delta));
-    };
-
-    const streamReply = async (
-      stream: AsyncIterable<string>,
-      fallback: string,
-      action: ChatResponse["action"],
-      initialText = "",
-      trackSuggestion?: TrackSuggestion
-    ): Promise<ChatResponse> => {
-      let generatedText = "";
-      if (initialText) {
-        emitText(initialText);
-      }
-      try {
-        for await (const delta of stream) {
-          generatedText += delta;
-          emitText(delta);
-        }
-      } catch (error) {
-        if (!generatedText) {
-          const notice = aiFallbackNotice(this.aiDjAssistant.status().provider, error, fallback);
-          callbacks.onTextDelta(notice);
-          queueSpeech(segmenter.push(fallback));
-          generatedText = notice;
-        }
-      }
-      if (!generatedText) {
-        generatedText = fallback;
-        emitText(generatedText);
-      }
-      queueSpeech(segmenter.finish());
-      return this.reply(
-        action,
-        `${initialText}${generatedText}`,
-        this.state,
-        trackSuggestion
-      );
-    };
-
-    let response: ChatResponse;
-    const aiConfigured = this.aiDjAssistant.status().configured;
-    if (intent.type === "chat" && aiConfigured && this.aiDjAssistant.chatStream) {
-      response = await streamReply(
-        this.aiDjAssistant.chatStream(message, context),
-        fallbackChatReply(message, context),
-        "noop"
-      );
-    } else if (
-      intent.type === "comment_current" &&
-      this.state.track &&
-      aiConfigured &&
-      this.aiDjAssistant.commentCurrentStream
-    ) {
-      response = await streamReply(
-        this.aiDjAssistant.commentCurrentStream(context),
-        fallbackComment(this.state.track),
-        "comment_current"
-      );
-    } else if (
-      intent.type === "play_specific" &&
-      aiConfigured &&
-      this.aiDjAssistant.commentTrackStream
-    ) {
-      const query = intent.searchQuery?.trim() || intent.query.trim();
-      const target = (await this.ncm.searchSongs(query))[0];
-      if (!target) {
-        response = this.reply(
-          "noop",
-          `唔，这次没搜到《${query}》～换个歌名或歌手告诉我，我再帮你找找！`,
-          this.state
-        );
-        callbacks.onTextDelta(response.reply);
-        queueSpeech(segmenter.push(response.reply));
-        queueSpeech(segmenter.finish());
-      } else {
-        const purpose = `direct song request: ${query}`;
-        const prefix = `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n`;
-        response = await streamReply(
-          this.aiDjAssistant.commentTrackStream(target, context, purpose),
-          fallbackComment(target),
-          "play_specific",
-          prefix,
-          this.createTrackSuggestion(target, purpose)
-        );
-      }
-    } else if (
-      intent.type === "play_by_description" &&
-      aiConfigured &&
-      this.aiDjAssistant.commentTrackStream
-    ) {
-      const local = this.findLocalCandidates(intent.description);
-      let candidates = local.map((candidate) => candidate.track);
-      if ((local[0]?.score ?? 0) < 0.35) {
-        const searchQuery = intent.searchQuery?.trim() || intent.description;
-        const remote = await this.ncm.searchSongs(searchQuery).catch(() => []);
-        candidates = dedupeTracks([...candidates, ...remote]).slice(0, 12);
-      }
-      if (candidates.length === 0) {
-        response = this.reply(
-          "noop",
-          "这次还没找到特别合适的歌呀。再给我一点关键词吧，比如年代、声线、节奏或心情～",
-          this.state
-        );
-        callbacks.onTextDelta(response.reply);
-        queueSpeech(segmenter.push(response.reply));
-        queueSpeech(segmenter.finish());
-      } else {
-        const selection = await this.aiDjAssistant
-          .selectTrack(intent.description, candidates, context)
-          .catch((): TrackSelection => ({
-            trackId: candidates[0]?.id,
-            reason: "候选里它最贴近这次描述。"
-          }));
-        const target =
-          candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
-        if (!target) {
-          response = this.reply(
-            "noop",
-            "这次还没找到特别合适的歌呀～再给我一点关键词，我继续帮你挑！",
-            this.state
-          );
-          callbacks.onTextDelta(response.reply);
-          queueSpeech(segmenter.push(response.reply));
-          queueSpeech(segmenter.finish());
-        } else {
-          const purpose =
-            `request description: ${intent.description}; selection reason: ${selection.reason}`;
-          const suggestionReason =
-            selection.reason || `request description: ${intent.description}`;
-          const prefix =
-            `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n`;
-          response = await streamReply(
-            this.aiDjAssistant.commentTrackStream(target, context, purpose),
-            fallbackComment(target),
-            "play_by_description",
-            prefix,
-            this.createTrackSuggestion(target, suggestionReason)
-          );
-        }
-      }
-    } else {
-      response = await this.handleChatIntent(message, context, intent);
-      callbacks.onTextDelta(response.reply);
-      queueSpeech(segmenter.push(prepareSpeechText(response.reply)));
-      queueSpeech(segmenter.finish());
-    }
-
+  async handleChatStream(
+    message: string,
+    callbacks: ChatStreamCallbacks,
+    turnId?: string
+  ): Promise<ChatResponse> {
+    const response = await this.handleChat(message, turnId);
+    callbacks.onTextDelta(response.reply);
     callbacks.onResult(response);
-    this.chatMemoryService.enqueueCapture(message, response.reply);
-    await speechWork;
     return response;
   }
 
@@ -643,12 +535,12 @@ export class RadioOrchestrator {
         if (this.state.track) {
           await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
         }
-        return this.reply("skip", "好呀，下一首来啦～", await this.nextTrack());
+        return this.reply("skip", "已切到下一首。", await this.nextTrack());
       case "pause":
         this.state.paused = true;
         this.repo.saveNowPlaying(this.state);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("pause", "好哦，先帮你暂停啦，想继续时喊我一声就好～", this.state);
+        return this.reply("pause", "已暂停播放。", this.state);
       case "resume":
         this.state.paused = false;
         if (!this.state.track) {
@@ -656,12 +548,12 @@ export class RadioOrchestrator {
         }
         this.repo.saveNowPlaying(this.state);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("resume", "继续播放啦，接着听吧～", this.state);
+        return this.reply("resume", "已继续播放。", this.state);
       case "replan":
         this.desiredMood = intent.desiredMood;
         await this.nextTrack(true);
         this.wsHub.broadcast({ event: "now_playing_updated", data: this.state });
-        return this.reply("replan", `好呀，已经换成 ${intent.desiredMood} 风格啦，我继续按这个方向放歌～`, this.state);
+        return this.reply("replan", `已切换为 ${intent.desiredMood} 风格。`, this.state);
       case "comment_current":
         return this.commentCurrentTrack(context);
       case "play_specific":
@@ -676,8 +568,8 @@ export class RadioOrchestrator {
         const reply = aiStatus.configured
           ? await this.aiDjAssistant
               .chat(message, context)
-              .catch((error) => aiFallbackNotice(aiStatus.provider, error, fallbackChatReply(message, context)))
-          : aiNotConfiguredNotice(fallbackChatReply(message, context));
+              .catch(() => AI_OPEN_ENDED_REPLY_FAILED)
+          : AI_OPEN_ENDED_REPLY_UNCONFIGURED;
         return this.reply("noop", reply, this.state);
       }
     }
@@ -714,12 +606,12 @@ export class RadioOrchestrator {
 
   private buildAiContext(message = ""): AiDjContext {
     return {
-      messages: this.repo.getRecentMessages(this.chatContextLimit()).map(({ role, text, at }) => ({
+      messages: this.conversation.recentContextMessages(this.chatContextLimit()).map(({ role, text, at }) => ({
         role,
         text,
         at
       })),
-      memories: this.chatMemoryService.relevantTo(message),
+      memories: this.conversation.relevantMemories(message),
       nowTrack: this.state.track,
       queue: this.state.queue.slice(0, 10),
       taste: this.repo.getTasteProfile(),
@@ -738,16 +630,14 @@ export class RadioOrchestrator {
     const matches = await this.ncm.searchSongs(query);
     const target = matches[0];
     if (!target) {
-      return this.reply("noop", `唔，这次没搜到《${query}》～换个歌名或歌手告诉我，我再帮你找找！`, this.state);
+      return this.reply("noop", `没有搜到《${query}》，请换一个歌名或艺人。`, this.state);
     }
-    const comment = await this.aiDjAssistant
-      .commentTrack(target, this.buildAiContext(), `direct song request: ${query}`)
-      .catch(() => fallbackComment(target));
+    const reason = formatEvidence(["点歌", compactEvidence(query)]);
     return this.reply(
       "play_specific",
-      `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n${comment}`,
+      `找到《${target.title}》— ${formatArtists(target)}。`,
       this.state,
-      this.createTrackSuggestion(target, `direct song request: ${query}`)
+      this.createTrackSuggestion(target, reason)
     );
   }
 
@@ -767,31 +657,25 @@ export class RadioOrchestrator {
     if (candidates.length === 0) {
       return this.reply(
         "noop",
-        "这次还没找到特别合适的歌呀。再给我一点关键词吧，比如年代、声线、节奏或心情～",
+        "没有找到符合条件的歌曲，请补充年代、声线、节奏或心情等关键词。",
         this.state
       );
     }
 
     const selection = await this.aiDjAssistant
       .selectTrack(intent.description, candidates, context)
-      .catch((): TrackSelection => ({ trackId: candidates[0]?.id, reason: "候选里它最贴近这次描述。" }));
+      .catch((): TrackSelection => ({ trackId: candidates[0]?.id }));
     const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
     if (!target) {
-      return this.reply("noop", "这次还没找到特别合适的歌呀～再给我一点关键词，我继续帮你挑！", this.state);
+      return this.reply("noop", "没有找到符合条件的歌曲，请补充关键词。", this.state);
     }
 
-    const comment = await this.aiDjAssistant
-      .commentTrack(
-        target,
-        this.buildAiContext(),
-        `request description: ${intent.description}; selection reason: ${selection.reason}`
-      )
-      .catch(() => fallbackComment(target));
+    const reason = descriptionEvidence(intent.description, target);
     return this.reply(
       "play_by_description",
-      `我挑了《${target.title}》- ${target.artists.join(" / ")} 给你～想听的话，点一下卡片就好！\n${comment}`,
+      `${reason}，选了《${target.title}》— ${formatArtists(target)}。`,
       this.state,
-      this.createTrackSuggestion(target, selection.reason || `request description: ${intent.description}`)
+      this.createTrackSuggestion(target, reason)
     );
   }
 
@@ -816,7 +700,7 @@ export class RadioOrchestrator {
     if (candidates.length === 0) {
       return this.reply(
         "noop",
-        "现在的候选池还没准备好，我先保留时间和口味线索；同步网易云后再点一次氛围点歌就好啦～",
+        "候选曲库尚未准备好；同步网易云后可再次使用氛围点歌。",
         this.state
       );
     }
@@ -824,31 +708,34 @@ export class RadioOrchestrator {
     const selection = await this.aiDjAssistant
       .selectTrack(description, candidates, context)
       .catch((): TrackSelection => ({
-        trackId: candidates[0]?.id,
-        reason: plan[0]?.reason ?? "最贴近当前氛围。"
+        trackId: candidates[0]?.id
       }));
     const target = candidates.find((track) => track.id === selection.trackId) ?? candidates[0];
     if (!target) {
-      return this.reply("noop", "这次还没挑到合适的歌，我再换一批候选呀～", this.state);
+      return this.reply("noop", "当前候选中没有合适的歌曲，请稍后重试。", this.state);
     }
     const planItem = plan.find((item) => item.track.id === target.id);
-    const reason = [planItem?.reason, selection.reason].filter(Boolean).join("；");
-    const comment = await this.aiDjAssistant
-      .commentTrack(target, context, `current atmosphere: ${description}; ${reason}`)
-      .catch(() => fallbackComment(target));
+    const reason = atmosphereEvidence(
+      environment,
+      planItem?.reason,
+      this.desiredMood
+    );
     return this.reply(
       "play_atmosphere",
-      `现在是${description}，我挑了《${target.title}》- ${target.artists.join(" / ")}。\n${comment}`,
+      `${reason}，选了《${target.title}》— ${formatArtists(target)}。`,
       this.state,
-      this.createTrackSuggestion(target, reason || "匹配当前氛围")
+      this.createTrackSuggestion(target, reason)
     );
   }
 
   private async commentCurrentTrack(context: AiDjContext): Promise<ChatResponse> {
     if (!this.state.track) {
-      return this.reply("comment_current", "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！", this.state);
+      return this.reply("comment_current", "当前没有歌曲在播放，请先点一首。", this.state);
     }
-    const reply = await this.aiDjAssistant.commentCurrent(context).catch(() => fallbackComment(this.state.track!));
+    const aiStatus = this.aiDjAssistant.status();
+    const reply = aiStatus.configured
+      ? await this.aiDjAssistant.commentCurrent(context).catch(() => AI_COMMENT_REPLY_FAILED)
+      : AI_OPEN_ENDED_REPLY_UNCONFIGURED;
     return this.reply("comment_current", reply, this.state);
   }
 
@@ -948,6 +835,10 @@ export class RadioOrchestrator {
     if (!this.state.track) {
       return;
     }
+    if (this.conversation.hasActiveTurn()) {
+      return;
+    }
+    const trackId = this.state.track.id;
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const script = await this.djBrain.generate({
       profile,
@@ -955,11 +846,13 @@ export class RadioOrchestrator {
       upcoming: this.state.queue.slice(0, 3),
       settings: this.getDjSettings()
     });
-    const voiced = await this.ttsPipeline.synthesize(script);
-    this.state.djScript = voiced;
-    this.repo.saveDjScript(voiced);
-    this.wsHub.broadcast({ event: "dj_tts_ready", data: voiced });
     this.completedTracksSinceLastDj = 0;
+    if (!script || this.conversation.hasActiveTurn() || this.state.track?.id !== trackId) {
+      return;
+    }
+    this.state.djScript = script;
+    this.repo.saveDjScript(script);
+    this.wsHub.broadcast({ event: "dj_script_ready", data: script });
   }
 
   private startImportRetryLoop(): void {
@@ -1042,9 +935,14 @@ export class RadioOrchestrator {
   }
 
   private ensureDjSettings(): DjSettings {
-    const settings = this.repo.getDjSettings() ?? DEFAULT_DJ_SETTINGS;
+    const stored = this.repo.getDjSettings();
+    const settings = stored
+      ? {
+          ...stored,
+          voice: stored.voice.includes("Neural") ? DEFAULT_DJ_SETTINGS.voice : stored.voice
+        }
+      : DEFAULT_DJ_SETTINGS;
     this.repo.saveDjSettings(settings);
-    this.ttsPipeline.setVoice(settings.voice);
     return settings;
   }
 
@@ -1086,12 +984,11 @@ export class RadioOrchestrator {
     trackSuggestion?: TrackSuggestion
   ): ChatResponse {
     const message = { role: "assistant" as const, text: reply, at: new Date().toISOString() };
-    this.repo.addChatMessage(trackSuggestion ? { ...message, trackSuggestion } : message);
     return {
       action,
       reply,
       now,
-      messages: this.repo.getRecentMessages(CHAT_HISTORY_DISPLAY_LIMIT)
+      messages: [trackSuggestion ? { ...message, trackSuggestion } : message]
     };
   }
 }
@@ -1158,16 +1055,79 @@ function scoreTrackForDescription(entry: { track: Track; playCount: number }, de
   return score;
 }
 
-function aiNotConfiguredNotice(fallback: string): string {
-  return `DeepSeek 还没连接好（未检测到 DEEPSEEK_API_KEY 或 OPENAI_API_KEY），我先用本地 DJ 模式陪你聊～\n${fallback}`;
+function descriptionEvidence(description: string, track: Track): string {
+  const requestedTags = tagsFromContextText(description).map((tag) => tag.value);
+  const mood = track.moodTag && track.moodTag !== "unknown"
+    ? moodLabel(track.moodTag)
+    : undefined;
+  const evidence = [...requestedTags, mood].filter((value): value is string => Boolean(value));
+  if (evidence.length > 0) {
+    return formatEvidence(evidence);
+  }
+  return `条件「${compactEvidence(description)}」`;
 }
 
-function aiFallbackNotice(provider: string, error: unknown, fallback: string): string {
-  const label = provider === "deepseek" ? "DeepSeek" : "AI";
-  return `${label} 刚刚开了个小差，已经切到本地 DJ 模式啦：${summarizeAiError(error)}\n${fallback}`;
+function atmosphereEvidence(
+  environment: EnvironmentContext,
+  plannerReason: string | undefined,
+  desiredMood: string | undefined
+): string {
+  const plannerParts = plannerReason
+    ?.split(/\s*\+\s*/u)
+    .map((part) => part.trim())
+    .filter(Boolean) ?? [];
+  const fallbackParts = [
+    environment.weather === "unknown" ? undefined : weatherLabel(environment.weather),
+    periodLabel(environment.dayPeriod)
+  ].filter((value): value is string => Boolean(value));
+  const desired = desiredMood ? moodLabel(desiredMood) : undefined;
+  return formatEvidence([
+    ...(plannerParts.length > 0 ? plannerParts : fallbackParts),
+    ...(desired ? [desired] : [])
+  ]);
 }
 
-function summarizeAiError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").slice(0, 160);
+function formatEvidence(parts: string[]): string {
+  const seen = new Set<string>();
+  return parts
+    .map((part) => part.trim())
+    .filter((part) => {
+      if (!part || seen.has(part)) {
+        return false;
+      }
+      seen.add(part);
+      return true;
+    })
+    .slice(0, 4)
+    .join(" · ");
+}
+
+function compactEvidence(value: string): string {
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  const chars = [...normalized];
+  return chars.length <= 32 ? normalized : `${chars.slice(0, 32).join("")}…`;
+}
+
+function moodLabel(mood: string): string {
+  const labels: Record<string, string> = {
+    calm: "平静",
+    focus: "专注",
+    warm: "温暖",
+    night: "夜听",
+    energy: "高能",
+    nostalgia: "怀旧"
+  };
+  return labels[mood] ?? mood;
+}
+
+function formatArtists(track: Track): string {
+  return track.artists.filter(Boolean).join(" / ") || "未知艺人";
+}
+
+function isOpenEndedFailureReply(reply: string): boolean {
+  return (
+    reply === AI_OPEN_ENDED_REPLY_UNCONFIGURED ||
+    reply === AI_OPEN_ENDED_REPLY_FAILED ||
+    reply === AI_COMMENT_REPLY_FAILED
+  );
 }

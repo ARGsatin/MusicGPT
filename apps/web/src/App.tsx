@@ -7,6 +7,7 @@ import type {
   DjSettings,
   EnvironmentContext,
   NowPlayingState,
+  RadioPlanItem,
   SystemStatus,
   TasteProfile,
   WsPayload
@@ -14,6 +15,7 @@ import type {
 import {
   clearChatMemories,
   clearChatHistory,
+  completeVoiceTurn,
   deleteChatMemory,
   fetchDjSettings,
   fetchEnvironment,
@@ -24,27 +26,46 @@ import {
   fetchTaste,
   importRecommendations,
   importFromNcm,
-  generateChatSpeech,
   playSuggestedTrack,
+  playQueuedTrack,
   requestNext,
+  reportRealtimeError,
+  runMusicCommand,
   setFavorite as updateFavorite,
+  sendChat,
   sendChatStream,
   sendFeedback,
   updateDjSettings,
-  updateEnvironmentLocation
+  updateEnvironmentLocation,
+  startVoiceTurn
 } from "./api";
 import { AmbientBackdrop } from "./components/AmbientBackdrop";
 import { ChatPanel, type PanelTab } from "./components/ChatPanel";
 import { SignalTicker, StatusRibbon } from "./components/StatusRibbon";
 import { TurntableStage } from "./components/TurntableStage";
 import { settleChatStreamFailure, type ChatStreamFeedback } from "./chatStream";
+import { createStreamingTextStore } from "./streamingTextStore";
+import {
+  RealtimeVoiceController,
+  type RealtimeVoiceStatus
+} from "./realtimeVoice";
 import { useWsStream } from "./useWsStream";
-import { loadAutoSpeak, saveAutoSpeak, SpeechPlaybackController } from "./speech";
+import { loadAutoSpeak, saveAutoSpeak } from "./speech";
 
 const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
   voiceGender: "female",
-  voice: "zh-CN-XiaoxiaoNeural"
+  voice: "Tina"
+};
+
+const REALTIME_STATUS_LABELS: Record<RealtimeVoiceStatus, string> = {
+  idle: "开启实时语音",
+  connecting: "连接中…",
+  ready: "实时语音已连接",
+  listening: "正在听你说",
+  thinking: "正在想",
+  speaking: "正在说",
+  error: "重新连接语音"
 };
 
 interface ActiveChatStream {
@@ -53,6 +74,12 @@ interface ActiveChatStream {
   retryMessage: string;
   streamAt: string;
   token: number;
+}
+
+function materializeStreamingText(messages: ChatMessage[], stream: ActiveChatStream): ChatMessage[] {
+  return messages.map((message) =>
+    message.at === stream.streamAt ? { ...message, text: stream.receivedText } : message
+  );
 }
 
 function getBrowserStorage(): Storage | undefined {
@@ -106,17 +133,19 @@ export default function App() {
   const [djSettings, setDjSettings] = useState<DjSettings>(DEFAULT_DJ_SETTINGS);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [voicePreview, setVoicePreview] = useState<ChatMessage | null>(null);
+  const [voiceAssistantDraft, setVoiceAssistantDraft] = useState<ChatMessage | null>(null);
   const [chatMemories, setChatMemories] = useState<ChatMemory[]>([]);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [busyMemoryId, setBusyMemoryId] = useState<number | null>(null);
   const [memoryClearing, setMemoryClearing] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
-  const [input, setInput] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatStreamFeedback, setChatStreamFeedback] = useState<ChatStreamFeedback | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatClearing, setChatClearing] = useState(false);
   const [autoSpeak, setAutoSpeak] = useState(() => loadAutoSpeak(getBrowserStorage()));
+  const [realtimeStatus, setRealtimeStatus] = useState<RealtimeVoiceStatus>("idle");
   const [speechActive, setSpeechActive] = useState(false);
   const [activeSpeechKey, setActiveSpeechKey] = useState<string | undefined>(undefined);
   const [loadingSpeechId, setLoadingSpeechId] = useState<number | null>(null);
@@ -124,6 +153,7 @@ export default function App() {
   const [speechNotice, setSpeechNotice] = useState<string | null>(null);
   const [streamingMessageAt, setStreamingMessageAt] = useState<string | null>(null);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
+  const [queueLoadingTrackId, setQueueLoadingTrackId] = useState<number | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [weatherLoading, setWeatherLoading] = useState(false);
@@ -134,13 +164,13 @@ export default function App() {
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
   const advanceInFlightRef = useRef(false);
   const speechAudioRef = useRef<HTMLAudioElement>(null);
-  const speechControllerRef = useRef<SpeechPlaybackController | null>(null);
-  const speechRequestTokenRef = useRef(0);
+  const realtimeVoiceRef = useRef<RealtimeVoiceController | null>(null);
   const chatStreamAbortRef = useRef<AbortController | null>(null);
   const chatStreamTokenRef = useRef(0);
   const activeChatStreamRef = useRef<ActiveChatStream | null>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const autoSpeakRef = useRef(autoSpeak);
+  const [streamingTextStore] = useState(createStreamingTextStore);
 
   const refresh = useCallback(async () => {
     const [
@@ -186,24 +216,113 @@ export default function App() {
     if (!audio) {
       return;
     }
-    const controller = new SpeechPlaybackController(audio, {
-      onActiveChange: setSpeechActive,
-      onPlayingKeyChange: setActiveSpeechKey,
-      onPlaybackError: (job) => {
-        if (job.kind === "chat" && job.key.startsWith("chat:")) {
-          const messageId = Number(job.key.split(":")[1]);
-          setFailedSpeechId(Number.isFinite(messageId) ? messageId : null);
+    const controller = new RealtimeVoiceController(audio, {
+      onStatusChange: (status) => {
+        setRealtimeStatus(status);
+        setSpeechActive(status === "listening" || status === "speaking");
+        if (status === "ready" || status === "idle" || status === "error") {
+          setActiveSpeechKey(undefined);
         }
-        setSpeechNotice("语音播放出错，文字回复已保留；可以点回复旁的播放按钮重试。");
+      },
+      onError: (error) => {
+        void reportRealtimeError(error.message).catch(() => undefined);
+        const notice = error.message === "dashscope_realtime_not_configured"
+          ? "实时语音需要在服务端配置 DASHSCOPE_API_KEY。"
+          : error.message.includes("Permission") || error.message.includes("permission")
+            ? "没有拿到麦克风权限；请允许访问后再试。"
+            : error.message.includes("Voice turn") || error.message.includes("Music command")
+              ? "实时语音仍可继续，但这轮没有同步到统一历史；稍后可以重试。"
+            : "实时语音连接失败，文字聊天仍可继续。";
+        setSpeechNotice(notice);
+      },
+      onUserPreview: (itemId, text) => {
+        setVoicePreview({
+          role: "user",
+          text,
+          at: `voice-preview:${itemId}`,
+          source: "voice",
+          status: "completed"
+        });
+      },
+      onUserDiscarded: (itemId) => {
+        setVoicePreview((current) => current?.at === `voice-preview:${itemId}` ? null : current);
+      },
+      onTranscriptionUnavailable: () => {
+        setSpeechNotice("这次语音没有拿到可靠转写，未写入会话历史；可以继续说或重新连接。 ");
+      },
+      onVoiceTurnStart: async (input) => {
+        const response = await startVoiceTurn(input);
+        setVoicePreview(null);
+        setMessages(response.messages);
+        return { turnId: response.turnId };
+      },
+      onAssistantDelta: (turnId, delta) => {
+        setVoiceAssistantDraft((current) => current?.turnId === turnId
+          ? { ...current, text: current.text + delta }
+          : {
+              role: "assistant",
+              text: delta,
+              at: `voice-assistant:${turnId}`,
+              turnId,
+              source: "voice",
+              status: "completed"
+            });
+      },
+      onVoiceTurnComplete: async ({ turnId, transcript, responseId, status, at }) => {
+        const nextMessages = await completeVoiceTurn(turnId, {
+          model: "qwen3.5-omni-plus-realtime",
+          status,
+          at,
+          ...(transcript ? { transcript } : {}),
+          ...(responseId ? { responseId } : {})
+        });
+        setVoiceAssistantDraft(null);
+        setMessages(nextMessages);
+      },
+      onMusicCommand: async (call) => {
+        const response = await runMusicCommand({
+          turnId: call.turnId,
+          commandId: call.callId,
+          request: call.request,
+          mode: "voice_direct",
+          ...(call.confirmationToken ? { confirmationToken: call.confirmationToken } : {}),
+          ...(call.selectedTrackId !== undefined ? { selectedTrackId: call.selectedTrackId } : {})
+        });
+        setNow(response.now);
+        await refreshTaste().catch(() => undefined);
+        return {
+          action: response.action,
+          outcome: response.outcome,
+          summary: response.summary,
+          ...(response.candidates ? { candidates: response.candidates.slice(0, 3) } : {}),
+          ...(response.confirmationToken ? { confirmationToken: response.confirmationToken } : {}),
+          now: {
+            paused: response.now.paused,
+            track: response.now.track
+              ? {
+                  id: response.now.track.id,
+                  title: response.now.track.title,
+                  artists: response.now.track.artists
+                }
+              : null,
+            queueLength: response.now.queue.length
+          }
+        };
+      },
+      onLegacyMusicCommand: async (request) => {
+        const response = await sendChat(request);
+        setMessages(response.messages);
+        setNow(response.now);
+        return { action: response.action, summary: response.reply, now: response.now };
       }
     });
-    speechControllerRef.current = controller;
+    realtimeVoiceRef.current = controller;
     return () => {
       chatStreamAbortRef.current?.abort();
-      controller.dispose();
-      speechControllerRef.current = null;
+      controller.stop();
+      realtimeVoiceRef.current = null;
     };
-  }, []);
+  }, [refreshTaste]);
 
   useEffect(() => {
     autoSpeakRef.current = autoSpeak;
@@ -220,9 +339,8 @@ export default function App() {
     chatStreamAbortRef.current = null;
     chatStreamTokenRef.current += 1;
     activeStream.abortController.abort();
-    speechControllerRef.current?.stop(true);
     setMessages((current) =>
-      settleChatStreamFailure(current, {
+      settleChatStreamFailure(materializeStreamingText(current, activeStream), {
         kind: "stopped",
         streamAt: activeStream.streamAt,
         retryMessage: activeStream.retryMessage
@@ -235,79 +353,54 @@ export default function App() {
     });
     setStreamingMessageAt(null);
     setChatLoading(false);
+    realtimeVoiceRef.current?.setMicrophoneEnabled(true);
   }, []);
 
-  const playAssistantMessage = useCallback(
-    async (message: ChatMessage, manual = false) => {
-      if (!message.id) {
-        return;
-      }
-      const controller = speechControllerRef.current;
-      if (!controller) {
-        return;
-      }
-      const key = `chat:${message.id}`;
-      if (manual && controller.isPlaying(key)) {
-        controller.stop();
-        return;
-      }
-      if (manual) {
-        stopActiveChatStream();
-        controller.stop();
-      }
-      const requestToken = ++speechRequestTokenRef.current;
-      setLoadingSpeechId(message.id);
-      setFailedSpeechId(null);
-      setSpeechNotice(null);
-      try {
-        const speech = await generateChatSpeech(message.id);
-        if (requestToken !== speechRequestTokenRef.current) {
-          return;
-        }
-        const jobs = speech.segments?.length
-          ? speech.segments.map((segment) => ({
-              key,
-              audioUrl: segment.audioUrl,
-              kind: "chat" as const
-            }))
-          : [{ key, audioUrl: speech.audioUrl, kind: "chat" as const }];
-        const played = await controller.playSequence(jobs);
-        if (!played) {
-          setFailedSpeechId(message.id);
-        }
-      } catch {
-        if (requestToken === speechRequestTokenRef.current) {
-          setFailedSpeechId(message.id);
-          setSpeechNotice("语音刚刚没准备好，文字还在，等会儿再点一次试试呀～");
-        }
-      } finally {
-        if (requestToken === speechRequestTokenRef.current) {
-          setLoadingSpeechId((current) => (current === message.id ? null : current));
-        }
-      }
-    },
-    [stopActiveChatStream]
-  );
-
-  const playDjScript = useCallback(async (script: NonNullable<NowPlayingState["djScript"]>, manual = false) => {
-    if (!script.audioUrl) {
+  const playAssistantMessage = useCallback(async (message: ChatMessage, manual = false) => {
+    if (!message.id) {
       return;
     }
-    const controller = speechControllerRef.current;
+    const controller = realtimeVoiceRef.current;
     if (!controller) {
       return;
     }
-    const job = {
-      key: `dj:${script.id}`,
-      audioUrl: script.audioUrl,
-      kind: "dj" as const
-    };
-    setSpeechNotice(null);
-    if (manual) {
-      await controller.playNow(job);
+    const key = `chat:${message.id}`;
+    if (manual && activeSpeechKey === key) {
       return;
     }
-    controller.enqueueDj(job);
+    if (manual) {
+      stopActiveChatStream();
+    }
+    setLoadingSpeechId(message.id);
+    setFailedSpeechId(null);
+    setSpeechNotice(null);
+    setActiveSpeechKey(key);
+    try {
+      await controller.speakText(message.text, key);
+    } catch {
+      setFailedSpeechId(message.id);
+      setActiveSpeechKey(undefined);
+    } finally {
+      setLoadingSpeechId((current) => (current === message.id ? null : current));
+    }
+  }, [activeSpeechKey, stopActiveChatStream]);
+
+  const playDjScript = useCallback(async (script: NonNullable<NowPlayingState["djScript"]>, manual = false) => {
+    const controller = realtimeVoiceRef.current;
+    if (!controller) {
+      return;
+    }
+    if (!manual && !controller.connected) {
+      return;
+    }
+    setSpeechNotice(null);
+    const key = `dj:${script.id}`;
+    setActiveSpeechKey(key);
+    try {
+      await controller.speakText(script.text, key);
+    } catch {
+      setActiveSpeechKey(undefined);
+    }
   }, []);
 
   const onWsPayload = useCallback(
@@ -316,10 +409,13 @@ export default function App() {
         setNow(payload.data as NowPlayingState);
       } else if (payload.event === "queue_updated") {
         setNow((current) => ({ ...current, queue: payload.data as NowPlayingState["queue"] }));
-      } else if (payload.event === "dj_tts_ready") {
+      } else if (payload.event === "dj_script_ready") {
         const script = payload.data as NowPlayingState["djScript"];
         setNow((current) => (script ? { ...current, djScript: script } : { ...current }));
-        if (script?.audioUrl && autoSpeakRef.current) {
+        const voiceStatus = realtimeVoiceRef.current?.status;
+        const conversationBusy = Boolean(activeChatStreamRef.current) ||
+          voiceStatus === "listening" || voiceStatus === "thinking" || voiceStatus === "speaking";
+        if (script && autoSpeakRef.current && !conversationBusy) {
           void playDjScript(script);
         }
       } else if (payload.event === "system_status") {
@@ -336,6 +432,16 @@ export default function App() {
         if (Array.isArray(data.memories)) {
           setChatMemories(data.memories);
         }
+      } else if (payload.event === "conversation_updated") {
+        const data = payload.data as {
+          source?: "text" | "voice";
+          sessionId?: string;
+          messages?: ChatMessage[];
+        };
+        if (!(data.source === "voice" && realtimeVoiceRef.current?.isCurrentSession(data.sessionId))) {
+          if (Array.isArray(data.messages)) setMessages(data.messages);
+          void realtimeVoiceRef.current?.refreshContext().catch(() => undefined);
+        }
       }
     },
     [playDjScript]
@@ -351,7 +457,15 @@ export default function App() {
       return;
     }
     const message = rawMessage.trim();
-    const optimistic: ChatMessage = { role: "user", text: message, at: new Date().toISOString() };
+    const turnId = globalThis.crypto?.randomUUID?.() ?? `text-${Date.now()}-${Math.random()}`;
+    const optimistic: ChatMessage = {
+      role: "user",
+      text: message,
+      at: new Date().toISOString(),
+      turnId,
+      source: "text",
+      status: "completed"
+    };
     const streamAt = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const streamingAssistant: ChatMessage = {
       role: "assistant",
@@ -371,16 +485,17 @@ export default function App() {
       token: streamToken
     };
     activeChatStreamRef.current = activeStream;
-    setInput("");
+    streamingTextStore.clear();
     setChatError(null);
     setChatStreamFeedback(null);
     setSpeechNotice(null);
     setChatLoading(true);
+    realtimeVoiceRef.current?.setMicrophoneEnabled(false);
     setStreamingMessageAt(streamAt);
     setMessages((current) => [...current, optimistic, streamingAssistant]);
     try {
       await sendChatStream(message, {
-        synthesizeSpeech: autoSpeakRef.current,
+        turnId,
         signal: abortController.signal,
         onEvent: (event: ChatStreamEvent) => {
           if (chatStreamTokenRef.current !== streamToken) {
@@ -388,15 +503,7 @@ export default function App() {
           }
           if (event.type === "text_delta") {
             activeStream.receivedText += event.delta;
-            setMessages((current) =>
-              current.map((item) => (item.at === streamAt ? { ...item, text: `${item.text}${event.delta}` } : item))
-            );
-          } else if (event.type === "speech" && autoSpeakRef.current) {
-            speechControllerRef.current?.enqueueChatSegment(streamKey, {
-              key: `${streamKey}:${event.sequence}`,
-              audioUrl: event.audioUrl,
-              kind: "chat"
-            });
+            streamingTextStore.append(event.delta);
           } else if (event.type === "result") {
             if (activeChatStreamRef.current?.token === streamToken) {
               activeChatStreamRef.current = null;
@@ -404,6 +511,13 @@ export default function App() {
             setMessages(event.response.messages);
             setNow(event.response.now);
             setStreamingMessageAt(null);
+            realtimeVoiceRef.current?.setMicrophoneEnabled(true);
+            if (autoSpeakRef.current && realtimeVoiceRef.current?.connected) {
+              setActiveSpeechKey(streamKey);
+              void realtimeVoiceRef.current.speakText(event.response.reply, streamKey).catch(() => {
+                setActiveSpeechKey(undefined);
+              });
+            }
           }
         }
       });
@@ -411,7 +525,7 @@ export default function App() {
     } catch {
       if (!abortController.signal.aborted && chatStreamTokenRef.current === streamToken) {
         setMessages((current) =>
-          settleChatStreamFailure(current, {
+          settleChatStreamFailure(materializeStreamingText(current, activeStream), {
             kind: "error",
             streamAt,
             retryMessage: message
@@ -424,7 +538,6 @@ export default function App() {
         });
       }
     } finally {
-      speechControllerRef.current?.finishChatStream(streamKey);
       if (chatStreamAbortRef.current === abortController) {
         chatStreamAbortRef.current = null;
       }
@@ -434,6 +547,7 @@ export default function App() {
         }
         setStreamingMessageAt(null);
         setChatLoading(false);
+        realtimeVoiceRef.current?.setMicrophoneEnabled(true);
       }
     }
   };
@@ -473,9 +587,9 @@ export default function App() {
     setChatError(null);
     try {
       await clearChatHistory();
-      speechRequestTokenRef.current += 1;
-      speechControllerRef.current?.stop(true);
       setMessages([]);
+      setVoicePreview(null);
+      setVoiceAssistantDraft(null);
     } catch (error) {
       setChatError(error instanceof Error ? error.message : "聊天记录清空失败，请稍后再试。");
     } finally {
@@ -530,6 +644,28 @@ export default function App() {
       advanceInFlightRef.current = false;
     }
   }, []);
+
+  const onPlayQueueTrack = useCallback(
+    async (trackId: RadioPlanItem["track"]["id"]) => {
+      if (queueLoadingTrackId !== null) {
+        return;
+      }
+      setQueueLoadingTrackId(trackId);
+      setChatError(null);
+      try {
+        await runWithAdvanceLock(async () => {
+          const response = await playQueuedTrack(trackId);
+          setNow(response.now);
+          await refreshTaste();
+        });
+      } catch (error) {
+        setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
+      } finally {
+        setQueueLoadingTrackId(null);
+      }
+    },
+    [queueLoadingTrackId, refreshTaste, runWithAdvanceLock]
+  );
 
   const onRequestNext = useCallback(
     async (recordSkip = false) => {
@@ -661,10 +797,22 @@ export default function App() {
   const onToggleAutoSpeak = (enabled: boolean) => {
     autoSpeakRef.current = enabled;
     setAutoSpeak(enabled);
-    if (!enabled) {
-      speechRequestTokenRef.current += 1;
-      speechControllerRef.current?.stop(true);
-      setLoadingSpeechId(null);
+  };
+
+  const onToggleRealtimeVoice = async () => {
+    const controller = realtimeVoiceRef.current;
+    if (!controller || realtimeStatus === "connecting") {
+      return;
+    }
+    setSpeechNotice(null);
+    if (controller.connected) {
+      controller.stop();
+      return;
+    }
+    try {
+      await controller.start();
+    } catch {
+      // The controller reports a user-facing error through onError.
     }
   };
 
@@ -675,9 +823,14 @@ export default function App() {
   const favoritePeriod = taste?.favoritePeriods[0]?.period ?? "late_night";
 
   const visibleMessages = useMemo(
-    () =>
-      messages.length > 0
-        ? messages
+    () => {
+      const unifiedMessages = [
+        ...messages,
+        ...(voicePreview ? [voicePreview] : []),
+        ...(voiceAssistantDraft ? [voiceAssistantDraft] : [])
+      ];
+      return unifiedMessages.length > 0
+        ? unifiedMessages
         : [
             {
               role: "assistant" as const,
@@ -686,8 +839,9 @@ export default function App() {
                 "嗨，我在这儿呀～告诉我你现在的心情或想听的感觉，我来陪你挑首合适的歌！",
               at: "station-intro"
             }
-          ],
-    [messages, now.djScript?.text]
+          ];
+    },
+    [messages, now.djScript?.text, voiceAssistantDraft, voicePreview]
   );
 
   const tickerItems = useMemo(() => {
@@ -748,7 +902,7 @@ export default function App() {
           activeSpeechKey={activeSpeechKey}
           activeTab={panelTab}
           autoSpeak={autoSpeak}
-          canReplayDj={Boolean(now.djScript?.audioUrl)}
+          canReplayDj={Boolean(now.djScript)}
           chatClearing={chatClearing}
           chatError={chatError}
           chatLoading={chatLoading}
@@ -757,7 +911,6 @@ export default function App() {
           failedSpeechId={failedSpeechId}
           hasTrack={Boolean(now.track)}
           historyEmpty={messages.length === 0}
-          input={input}
           loadingSpeechId={loadingSpeechId}
           memories={chatMemories}
           memoryBusyId={busyMemoryId}
@@ -767,11 +920,14 @@ export default function App() {
           messages={visibleMessages}
           nowTitle={trackTitle}
           queue={now.queue}
+          queueLoadingTrackId={queueLoadingTrackId}
+          realtimeStatus={realtimeStatus}
+          realtimeStatusLabel={REALTIME_STATUS_LABELS[realtimeStatus]}
           speechNotice={speechNotice}
           streamingMessageAt={streamingMessageAt}
+          streamingTextStore={streamingTextStore}
           suggestionLoadingId={suggestionLoadingId}
           inputRef={chatInputRef}
-          onChangeInput={setInput}
           onChangeTab={setPanelTab}
           onChangeTone={(tone) => void onChangeDjTone(tone)}
           onClearHistory={() => void onClearChatHistory()}
@@ -789,6 +945,7 @@ export default function App() {
           }}
           onForgetMemory={(memory) => void onForgetMemory(memory)}
           onPlaySuggestion={(suggestion) => void onPlaySuggestion(suggestion)}
+          onPlayQueueTrack={(trackId) => void onPlayQueueTrack(trackId)}
           onQuickPrompt={(prompt) => void submitChat(prompt)}
           onReplayDj={() => {
             if (now.djScript) {
@@ -797,8 +954,9 @@ export default function App() {
           }}
           onSpeakMessage={(message) => void playAssistantMessage(message, true)}
           onStopStream={stopActiveChatStream}
-          onSubmit={() => void submitChat(input)}
+          onSubmit={(message) => void submitChat(message)}
           onToggleAutoSpeak={onToggleAutoSpeak}
+          onToggleRealtimeVoice={() => void onToggleRealtimeVoice()}
           onToggleMemory={() => setMemoryOpen((open) => !open)}
         />
       </div>

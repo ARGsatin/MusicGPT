@@ -11,6 +11,12 @@ import type {
   TasteProfile,
   Track
 } from "@musicgpt/shared";
+import {
+  generateAcceptedOpenEndedReply,
+  type OpenEndedReplyKind,
+  type OpenEndedReplyRejection
+} from "./openEndedReply.js";
+import { withAiProviderCompatibility } from "./aiProviderCompatibility.js";
 
 export type AiDjIntent =
   | { type: "skip" }
@@ -25,7 +31,6 @@ export type AiDjIntent =
 
 export interface TrackSelection {
   trackId?: number | undefined;
-  reason: string;
 }
 
 export interface AiDjContext {
@@ -44,11 +49,8 @@ export interface AiDjAssistant {
   classify(message: string, context: AiDjContext): Promise<AiDjIntent>;
   selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection>;
   commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string>;
-  commentTrackStream?(track: Track, context: AiDjContext, purpose: string): AsyncIterable<string>;
   commentCurrent(context: AiDjContext): Promise<string>;
-  commentCurrentStream?(context: AiDjContext): AsyncIterable<string>;
   chat(message: string, context: AiDjContext): Promise<string>;
-  chatStream?(message: string, context: AiDjContext): AsyncIterable<string>;
   extractMemories?(
     userMessage: string,
     assistantReply: string,
@@ -62,10 +64,11 @@ interface OpenAiDjAssistantOptions {
   model: string;
   provider?: string | undefined;
   chatMaxTokens?: number | undefined;
+  client?: OpenAI | undefined;
 }
 
 export const AI_DJ_PERSONA_STYLE =
-  "你像一位长期相处的邻家女孩：活泼、温柔、真诚而松弛。你有自己的喜恶和判断，可以开玩笑、主动追问，也可以礼貌表达不同意见。轻松话题自然俏皮，严肃或脆弱的话题就安静认真地回应，不强行可爱。你会跟随用户的语言和交流深度，让简单闲聊保持轻盈，需要解释或深入交流时自然展开。";
+  "像熟悉的朋友一样直接、具体、有判断。回复会被直接朗读，按自然口语组织，长短句自然交替；不要主播腔、客服腔或总结腔，也不要刻意添加语气词。语气跟随当前话题，不使用固定口癖、卖萌开场或程序化共情；不知道就明说，不用抽象比喻制造深度。";
 
 export interface ChatMemoryUpsert {
   category: ChatMemoryCategory;
@@ -159,7 +162,9 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     this.provider = options.provider ?? "openai";
     this.baseUrlConfigured = Boolean(options.baseUrl);
     this.chatMaxTokens = options.chatMaxTokens ?? 800;
-    if (options.apiKey) {
+    if (options.client) {
+      this.client = options.client;
+    } else if (options.apiKey) {
       this.client = new OpenAI({
         apiKey: options.apiKey,
         baseURL: options.baseUrl,
@@ -215,7 +220,7 @@ export class OpenAiDjAssistant implements AiDjAssistant {
 
   async selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection> {
     if (candidates.length === 0) {
-      return { reason: "没有足够候选。" };
+      return {};
     }
     if (!this.client) {
       return fallbackSelection(description, candidates);
@@ -225,7 +230,7 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       {
         role: "system",
         content:
-          '你是私人电台选歌顾问。只能从 candidates 中选择一首最匹配用户描述的歌。返回 JSON: {"trackId": number, "reason": string}。reason 是内部选择依据，不要写套话，要说明具体匹配点。'
+          '你是私人电台选歌顾问。只能从 candidates 中选择一首最匹配用户描述的歌。只返回 JSON: {"trackId": number}，不要生成推荐文案或选择理由。'
       },
       {
         role: "user",
@@ -253,40 +258,32 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       return fallbackSelection(description, candidates);
     }
     return {
-      trackId: selected.id,
-      reason: typeof result.reason === "string" && result.reason.trim() ? result.reason.trim() : "候选里它最贴近这次描述。"
+      trackId: selected.id
     };
   }
 
   async commentCurrent(context: AiDjContext): Promise<string> {
     if (!context.nowTrack) {
-      return "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！";
+      return "当前没有歌曲在播放，请先点一首。";
     }
     return this.commentTrack(context.nowTrack, context, "comment_current");
   }
 
-  async *commentCurrentStream(context: AiDjContext): AsyncIterable<string> {
-    if (!context.nowTrack) {
-      yield "现在还没有歌在播放呀～先点一首，播起来后我陪你一起听！";
-      return;
-    }
-    yield* this.commentTrackStream(context.nowTrack, context, "comment_current");
-  }
-
   async commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string> {
     if (!this.client) {
-      return fallbackComment(track);
+      throw new Error("AI provider is not configured");
     }
 
     try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.9,
-        max_tokens: 180,
-        messages: this.buildCommentMessages(track, context, purpose)
-      });
+      const reply = await this.completeOpenEndedReply(
+        this.buildCommentMessages(track, context, purpose),
+        "comment",
+        context,
+        180,
+        0.9
+      );
       this.lastError = undefined;
-      return response.choices[0]?.message.content?.trim() || fallbackComment(track);
+      return reply;
     } catch (error) {
       this.lastError = summarizeOpenAiError(error);
       throw error;
@@ -295,85 +292,19 @@ export class OpenAiDjAssistant implements AiDjAssistant {
 
   async chat(message: string, context: AiDjContext): Promise<string> {
     if (!this.client) {
-      return fallbackChatReply(message, context);
+      throw new Error("AI provider is not configured");
     }
 
     try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.92,
-        max_tokens: this.chatMaxTokens,
-        messages: buildChatMessages(message, context)
-      });
+      const reply = await this.completeOpenEndedReply(
+        buildChatMessages(message, context),
+        "chat",
+        context,
+        this.chatMaxTokens,
+        0.92
+      );
       this.lastError = undefined;
-      return response.choices[0]?.message.content?.trim() || fallbackChatReply(message, context);
-    } catch (error) {
-      this.lastError = summarizeOpenAiError(error);
-      throw error;
-    }
-  }
-
-  async *chatStream(message: string, context: AiDjContext): AsyncIterable<string> {
-    if (!this.client) {
-      yield fallbackChatReply(message, context);
-      return;
-    }
-
-    try {
-      const stream = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.92,
-        max_tokens: this.chatMaxTokens,
-        stream: true,
-        messages: buildChatMessages(message, context)
-      });
-      let producedText = false;
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta.content;
-        if (delta) {
-          producedText = true;
-          yield delta;
-        }
-      }
-      this.lastError = undefined;
-      if (!producedText) {
-        yield fallbackChatReply(message, context);
-      }
-    } catch (error) {
-      this.lastError = summarizeOpenAiError(error);
-      throw error;
-    }
-  }
-
-  async *commentTrackStream(
-    track: Track,
-    context: AiDjContext,
-    purpose: string
-  ): AsyncIterable<string> {
-    if (!this.client) {
-      yield fallbackComment(track);
-      return;
-    }
-    try {
-      const stream = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.9,
-        max_tokens: 180,
-        stream: true,
-        messages: this.buildCommentMessages(track, context, purpose)
-      });
-      let producedText = false;
-      for await (const chunk of stream) {
-        const delta = chunk.choices[0]?.delta.content;
-        if (delta) {
-          producedText = true;
-          yield delta;
-        }
-      }
-      this.lastError = undefined;
-      if (!producedText) {
-        yield fallbackComment(track);
-      }
+      return reply;
     } catch (error) {
       this.lastError = summarizeOpenAiError(error);
       throw error;
@@ -388,32 +319,27 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     if (!this.client) {
       return { upserts: [], deleteIds: [] };
     }
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            '你负责维护用户主动建立的长期人物记忆。只返回 JSON：{"upserts":[{"category":"preference|habit|background|relationship","content":"简短、独立、第三人称事实","normalizedKey":"稳定去重键","supersedesIds":[数字]}],"deleteIds":[数字]}。只保存长期有用且由用户明确陈述的信息；忽略瞬时情绪、一次性请求、助手推测和闲聊细节。密码、API Key、验证码、支付信息、身份证件和精确住址永不保存；健康、亲密关系等其他敏感信息只有用户明确说“记住”时才可保存。新信息纠正旧信息时在 supersedesIds 中列出旧 id。没有内容时返回空数组。'
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            userMessage,
-            assistantReply,
-            existingMemories: existingMemories.map((memory) => ({
-              id: memory.id,
-              category: memory.category,
-              content: memory.content
-            }))
-          })
-        }
-      ]
-    });
+    const result = await this.askJson<unknown>([
+      {
+        role: "system",
+        content:
+          '你负责维护用户主动建立的长期人物记忆。只返回 JSON：{"upserts":[{"category":"preference|habit|background|relationship","content":"简短、独立、第三人称事实","normalizedKey":"稳定去重键","supersedesIds":[数字]}],"deleteIds":[数字]}。只保存长期有用且由用户明确陈述的信息；忽略瞬时情绪、一次性请求、助手推测和闲聊细节。密码、API Key、验证码、支付信息、身份证件和精确住址永不保存；健康、亲密关系等其他敏感信息只有用户明确说“记住”时才可保存。新信息纠正旧信息时在 supersedesIds 中列出旧 id。没有内容时返回空数组。'
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          userMessage,
+          assistantReply,
+          existingMemories: existingMemories.map((memory) => ({
+            id: memory.id,
+            category: memory.category,
+            content: memory.content
+          }))
+        })
+      }
+    ]);
     return normalizeMemoryUpdate(
-      response.choices[0]?.message.content ?? "{}",
+      result,
       new Set(existingMemories.map((memory) => memory.id))
     );
   }
@@ -422,20 +348,80 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     if (!this.client) {
       throw new Error("OpenAI client is not configured");
     }
-    try {
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages
-      });
-      this.lastError = undefined;
-      const content = response.choices[0]?.message.content ?? "{}";
-      return JSON.parse(content) as T;
-    } catch (error) {
-      this.lastError = summarizeOpenAiError(error);
-      throw error;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let response: OpenAI.Chat.Completions.ChatCompletion;
+      try {
+        response = await this.createCompletion({
+          model: this.model,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          messages
+        });
+      } catch (error) {
+        this.lastError = summarizeOpenAiError(error);
+        throw error;
+      }
+
+      const content = response.choices[0]?.message.content?.trim() ?? "";
+      try {
+        if (!content) {
+          throw new Error("AI provider returned empty JSON content");
+        }
+        const parsed = JSON.parse(content) as T;
+        this.lastError = undefined;
+        return parsed;
+      } catch (error) {
+        if (attempt === 0) {
+          continue;
+        }
+        this.lastError = summarizeOpenAiError(error);
+        throw error;
+      }
     }
+
+    throw new Error("AI provider JSON retry loop exhausted");
+  }
+
+  private createCompletion(
+    request: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
+  ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    if (!this.client) {
+      throw new Error("OpenAI client is not configured");
+    }
+    return this.client.chat.completions.create(
+      withAiProviderCompatibility(this.provider, request)
+    );
+  }
+
+  private async completeOpenEndedReply(
+    messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+    kind: OpenEndedReplyKind,
+    context: AiDjContext,
+    maxTokens: number,
+    temperature: number
+  ): Promise<string> {
+    if (!this.client) {
+      throw new Error("AI provider is not configured");
+    }
+    return generateAcceptedOpenEndedReply(
+      async (rejection) => {
+        const response = await this.createCompletion({
+          model: this.model,
+          temperature,
+          max_tokens: maxTokens,
+          messages: rejection ? withRewriteRequest(messages, rejection) : messages
+        });
+        return response.choices[0]?.message.content?.trim() ?? "";
+      },
+      {
+        kind,
+        recentReplies: context.messages
+          .filter((message) => message.role === "assistant")
+          .slice(-20)
+          .map((message) => message.text)
+      }
+    );
   }
 
   private buildCommentMessages(
@@ -447,11 +433,11 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       {
         role: "system",
         content:
-          "回复必须像聊天，不像长评。最多 1-3 句，总长尽量控制在 80 字以内；只挑一个具体听感说，别展开成文章。"
+          "直接说一个具体的音乐观察以及它造成的听感，不要先夸歌，也不要总结气质。可以使用你对该曲目的既有音乐知识；不确定时不要编造精确时点、乐器、段落或制作事实。"
       },
       {
         role: "system",
-        content: `你是 MusicGPT 的 GPT DJ。${AI_DJ_PERSONA_STYLE} 用中文随手聊聊指定歌曲，像在和熟悉的朋友分享刚听到的小惊喜，同时保留一点音乐判断。必须根据歌曲标题、艺人、专辑、moodTag、用户意图和最近对话改变角度；可以聊编曲、声音质感、节奏、旋律或适合的场景。避免套话，不营销，不机械。`
+        content: `你是 MusicGPT 的 GPT DJ。${AI_DJ_PERSONA_STYLE} 用中文回答。避免“分寸感”“情绪刚刚好”“重点到了”“扑得太满”“编曲不挤”“小钩子”“越听越顺耳的那种”等可替换歌名复用的句式。`
       },
       {
         role: "user",
@@ -552,48 +538,60 @@ export function normalizeIntent(value: Partial<AiDjIntent>, originalMessage: str
 
 function fallbackSelection(_description: string, candidates: Track[]): TrackSelection {
   const first = candidates[0];
-  return {
-    trackId: first?.id,
-    reason: first ? "候选里它最贴近这次描述。" : "没有足够候选。"
-  };
-}
-
-export function fallbackComment(track: Track): string {
-  const artist = track.artists.join(" / ") || "这位音乐人";
-  const title = `《${track.title}》`;
-  const variants = [
-    `${title}好听诶！${artist}把节奏和声音放得很舒服，情绪刚刚好，陪你听着一点也不累～`,
-    `${title}和现在的气氛很搭呀。编曲不挤，旋律又有小钩子，是越听越顺耳的那种！`,
-    `${title}我喜欢它的分寸感～${artist}把情绪放得很自然，重点到了，又不会一下子扑得太满。`
-  ];
-  return variants[stableIndex(`${track.id}:${track.title}`, variants.length)]!;
-}
-
-export function fallbackChatReply(message: string, context: AiDjContext): string {
-  const current = context.nowTrack ? `正在播《${context.nowTrack.title}》呢` : "现在还没有歌在播放";
-  const variants = [
-    `${current}～你慢慢说，我陪你一起挑更合心情的歌呀。`,
-    "好呀，我懂你想要的感觉了～还可以再冷一点，也可以更松弛一点，你更偏哪边？",
-    `${current}。不用想得太复杂，跟着耳朵走就好啦！`
-  ];
-  return variants[/冷|cold/i.test(message) ? 1 : stableIndex(message, variants.length)]!;
-}
-
-function stableIndex(value: string, modulo: number): number {
-  let hash = 0;
-  for (const char of value) {
-    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
-  }
-  return hash % modulo;
+  return first ? { trackId: first.id } : {};
 }
 
 function blocksPlayback(text: string): boolean {
   return /别点歌|不要点歌|不点歌|先别点|先别播|别播|不要播|别放|不播放|随便聊|聊聊|只聊天|先聊天/.test(text);
 }
 
-function summarizeOpenAiError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/g, " ").slice(0, 240);
+export function summarizeOpenAiError(error: unknown): string {
+  const details: string[] = [error instanceof Error ? error.message : String(error)];
+  const errorRecord = asRecord(error);
+
+  for (const key of ["status", "code", "type", "request_id"] as const) {
+    const value = errorRecord?.[key];
+    if (typeof value === "string" || typeof value === "number") {
+      details.push(`${key}=${value}`);
+    }
+  }
+
+  const cause = error instanceof Error ? error.cause : errorRecord?.cause;
+  if (cause) {
+    const causeRecord = asRecord(cause);
+    const causeCode = causeRecord?.code;
+    const causeMessage = cause instanceof Error ? cause.message : String(cause);
+    const causeDetails = [
+      typeof causeCode === "string" || typeof causeCode === "number" ? String(causeCode) : "",
+      causeMessage
+    ].filter(Boolean);
+    if (causeDetails.length > 0) {
+      details.push(`cause=${causeDetails.join(" ")}`);
+    }
+  }
+
+  return [...new Set(details)]
+    .join(" | ")
+    .replace(/\s+/g, " ")
+    .slice(0, 480);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function withRewriteRequest(
+  messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[],
+  rejection: OpenEndedReplyRejection
+): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
+  return [
+    ...messages,
+    { role: "assistant", content: rejection.draft },
+    {
+      role: "system",
+      content: `上一版未通过质量检查（${rejection.issues.join(", ")}）。重新回答一次：换掉整套句式，直接回答，不解释重写过程，也不要复述上一版。`
+    }
+  ];
 }
 
 function isSongRequest(text: string): boolean {
@@ -657,13 +655,7 @@ function buildSearchQuery(text: string): string {
     .slice(0, 40);
 }
 
-function normalizeMemoryUpdate(content: string, existingIds: Set<number>): ChatMemoryUpdate {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return { upserts: [], deleteIds: [] };
-  }
+function normalizeMemoryUpdate(parsed: unknown, existingIds: Set<number>): ChatMemoryUpdate {
   if (!parsed || typeof parsed !== "object") {
     return { upserts: [], deleteIds: [] };
   }

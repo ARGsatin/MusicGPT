@@ -53,7 +53,17 @@ describe("contracts", () => {
 
   it("builds the chat speech route for a persisted assistant message", () => {
     expect(API_ROUTES.chatStream).toBe("/api/chat/stream");
-    expect(API_ROUTES.chatSpeech(42)).toBe("/api/chat/42/speech");
+    expect(API_ROUTES.realtimeSession).toBe("/api/realtime/session");
+  });
+
+  it("exposes unified conversation and idempotent music routes", () => {
+    expect(API_ROUTES.realtimeContext).toBe("/api/realtime/context");
+    expect(API_ROUTES.realtimeErrors).toBe("/api/realtime/errors");
+    expect(API_ROUTES.voiceTurns).toBe("/api/conversation/voice/turns");
+    expect(API_ROUTES.voiceTurnComplete("voice/a")).toBe(
+      "/api/conversation/voice/turns/voice%2Fa/complete"
+    );
+    expect(API_ROUTES.musicCommands).toBe("/api/music/commands");
   });
 
   it("validates favorite payload and builds its route", () => {
@@ -78,9 +88,9 @@ describe("contracts", () => {
       isDjSettingsRequest({
         tone: "lively",
         voiceGender: "female",
-        voice: "zh-CN-XiaoxiaoNeural"
+        voice: "marin"
       })
     ).toBe(true);
-    expect(isDjSettingsRequest({ tone: "sleepy", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" })).toBe(false);
+    expect(isDjSettingsRequest({ tone: "sleepy", voiceGender: "female", voice: "marin" })).toBe(false);
   });
 });

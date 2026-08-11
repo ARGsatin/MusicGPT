@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
-import { TtsPipeline } from "../src/ttsPipeline.js";
 
 const servers: Array<{ close: () => Promise<unknown> }> = [];
 
@@ -21,6 +20,85 @@ afterEach(async () => {
 });
 
 describe("API integration", () => {
+  it("jumps to a queued track and consumes the preceding queue items", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-queue-jump-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const queue = Array.from({ length: 10 }, (_, index) => ({
+      track: {
+        id: 10 + index,
+        title: `Queued ${10 + index}`,
+        artists: ["Queue Artist"],
+        songUrl: `https://example.com/${10 + index}.mp3`
+      },
+      score: 0.9 - index * 0.01,
+      reason: "Queued for later",
+      source: "library" as const,
+      bucket: "familiar" as const
+    }));
+    repo.saveNowPlaying({
+      track: { id: 1, title: "Current", artists: ["Current Artist"] },
+      queue,
+      paused: false
+    });
+    const app = await createServer({
+      repo,
+      ncm: new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch),
+      importRetryIntervalMs: 60_000
+    });
+    servers.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/queue/13/play"
+    });
+
+    expect(response.statusCode).toBe(200);
+    const payload = response.json() as {
+      now: { track?: { id: number }; queue: Array<{ track: { id: number } }> };
+    };
+    expect(payload.now.track?.id).toBe(13);
+    expect(payload.now.queue.map((item) => item.track.id)).toEqual([14, 15, 16, 17, 18, 19]);
+  });
+
+  it("resolves a fresh audio redirect instead of exposing a persisted song URL", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-audio-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const staleTrack = {
+      id: 77,
+      title: "Signed URL",
+      artists: ["Temporary Link"],
+      songUrl: "https://expired.example/77.mp3"
+    };
+    repo.ensureTrack(staleTrack);
+    repo.saveNowPlaying({ track: staleTrack, queue: [], paused: false });
+
+    let resolutionRequests = 0;
+    const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", async (input, init) => {
+      const url = input.toString();
+      if (url.includes("/song/url/v1")) {
+        resolutionRequests += 1;
+        return json({ data: [{ id: 77, url: "https://fresh.example/77.mp3" }] });
+      }
+      return mockNcmFetch(input, init);
+    });
+    const app = await createServer({
+      repo,
+      ncm,
+      importRetryIntervalMs: 60_000
+    });
+    servers.push(app);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/tracks/77/audio"
+    });
+
+    expect(response.statusCode).toBe(302);
+    expect(response.headers.location).toBe("https://fresh.example/77.mp3");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(resolutionRequests).toBe(1);
+  });
+
   it("returns an actionable NCM diagnostic when the dependency is unreachable", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-ncm-failure-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
@@ -54,14 +132,10 @@ describe("API integration", () => {
   it("syncs chat replan with now endpoint and ws stream", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-api-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
-    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-      fs.writeFileSync(filePath, "audio");
-    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch);
     const app = await createServer({
       repo,
       ncm,
-      ttsPipeline: tts,
       djBroadcastInterval: 3
     });
     servers.push(app);

@@ -12,11 +12,15 @@ beforeEach(() => {
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_MODEL",
+    "DASHSCOPE_API_KEY",
+    "DASHSCOPE_WORKSPACE_ID",
+    "DASHSCOPE_REALTIME_BASE_URL",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL",
     "AI_DJ_MEMORY_TURNS",
-    "AI_DJ_CHAT_MAX_TOKENS"
+    "AI_DJ_CHAT_MAX_TOKENS",
+    "REALTIME_CONVERSATION_MODE"
   ]) {
     delete process.env[name];
   }
@@ -36,6 +40,7 @@ describe("config", () => {
 
     expect(config.aiDjMemoryTurns).toBe(20);
     expect(config.aiDjChatMaxTokens).toBe(800);
+    expect(config.realtimeConversationMode).toBe("unified");
   });
 
   it("treats an empty OPENAI_BASE_URL as unset", async () => {
@@ -45,6 +50,22 @@ describe("config", () => {
     const { config } = await import("../src/config.js");
 
     expect(config.openAiBaseUrl).toBeUndefined();
+  });
+
+  it("keeps DashScope Realtime credentials separate from the text model provider", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.OPENAI_API_KEY = "relay-key";
+    process.env.OPENAI_BASE_URL = "https://text-relay.example.com/v1";
+    process.env.DASHSCOPE_API_KEY = "dashscope-key";
+    process.env.DASHSCOPE_WORKSPACE_ID = "llm-aurora123";
+    process.env.DASHSCOPE_REALTIME_BASE_URL = "https://voice.example.com/api/v1/webrtc/realtime";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.openAiBaseUrl).toBe("https://text-relay.example.com/v1");
+    expect(config.dashScopeRealtimeApiKey).toBe("dashscope-key");
+    expect(config.dashScopeWorkspaceId).toBe("llm-aurora123");
+    expect(config.dashScopeRealtimeBaseUrl).toBe("https://voice.example.com/api/v1/webrtc/realtime");
   });
 
   it("lets the project .env override inherited process environment variables", async () => {

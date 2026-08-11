@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
@@ -16,26 +13,63 @@ import { EnvironmentService as OpenMeteoEnvironmentService } from "./environment
 import { NcmConnector } from "./ncmConnector.js";
 import { RadioOrchestrator } from "./orchestrator.js";
 import { RadioPlanner } from "./radioPlanner.js";
+import {
+  buildRealtimeSessionConfig,
+  createRealtimeSession,
+  REALTIME_MODEL,
+  REALTIME_VOICE
+} from "./realtimeSession.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
 import { StateRepository } from "./stateRepository.js";
 import { TasteEngine } from "./tasteEngine.js";
-import { TtsPipeline } from "./ttsPipeline.js";
 import { WsHub } from "./wsHub.js";
 
 const chatSchema = z.object({
-  message: z.string().min(1)
+  message: z.string().min(1),
+  turnId: z.string().min(1).max(200).optional()
 });
 
-const chatStreamSchema = chatSchema.extend({
-  synthesizeSpeech: z.boolean().optional()
-});
-
-const chatSpeechParamsSchema = z.object({
-  messageId: z.coerce.number().int().positive()
-});
+const chatStreamSchema = chatSchema;
 
 const chatMemoryParamsSchema = z.object({
   memoryId: z.coerce.number().int().positive()
+});
+
+const realtimeSessionQuerySchema = z.object({
+  sessionId: z.string().min(1).max(200).optional(),
+  baselineRevision: z.coerce.number().int().min(0).optional()
+});
+
+const realtimeErrorSchema = z.object({ code: z.string().min(1).max(200) });
+
+const voiceTurnSchema = z.object({
+  sessionId: z.string().min(1).max(200),
+  clientTurnId: z.string().min(1).max(200),
+  transcript: z.string().min(1).max(20_000),
+  at: z.string().datetime()
+});
+
+const voiceTurnParamsSchema = z.object({ turnId: z.string().min(1).max(500) });
+
+const voiceTurnCompleteSchema = z.object({
+  transcript: z.string().max(30_000).optional(),
+  model: z.string().min(1).max(200),
+  responseId: z.string().max(200).optional(),
+  status: z.enum(["completed", "interrupted", "failed"]),
+  at: z.string().datetime()
+});
+
+const musicCommandSchema = z.object({
+  turnId: z.string().min(1).max(500),
+  commandId: z.string().min(1).max(200),
+  request: z.string().min(1).max(20_000),
+  mode: z.enum(["text_suggest", "voice_direct"]),
+  confirmationToken: z.string().min(1).max(200).optional(),
+  selectedTrackId: z.number().int().optional()
+});
+
+const audioTrackParamsSchema = z.object({
+  trackId: z.coerce.number().int().positive()
 });
 
 const nextSchema = z
@@ -62,6 +96,10 @@ const trackSchema = z.object({
 const playTrackSchema = z.object({
   track: trackSchema,
   reason: z.string().optional()
+});
+
+const queuedTrackParamsSchema = z.object({
+  trackId: z.coerce.number().int().positive()
 });
 
 const feedbackSchema = z.object({
@@ -99,11 +137,14 @@ interface CreateServerOptions {
   tasteEngine?: TasteEngine;
   djBrain?: DjBrain;
   aiDjAssistant?: AiDjAssistant;
-  ttsPipeline?: TtsPipeline;
   environmentService?: EnvironmentRuntime;
   recommendationImporter?: RecommendationImporter;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
+  realtimeApiKey?: string;
+  realtimeBaseUrl?: string;
+  realtimeWorkspaceId?: string;
+  realtimeFetch?: typeof fetch;
 }
 
 export async function createServer(options: CreateServerOptions = {}) {
@@ -112,8 +153,9 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
   await app.register(cors, { origin: true });
   await app.register(websocket);
-
-  fs.mkdirSync(config.ttsCacheDir, { recursive: true });
+  app.addContentTypeParser("application/sdp", { parseAs: "string" }, (_request, body, done) => {
+    done(null, body);
+  });
 
   const repo = options.repo ?? new StateRepository(config.dbPath);
   const ncm =
@@ -126,7 +168,13 @@ export async function createServer(options: CreateServerOptions = {}) {
     ncm,
     options.tasteEngine ?? new TasteEngine(),
     options.planner ?? new RadioPlanner(),
-    options.djBrain ?? new DjBrain(config.openAiApiKey),
+    options.djBrain ??
+      new DjBrain({
+        apiKey: config.openAiApiKey,
+        baseUrl: config.openAiBaseUrl,
+        model: config.openAiModel,
+        provider: config.aiProvider
+      }),
     options.aiDjAssistant ??
       new OpenAiDjAssistant({
         apiKey: config.openAiApiKey,
@@ -135,13 +183,13 @@ export async function createServer(options: CreateServerOptions = {}) {
         provider: config.aiProvider,
         chatMaxTokens: config.aiDjChatMaxTokens
       }),
-    options.ttsPipeline ?? new TtsPipeline(config.ttsCacheDir, config.ttsVoice),
     wsHub,
     options.djBroadcastInterval ?? config.djBroadcastInterval,
     config.aiDjMemoryTurns,
     options.importRetryIntervalMs,
     environmentService,
-    options.recommendationImporter ?? new RecommendationImporter(repo, ncm)
+    options.recommendationImporter ?? new RecommendationImporter(repo, ncm),
+    config.realtimeConversationMode
   );
   await orchestrator.initialize();
   app.addHook("onClose", async () => {
@@ -150,7 +198,95 @@ export async function createServer(options: CreateServerOptions = {}) {
 
   app.get("/health", async () => ({ ok: true }));
 
+  app.get("/api/realtime/session", async (request, reply) => {
+    const parsed = realtimeSessionQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const sessionId = parsed.data.sessionId ?? crypto.randomUUID();
+    const context = orchestrator.buildRealtimeContext(sessionId, parsed.data.baselineRevision);
+    return {
+      enabled: Boolean(options.realtimeApiKey ?? config.dashScopeRealtimeApiKey),
+      model: REALTIME_MODEL,
+      voice: REALTIME_VOICE,
+      sessionId,
+      contextRevision: context.contextRevision,
+      conversationMode: config.realtimeConversationMode,
+      session: buildRealtimeSessionConfig(
+        config.realtimeConversationMode === "unified" ? context.instructions : undefined,
+        config.realtimeConversationMode
+      )
+    };
+  });
+
+  app.get("/api/realtime/context", async (request, reply) => {
+    const parsed = realtimeSessionQuerySchema.safeParse(request.query);
+    if (!parsed.success || !parsed.data.sessionId) {
+      return reply.status(400).send({ error: "invalid_realtime_context_query" });
+    }
+    const context = orchestrator.buildRealtimeContext(
+      parsed.data.sessionId,
+      parsed.data.baselineRevision
+    );
+    return {
+      sessionId: parsed.data.sessionId,
+      ...context,
+      session: buildRealtimeSessionConfig(
+        config.realtimeConversationMode === "unified" ? context.instructions : undefined,
+        config.realtimeConversationMode
+      )
+    };
+  });
+
+  app.post("/api/realtime/errors", async (request, reply) => {
+    const parsed = realtimeErrorSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: "invalid_realtime_error" });
+    }
+    await orchestrator.reportRealtimeError(parsed.data.code);
+    return { ok: true };
+  });
+
+  app.post("/api/realtime/session", async (request, reply) => {
+    const apiKey = options.realtimeApiKey ?? config.dashScopeRealtimeApiKey;
+    if (!apiKey) {
+      return reply.status(503).send({ error: "dashscope_realtime_not_configured" });
+    }
+    if (typeof request.body !== "string" || request.body.trim().length === 0) {
+      return reply.status(400).send({ error: "invalid_sdp_offer" });
+    }
+
+    try {
+      const realtimeBaseUrl = options.realtimeBaseUrl ?? config.dashScopeRealtimeBaseUrl;
+      const realtimeWorkspaceId = options.realtimeWorkspaceId ?? config.dashScopeWorkspaceId;
+      const answerSdp = await createRealtimeSession({
+        apiKey,
+        ...(realtimeBaseUrl ? { baseUrl: realtimeBaseUrl } : {}),
+        ...(realtimeWorkspaceId ? { workspaceId: realtimeWorkspaceId } : {}),
+        offerSdp: request.body,
+        ...(options.realtimeFetch ? { fetchFn: options.realtimeFetch } : {})
+      });
+      return reply.status(201).type("application/sdp").send(answerSdp);
+    } catch (error) {
+      request.log.error({ err: error }, "DashScope Realtime session setup failed");
+      return reply.status(502).send({ error: "realtime_session_failed" });
+    }
+  });
+
   app.get("/api/now", async () => orchestrator.getNow());
+
+  app.get("/api/tracks/:trackId/audio", async (request, reply) => {
+    const parsed = audioTrackParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    reply.header("cache-control", "no-store");
+    const songUrl = await ncm.resolveSongUrl(parsed.data.trackId);
+    if (!songUrl) {
+      return reply.status(503).send({ error: "audio_unavailable" });
+    }
+    return reply.redirect(songUrl);
+  });
 
   app.get("/api/taste", async () => {
     const taste = orchestrator.getTaste();
@@ -178,12 +314,24 @@ export async function createServer(options: CreateServerOptions = {}) {
     return { now };
   });
 
+  app.post("/api/queue/:trackId/play", async (request, reply) => {
+    const parsed = queuedTrackParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const now = await orchestrator.playQueuedTrack(parsed.data.trackId);
+    if (!now) {
+      return reply.status(404).send({ error: "queued_track_not_found" });
+    }
+    return { now };
+  });
+
   app.post("/api/chat", async (request, reply) => {
     const parsed = chatSchema.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    return orchestrator.handleChat(parsed.data.message);
+    return orchestrator.handleChat(parsed.data.message, parsed.data.turnId);
   });
 
   app.post("/api/chat/stream", async (request, reply) => {
@@ -207,11 +355,9 @@ export async function createServer(options: CreateServerOptions = {}) {
 
     try {
       await orchestrator.handleChatStream(parsed.data.message, {
-        synthesizeSpeech: parsed.data.synthesizeSpeech ?? true,
         onTextDelta: (delta) => writeEvent({ type: "text_delta", delta }),
-        onSpeech: (segment) => writeEvent({ type: "speech", ...segment }),
         onResult: (response) => writeEvent({ type: "result", response })
-      });
+      }, parsed.data.turnId);
     } catch {
       writeEvent({ type: "error", message: "chat_stream_failed" });
     } finally {
@@ -223,6 +369,57 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.get("/api/chat/history", async () => orchestrator.getChatHistory());
+
+  app.post("/api/conversation/voice/turns", async (request, reply) => {
+    const parsed = voiceTurnSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    return orchestrator.startVoiceTurn(parsed.data);
+  });
+
+  app.post("/api/conversation/voice/turns/:turnId/complete", async (request, reply) => {
+    const params = voiceTurnParamsSchema.safeParse(request.params);
+    const body = voiceTurnCompleteSchema.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return reply.status(400).send({ error: "invalid_voice_turn_completion" });
+    }
+    try {
+      return {
+        messages: await orchestrator.completeVoiceTurn(params.data.turnId, {
+          model: body.data.model,
+          status: body.data.status,
+          at: body.data.at,
+          ...(body.data.transcript !== undefined ? { transcript: body.data.transcript } : {}),
+          ...(body.data.responseId !== undefined ? { responseId: body.data.responseId } : {})
+        })
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message === "voice_turn_not_found") {
+        return reply.status(404).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/music/commands", async (request, reply) => {
+    const parsed = musicCommandSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    return orchestrator.executeMusicCommand({
+      turnId: parsed.data.turnId,
+      commandId: parsed.data.commandId,
+      request: parsed.data.request,
+      mode: parsed.data.mode,
+      ...(parsed.data.confirmationToken !== undefined
+        ? { confirmationToken: parsed.data.confirmationToken }
+        : {}),
+      ...(parsed.data.selectedTrackId !== undefined
+        ? { selectedTrackId: parsed.data.selectedTrackId }
+        : {})
+    });
+  });
 
   app.get("/api/chat/memories", async () => orchestrator.getChatMemories());
 
@@ -238,28 +435,6 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   app.delete("/api/chat/memories", async () => orchestrator.clearChatMemories());
-
-  app.post("/api/chat/:messageId/speech", async (request, reply) => {
-    const parsed = chatSpeechParamsSchema.safeParse(request.params);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
-    }
-    const result = await orchestrator.synthesizeChatMessage(parsed.data.messageId);
-    switch (result.status) {
-      case "ok":
-        return {
-          messageId: result.messageId,
-          audioUrl: result.audioUrl,
-          segments: result.segments
-        };
-      case "not_found":
-        return reply.status(404).send({ error: "chat_message_not_found" });
-      case "not_assistant":
-        return reply.status(422).send({ error: "chat_message_not_assistant" });
-      case "unavailable":
-        return reply.status(503).send({ error: "speech_unavailable" });
-    }
-  });
 
   app.delete("/api/chat/history", async () => orchestrator.clearChatHistory());
 
@@ -326,16 +501,6 @@ export async function createServer(options: CreateServerOptions = {}) {
     calendar: { enabled: false },
     upnp: { enabled: false }
   }));
-
-  app.get("/tts-cache/:file", async (request, reply) => {
-    const filename = path.basename((request.params as { file: string }).file);
-    const filePath = path.resolve(config.ttsCacheDir, filename);
-    if (!fs.existsSync(filePath)) {
-      return reply.status(404).send({ error: "not_found" });
-    }
-    reply.header("Cache-Control", "public, max-age=31536000, immutable");
-    return reply.send(fs.createReadStream(filePath));
-  });
 
   app.get("/ws/stream", { websocket: true }, (socket) => {
     wsHub.addSocket(socket);

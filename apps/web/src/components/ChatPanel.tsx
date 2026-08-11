@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { FormEvent, RefObject } from "react";
 
 import type {
@@ -11,6 +11,8 @@ import aiDjAvatarUrl from "../assets/ai-dj-avatar.svg";
 import { ChatMemoryPanel } from "../ChatMemoryPanel";
 import { ChatStreamFeedbackNotice } from "../ChatStreamFeedbackNotice";
 import type { ChatStreamFeedback } from "../chatStream";
+import type { RealtimeVoiceStatus } from "../realtimeVoice";
+import type { StreamingTextStore } from "../streamingTextStore";
 
 export type PanelTab = "chat" | "queue";
 
@@ -27,7 +29,6 @@ interface ChatPanelProps {
   failedSpeechId: number | null;
   hasTrack: boolean;
   historyEmpty: boolean;
-  input: string;
   loadingSpeechId: number | null;
   memories: ChatMemory[];
   memoryBusyId: number | null;
@@ -37,10 +38,13 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   nowTitle: string;
   queue: RadioPlanItem[];
+  queueLoadingTrackId: number | null;
+  realtimeStatus: RealtimeVoiceStatus;
+  realtimeStatusLabel: string;
   speechNotice: string | null;
   streamingMessageAt: string | null;
+  streamingTextStore: StreamingTextStore;
   suggestionLoadingId: string | null;
-  onChangeInput: (value: string) => void;
   onChangeTab: (tab: PanelTab) => void;
   onChangeTone: (tone: DjSettings["tone"]) => void;
   onClearHistory: () => void;
@@ -49,12 +53,14 @@ interface ChatPanelProps {
   onFeedbackRetry: () => void;
   onForgetMemory: (memory: ChatMemory) => void;
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => void;
+  onPlayQueueTrack: (trackId: number) => void;
   onQuickPrompt: (prompt: string) => void;
   onReplayDj: () => void;
   onSpeakMessage: (message: ChatMessage) => void;
   onStopStream: () => void;
-  onSubmit: () => void;
+  onSubmit: (message: string) => void;
   onToggleAutoSpeak: (enabled: boolean) => void;
+  onToggleRealtimeVoice: () => void;
   onToggleMemory: () => void;
   inputRef: RefObject<HTMLInputElement | null>;
 }
@@ -66,6 +72,36 @@ function formatArtists(artists: string[] | undefined): string {
   return artists.join(" / ");
 }
 
+const StreamingMessageRow = memo(function StreamingMessageRow({
+  onTextChange,
+  store
+}: {
+  onTextChange: () => void;
+  store: StreamingTextStore;
+}) {
+  const text = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+
+  useEffect(() => {
+    onTextChange();
+  }, [onTextChange, text]);
+
+  return (
+    <div className="message-row assistant-row">
+      <div className="dj-avatar" aria-hidden="true">
+        <img alt="" src={aiDjAvatarUrl} />
+      </div>
+      <div className="message-bubble">
+        <div className="message-copy-row">
+          <p>
+            {text}
+            <span className="streaming-caret" aria-label="正在生成回复" />
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 const MessageList = memo(function MessageList({
   activeSpeechKey,
   chatLoading,
@@ -75,6 +111,7 @@ const MessageList = memo(function MessageList({
   onPlaySuggestion,
   onSpeakMessage,
   streamingMessageAt,
+  streamingTextStore,
   suggestionLoadingId
 }: Pick<
   ChatPanelProps,
@@ -84,25 +121,54 @@ const MessageList = memo(function MessageList({
   | "loadingSpeechId"
   | "messages"
   | "streamingMessageAt"
+  | "streamingTextStore"
   | "suggestionLoadingId"
 > & {
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => void;
   onSpeakMessage: (message: ChatMessage) => void;
 }) {
   const messageThreadRef = useRef<HTMLDivElement>(null);
+  const scrollFrameRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    const thread = messageThreadRef.current;
-    if (!thread) {
+  const scrollToBottom = useCallback(() => {
+    if (scrollFrameRef.current !== null) {
       return;
     }
-    thread.scrollTop = thread.scrollHeight;
-  }, [messages.length, messages.at(-1)?.text, chatLoading]);
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const thread = messageThreadRef.current;
+      if (thread) {
+        thread.scrollTop = thread.scrollHeight;
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [chatLoading, messages.length, messages.at(-1)?.text, scrollToBottom, streamingMessageAt]);
+
+  useEffect(
+    () => () => {
+      if (scrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(scrollFrameRef.current);
+      }
+    },
+    []
+  );
 
   return (
     <div className="message-thread" ref={messageThreadRef}>
       {messages.map((message, index) => {
         const isStreaming = message.at === streamingMessageAt;
+        if (isStreaming) {
+          return (
+            <StreamingMessageRow
+              key={`${message.at}-${index}`}
+              onTextChange={scrollToBottom}
+              store={streamingTextStore}
+            />
+          );
+        }
         return (
           <div
             className={message.role === "assistant" ? "message-row assistant-row" : "message-row user-row"}
@@ -117,7 +183,6 @@ const MessageList = memo(function MessageList({
               <div className="message-copy-row">
                 <p>
                   {message.text}
-                  {isStreaming ? <span className="streaming-caret" aria-label="正在生成回复" /> : null}
                 </p>
                 {message.role === "assistant" && message.id ? (
                   <button
@@ -144,6 +209,12 @@ const MessageList = memo(function MessageList({
                   </button>
                 ) : null}
               </div>
+              {message.source === "voice" ? (
+                <span className="message-voice-meta">
+                  <span aria-hidden="true">🎙</span>
+                  语音{message.status === "interrupted" ? " · 已打断" : ""}
+                </span>
+              ) : null}
               {message.role === "assistant" && message.trackSuggestion ? (
                 <button
                   className="track-suggestion"
@@ -176,7 +247,15 @@ const MessageList = memo(function MessageList({
   );
 });
 
-const QueueRail = memo(function QueueRail({ queue }: { queue: RadioPlanItem[] }) {
+export const QueueRail = memo(function QueueRail({
+  loadingTrackId,
+  onPlayTrack,
+  queue
+}: {
+  loadingTrackId: number | null;
+  onPlayTrack: (trackId: number) => void;
+  queue: RadioPlanItem[];
+}) {
   if (queue.length === 0) {
     return (
       <div className="queue-empty">
@@ -188,19 +267,32 @@ const QueueRail = memo(function QueueRail({ queue }: { queue: RadioPlanItem[] })
   }
   return (
     <ol className="queue-rail">
-      {queue.slice(0, 10).map((item, index) => (
-        <li key={item.track.id} className={item.bucket === "explore" ? "queue-card is-explore" : "queue-card"}>
-          <span className="queue-index">{String(index + 1).padStart(2, "0")}</span>
-          <span className="queue-cover" aria-hidden="true">
-            {item.track.coverUrl ? <img alt="" src={item.track.coverUrl} /> : "♪"}
-          </span>
-          <span className="queue-copy">
-            <strong>{item.track.title}</strong>
-            <em>{formatArtists(item.track.artists)}</em>
-          </span>
-          <span className="queue-bucket">{item.bucket === "explore" ? "探索" : "口味"}</span>
-        </li>
-      ))}
+      {queue.slice(0, 10).map((item, index) => {
+        const loading = loadingTrackId === item.track.id;
+        return (
+          <li key={item.track.id}>
+            <button
+              aria-label={`立即播放 ${item.track.title}`}
+              className={item.bucket === "explore" ? "queue-card is-explore" : "queue-card"}
+              disabled={loadingTrackId !== null}
+              onClick={() => onPlayTrack(item.track.id)}
+              type="button"
+            >
+              <span className="queue-index">{String(index + 1).padStart(2, "0")}</span>
+              <span className="queue-cover" aria-hidden="true">
+                {item.track.coverUrl ? <img alt="" src={item.track.coverUrl} /> : "♪"}
+              </span>
+              <span className="queue-copy">
+                <strong>{item.track.title}</strong>
+                <em>{formatArtists(item.track.artists)}</em>
+              </span>
+              <span className="queue-bucket">
+                {loading ? "切换中" : item.bucket === "explore" ? "探索" : "口味"}
+              </span>
+            </button>
+          </li>
+        );
+      })}
     </ol>
   );
 });
@@ -217,14 +309,14 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
     djSettings,
     hasTrack,
     historyEmpty,
-    input,
     memories,
     memoryOpen,
     messages,
     nowTitle,
     queue,
+    realtimeStatus,
+    realtimeStatusLabel,
     speechNotice,
-    onChangeInput,
     onChangeTab,
     onChangeTone,
     onClearHistory,
@@ -233,13 +325,20 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
     onStopStream,
     onSubmit,
     onToggleAutoSpeak,
+    onToggleRealtimeVoice,
     onToggleMemory,
     inputRef
   } = props;
+  const [input, setInput] = useState("");
 
   const onSubmitForm = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    onSubmit();
+    const message = input.trim();
+    if (!message) {
+      return;
+    }
+    setInput("");
+    onSubmit(message);
   };
 
   return (
@@ -281,10 +380,21 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
                 type="checkbox"
                 checked={autoSpeak}
                 onChange={(event) => onToggleAutoSpeak(event.currentTarget.checked)}
+                disabled={realtimeStatus !== "ready" && realtimeStatus !== "listening" && realtimeStatus !== "speaking"}
               />
-              自动朗读
+              朗读文字回复
             </label>
-            <span className="voice-chip">全程小晓声线</span>
+            <button
+              className={realtimeStatus === "idle" || realtimeStatus === "error"
+                ? "realtime-voice-button"
+                : "realtime-voice-button is-active"}
+              type="button"
+              aria-pressed={realtimeStatus !== "idle" && realtimeStatus !== "error"}
+              onClick={onToggleRealtimeVoice}
+              disabled={realtimeStatus === "connecting"}
+            >
+              {realtimeStatusLabel}
+            </button>
             <button
               className={memoryOpen ? "memory-toggle is-open" : "memory-toggle"}
               type="button"
@@ -319,6 +429,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             onPlaySuggestion={props.onPlaySuggestion}
             onSpeakMessage={props.onSpeakMessage}
             streamingMessageAt={props.streamingMessageAt}
+            streamingTextStore={props.streamingTextStore}
             suggestionLoadingId={props.suggestionLoadingId}
           />
 
@@ -360,7 +471,7 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             <input
               ref={inputRef}
               value={input}
-              onChange={(event) => onChangeInput(event.target.value)}
+              onChange={(event) => setInput(event.target.value)}
               placeholder="想聊什么都可以；需要点歌时直接告诉我～"
               aria-label="给电台 DJ 发消息"
               disabled={chatLoading}
@@ -383,7 +494,11 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           </form>
         </>
       ) : (
-        <QueueRail queue={queue} />
+        <QueueRail
+          loadingTrackId={props.queueLoadingTrackId}
+          onPlayTrack={props.onPlayQueueTrack}
+          queue={queue}
+        />
       )}
     </aside>
   );

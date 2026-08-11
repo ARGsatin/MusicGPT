@@ -406,7 +406,7 @@ export const TurntableStage = memo(function TurntableStage({
       <audio
         ref={audioRef}
         autoPlay
-        src={now.track?.songUrl}
+        src={now.track ? `/api/tracks/${now.track.id}/audio` : undefined}
         onEnded={() => void onTrackEnded()}
         onPlay={() => setPlaybackPaused(false)}
         onPause={() => setPlaybackPaused(true)}

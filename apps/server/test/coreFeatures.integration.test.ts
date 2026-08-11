@@ -11,7 +11,6 @@ import { DjBrain } from "../src/djBrain.js";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
-import { TtsPipeline } from "../src/ttsPipeline.js";
 
 const servers: Array<{ close: () => Promise<unknown> }> = [];
 
@@ -28,9 +27,6 @@ describe("core feature integration", () => {
   it("exposes V1.5 environment, recommendation import, and DJ settings endpoints", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-v15-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
-    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-      fs.writeFileSync(filePath, "audio");
-    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
     const environmentService: Pick<EnvironmentService, "getContext" | "updateLocation"> = {
       getContext: () => ({
@@ -53,7 +49,6 @@ describe("core feature integration", () => {
       ncm,
       aiDjAssistant: createLocalAssistant(),
       djBrain: new DjBrain(),
-      ttsPipeline: tts,
       environmentService,
       djBroadcastInterval: 4,
       importRetryIntervalMs: 50
@@ -94,29 +89,25 @@ describe("core feature integration", () => {
     const settingsRes = await fetch(`${base}/api/dj/settings`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tone: "lively", voiceGender: "female", voice: "zh-CN-XiaoxiaoNeural" })
+      body: JSON.stringify({ tone: "lively", voiceGender: "female", voice: "marin" })
     });
     expect(settingsRes.ok).toBe(true);
     const settings = (await settingsRes.json()) as { tone: string; voiceGender: string; voice: string };
     expect(settings).toEqual({
       tone: "lively",
       voiceGender: "female",
-      voice: "zh-CN-XiaoxiaoNeural"
+      voice: "marin"
     });
   });
 
-  it("records completion via feedback and triggers DJ by completed tracks", async () => {
+  it("records completion but skips scheduled DJ output when AI is unavailable", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-core-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
-    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-      fs.writeFileSync(filePath, "audio");
-    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
     const app = await createServer({
       repo,
       ncm,
       djBrain: new DjBrain(),
-      ttsPipeline: tts,
       djBroadcastInterval: 2,
       importRetryIntervalMs: 50
     });
@@ -136,21 +127,18 @@ describe("core feature integration", () => {
 
     await sendFeedback(base, "complete", secondNow.track!.id);
     const thirdNow = await requestNext(base);
-    expect(thirdNow.djScript?.text.length).toBeGreaterThan(0);
+    expect(thirdNow.track?.id).toBeDefined();
+    expect(thirdNow.djScript).toBeUndefined();
   });
 
   it("updates local favorite state and exposes status/import endpoints", async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-status-"));
     const repo = new StateRepository(path.join(tmp, "state.db"));
-    const tts = new TtsPipeline(path.join(tmp, "tts"), "zh-CN-XiaoxiaoNeural", async (_text, filePath) => {
-      fs.writeFileSync(filePath, "audio");
-    });
     const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
     const app = await createServer({
       repo,
       ncm,
       djBrain: new DjBrain(),
-      ttsPipeline: tts,
       djBroadcastInterval: 4,
       importRetryIntervalMs: 50
     });
@@ -325,8 +313,7 @@ function createLocalAssistant(): AiDjAssistant {
     status: () => ({ configured: false, provider: "local" }),
     classify: async (message) => fallbackClassify(message),
     selectTrack: async (_description, candidates) => ({
-      trackId: candidates[0]?.id,
-      reason: "本地上下文排序"
+      trackId: candidates[0]?.id
     }),
     commentTrack: async (track) => `这首《${track.title}》和现在的氛围很合拍。`,
     commentCurrent: async () => "正在播放的这首很合适。",

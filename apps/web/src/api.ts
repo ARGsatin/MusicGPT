@@ -2,7 +2,6 @@ import type {
   ChatMemory,
   ChatMessage,
   ChatResponse,
-  ChatSpeechResponse,
   ChatStreamEvent,
   DjSettings,
   EnvironmentContext,
@@ -12,11 +11,17 @@ import type {
   ImportNcmResponse,
   NextResponse,
   NowPlayingState,
+  MusicCommandRequest,
+  MusicCommandResult,
   PlayTrackResponse,
+  RealtimeContextResponse,
   RecommendationImportResponse,
   SystemStatus,
   TasteProfile,
-  Track
+  Track,
+  VoiceTurnCompleteRequest,
+  VoiceTurnStartRequest,
+  VoiceTurnStartResponse
 } from "@musicgpt/shared";
 import { API_ROUTES } from "@musicgpt/shared";
 
@@ -46,11 +51,11 @@ export async function fetchTaste(): Promise<TasteProfile | null> {
   return (await response.json()) as TasteProfile;
 }
 
-export async function sendChat(message: string): Promise<ChatResponse> {
+export async function sendChat(message: string, turnId?: string): Promise<ChatResponse> {
   const response = await fetch("/api/chat", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ message })
+    body: JSON.stringify({ message, ...(turnId ? { turnId } : {}) })
   });
   if (!response.ok) {
     throw new Error("Chat failed");
@@ -61,18 +66,15 @@ export async function sendChat(message: string): Promise<ChatResponse> {
 export async function sendChatStream(
   message: string,
   options: {
-    synthesizeSpeech: boolean;
     signal?: AbortSignal;
+    turnId?: string;
     onEvent: (event: ChatStreamEvent) => void;
   }
 ): Promise<ChatResponse> {
   const response = await fetch(API_ROUTES.chatStream, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      message,
-      synthesizeSpeech: options.synthesizeSpeech
-    }),
+    body: JSON.stringify({ message, ...(options.turnId ? { turnId: options.turnId } : {}) }),
     ...(options.signal ? { signal: options.signal } : {})
   });
   return readChatEventStream(response, options.onEvent);
@@ -175,14 +177,75 @@ export async function clearChatMemories(): Promise<void> {
   }
 }
 
-export async function generateChatSpeech(messageId: number): Promise<ChatSpeechResponse> {
-  const response = await fetch(API_ROUTES.chatSpeech(messageId), {
-    method: "POST"
+export async function startVoiceTurn(input: VoiceTurnStartRequest): Promise<VoiceTurnStartResponse> {
+  const response = await fetchWithMemoryRetry(API_ROUTES.voiceTurns, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
   });
-  if (!response.ok) {
-    throw new Error("Speech synthesis failed");
+  if (!response.ok) throw new Error("Voice turn could not be saved");
+  return response.json() as Promise<VoiceTurnStartResponse>;
+}
+
+export async function completeVoiceTurn(
+  turnId: string,
+  input: VoiceTurnCompleteRequest
+): Promise<ChatMessage[]> {
+  const response = await fetchWithMemoryRetry(API_ROUTES.voiceTurnComplete(turnId), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw new Error("Voice turn could not be completed");
+  const payload = await response.json() as { messages: ChatMessage[] };
+  return payload.messages;
+}
+
+export async function runMusicCommand(input: MusicCommandRequest): Promise<MusicCommandResult> {
+  const response = await fetchWithMemoryRetry(API_ROUTES.musicCommands, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input)
+  });
+  if (!response.ok) throw new Error("Music command failed");
+  return response.json() as Promise<MusicCommandResult>;
+}
+
+async function fetchWithMemoryRetry(
+  input: RequestInfo | URL,
+  init: RequestInit,
+  attempts = 3
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = await fetch(input, init);
+      if (response.status < 500 || attempt === attempts - 1) return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1) throw error;
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 200 * (attempt + 1)));
   }
-  return (await response.json()) as ChatSpeechResponse;
+  throw lastError instanceof Error ? lastError : new Error("Request failed");
+}
+
+export async function fetchRealtimeContext(
+  sessionId: string,
+  baselineRevision: number
+): Promise<RealtimeContextResponse> {
+  const query = new URLSearchParams({ sessionId, baselineRevision: String(baselineRevision) });
+  const response = await fetch(`${API_ROUTES.realtimeContext}?${query}`);
+  if (!response.ok) throw new Error("Realtime context refresh failed");
+  return response.json() as Promise<RealtimeContextResponse>;
+}
+
+export async function reportRealtimeError(code: string): Promise<void> {
+  await fetch(API_ROUTES.realtimeErrors, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code: code.slice(0, 200) })
+  });
 }
 
 export async function clearChatHistory(): Promise<void> {
@@ -214,6 +277,16 @@ export async function playSuggestedTrack(track: Track, reason?: string): Promise
   });
   if (!response.ok) {
     throw new Error("Failed to play suggested track");
+  }
+  return (await response.json()) as PlayTrackResponse;
+}
+
+export async function playQueuedTrack(trackId: number): Promise<PlayTrackResponse> {
+  const response = await fetch(`/api/queue/${trackId}/play`, {
+    method: "POST"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to play queued track");
   }
   return (await response.json()) as PlayTrackResponse;
 }
