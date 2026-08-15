@@ -4,6 +4,7 @@ import type {
   EnvironmentContext,
   EnvironmentLocation,
   EnvironmentLocationRequest,
+  EnvironmentTimeline,
   WeatherKind
 } from "@musicgpt/shared";
 
@@ -13,6 +14,11 @@ interface OpenMeteoResponse {
   current?: {
     temperature_2m?: number;
     weather_code?: number;
+  };
+  hourly?: {
+    time?: string[];
+    temperature_2m?: number[];
+    weather_code?: number[];
   };
 }
 
@@ -81,6 +87,41 @@ export class EnvironmentService {
       return this.context;
     }
   }
+
+  async getTimeline(date: string, timezone = "Asia/Shanghai"): Promise<EnvironmentTimeline> {
+    const location = this.context.location;
+    if (!location) {
+      return { timezone, points: [], updatedAt: new Date().toISOString() };
+    }
+    try {
+      const url = new URL("https://api.open-meteo.com/v1/forecast");
+      url.searchParams.set("latitude", String(location.latitude));
+      url.searchParams.set("longitude", String(location.longitude));
+      url.searchParams.set("hourly", "temperature_2m,weather_code");
+      url.searchParams.set("start_date", date);
+      url.searchParams.set("end_date", date);
+      url.searchParams.set("timezone", timezone);
+      const response = await this.fetchImpl(url);
+      if (!response.ok) throw new Error(`weather request failed: ${response.status}`);
+      const payload = (await response.json()) as OpenMeteoResponse;
+      const times = payload.hourly?.time ?? [];
+      const codes = payload.hourly?.weather_code ?? [];
+      const temperatures = payload.hourly?.temperature_2m ?? [];
+      return {
+        timezone,
+        points: times.map((at, index) => ({
+          at,
+          weather: mapWeatherCode(codes[index]),
+          ...(typeof temperatures[index] === "number"
+            ? { temperature: Math.round(temperatures[index]!) }
+            : {})
+        })),
+        updatedAt: new Date().toISOString()
+      };
+    } catch {
+      return { timezone, points: [], updatedAt: new Date().toISOString() };
+    }
+  }
 }
 
 export function isWeatherFresh(context: EnvironmentContext, now = Date.now()): boolean {
@@ -109,13 +150,13 @@ function mapWeatherCode(code: number | undefined): WeatherKind {
   if (code === 2 || code === 3) {
     return "cloudy";
   }
-  if ((code >= 45 && code <= 48) || code === 77) {
+  if (code >= 45 && code <= 48) {
     return "fog";
   }
   if ((code >= 51 && code <= 67) || (code >= 80 && code <= 82)) {
     return "rain";
   }
-  if ((code >= 71 && code <= 86) || (code >= 85 && code <= 86)) {
+  if ((code >= 71 && code <= 77) || (code >= 85 && code <= 86)) {
     return "snow";
   }
   if (code >= 95 && code <= 99) {
