@@ -10,14 +10,23 @@ import type {
   DjSettings,
   DjScript,
   EnvironmentContext,
+  LibraryEvidence,
+  DailyPlan,
   NowPlayingState,
   PlayEvent,
   RecommendationCandidate,
   RecommendationSource,
   TasteProfile,
   Track,
+  TrackReference,
   TrackStat
 } from "@musicgpt/shared";
+
+import {
+  getTrackKey,
+  normalizeTrackIdentity,
+  normalizeTrackReference
+} from "./musicCatalog.js";
 
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) {
@@ -32,17 +41,44 @@ function parseJson<T>(raw: string | null, fallback: T): T {
 
 export class StateRepository {
   private readonly db: DatabaseSync;
+  private migratedToV2 = false;
 
-  constructor(dbPath: string) {
+  constructor(readonly dbPath: string) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
+    this.backupLegacyDatabase(dbPath);
     this.bootstrap();
+  }
+
+  private backupLegacyDatabase(dbPath: string): void {
+    if (dbPath === ":memory:" || !fs.existsSync(dbPath) || !this.hasLegacyTrackIdentitySchema()) {
+      return;
+    }
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const backupPath = `${dbPath}.v1-backup-${stamp}`;
+    // VACUUM INTO uses SQLite's own snapshot machinery, so the backup stays
+    // consistent even when the source database uses a journal or WAL file.
+    this.db.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
+  }
+
+  private hasLegacyTrackIdentitySchema(): boolean {
+    return ["track_stats", "play_events", "recommendation_candidates"].some((table) => {
+      const exists = this.db
+        .prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(table) as { found: number } | undefined;
+      if (!exists) return false;
+      const columns = this.tableColumns(table);
+      return columns.includes("track_id") && !columns.includes("track_key");
+    });
   }
 
   private bootstrap(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS track_stats (
-        track_id INTEGER PRIMARY KEY,
+        track_key TEXT PRIMARY KEY,
+        recording_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL,
         track_json TEXT NOT NULL,
         liked_at TEXT,
         local_favorited_at TEXT,
@@ -52,7 +88,7 @@ export class StateRepository {
       );
       CREATE TABLE IF NOT EXISTS play_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        track_id INTEGER NOT NULL,
+        track_key TEXT NOT NULL,
         event_type TEXT NOT NULL,
         at TEXT NOT NULL,
         metadata_json TEXT
@@ -101,25 +137,225 @@ export class StateRepository {
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS recommendation_candidates (
-        track_id INTEGER PRIMARY KEY,
+        track_key TEXT PRIMARY KEY,
         track_json TEXT NOT NULL,
         source TEXT NOT NULL,
+        provider TEXT,
+        discovery TEXT,
         tags_json TEXT NOT NULL,
+        relevance_score REAL NOT NULL DEFAULT 0.5,
         discovered_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS recordings (
+        recording_key TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        artists_json TEXT NOT NULL,
+        duration_ms INTEGER,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS source_tracks (
+        track_key TEXT PRIMARY KEY,
+        recording_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        source_id TEXT NOT NULL,
+        track_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS track_tag_evidence (
+        track_key TEXT NOT NULL,
+        category TEXT NOT NULL,
+        value TEXT NOT NULL,
+        source TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(track_key, category, value, source)
+      );
+      CREATE TABLE IF NOT EXISTS library_evidence (
+        track_key TEXT NOT NULL,
+        recording_key TEXT NOT NULL,
+        source TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        observed_at TEXT NOT NULL,
+        container_id TEXT NOT NULL DEFAULT '',
+        container_name TEXT,
+        play_count INTEGER,
+        PRIMARY KEY(track_key, kind, observed_at, container_id)
+      );
     `);
+    this.migrateSourceIdentityTables();
     this.ensureChatMetadataColumn();
     this.ensureConversationColumns();
     this.ensureConversationRevision();
     this.ensureTrackStatsColumns();
+    this.ensureRecommendationCandidateColumns();
     this.migrateLegacyLocalFavorites();
+    this.backfillCatalogTracks();
+    if (this.migratedToV2) this.clearExpiredConfirmationCache();
+  }
+
+  private tableColumns(table: string): string[] {
+    return (this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
+      (column) => column.name
+    );
+  }
+
+  private migrateSourceIdentityTables(): void {
+    const trackColumns = this.tableColumns("track_stats");
+    const eventColumns = this.tableColumns("play_events");
+    const candidateColumns = this.tableColumns("recommendation_candidates");
+    if (
+      !trackColumns.includes("track_id") &&
+      !eventColumns.includes("track_id") &&
+      !candidateColumns.includes("track_id")
+    ) {
+      return;
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (trackColumns.includes("track_id")) {
+        const legacyRows = this.db.prepare("SELECT * FROM track_stats").all() as Array<{
+          track_id: number;
+          track_json: string;
+          liked_at?: string | null;
+          local_favorited_at?: string | null;
+          play_count?: number;
+          last_played_at?: string | null;
+          last_played_hour?: number | null;
+        }>;
+        const favoriteRows = eventColumns.includes("track_id")
+          ? (this.db
+              .prepare(
+                "SELECT track_id, MAX(at) AS at FROM play_events WHERE event_type = 'like' GROUP BY track_id"
+              )
+              .all() as Array<{ track_id: number; at: string }>)
+          : [];
+        const favorites = new Map(favoriteRows.map((row) => [row.track_id, row.at]));
+        this.db.exec(`
+          ALTER TABLE track_stats RENAME TO track_stats_v1;
+          CREATE TABLE track_stats (
+            track_key TEXT PRIMARY KEY,
+            recording_key TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            track_json TEXT NOT NULL,
+            liked_at TEXT,
+            local_favorited_at TEXT,
+            play_count INTEGER NOT NULL DEFAULT 0,
+            last_played_at TEXT,
+            last_played_hour INTEGER
+          );
+        `);
+        const insert = this.db.prepare(`
+          INSERT INTO track_stats(
+            track_key, recording_key, source, source_id, track_json, liked_at,
+            local_favorited_at, play_count, last_played_at, last_played_hour
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const row of legacyRows) {
+          const track = normalizeTrackIdentity(
+            parseJson<Track>(row.track_json, {
+              id: row.track_id,
+              title: "unknown",
+              artists: ["unknown"]
+            })
+          );
+          insert.run(
+            track.trackKey!,
+            track.recordingKey!,
+            track.source!,
+            track.sourceId!,
+            JSON.stringify(track),
+            row.liked_at ?? null,
+            row.local_favorited_at ?? favorites.get(row.track_id) ?? null,
+            row.play_count ?? 0,
+            row.last_played_at ?? null,
+            row.last_played_hour ?? null
+          );
+        }
+        this.db.exec("DROP TABLE track_stats_v1");
+      }
+
+      if (eventColumns.includes("track_id")) {
+        this.db.exec(`
+          ALTER TABLE play_events RENAME TO play_events_v1;
+          CREATE TABLE play_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            track_key TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            at TEXT NOT NULL,
+            metadata_json TEXT
+          );
+          INSERT INTO play_events(id, track_key, event_type, at, metadata_json)
+          SELECT id, 'ncm:' || track_id, event_type, at, metadata_json
+          FROM play_events_v1;
+          DROP TABLE play_events_v1;
+        `);
+      }
+
+      if (candidateColumns.includes("track_id")) {
+        this.db.exec(`
+          DROP TABLE recommendation_candidates;
+          CREATE TABLE recommendation_candidates (
+            track_key TEXT PRIMARY KEY,
+            track_json TEXT NOT NULL,
+            source TEXT NOT NULL,
+            provider TEXT,
+            discovery TEXT,
+            tags_json TEXT NOT NULL,
+            relevance_score REAL NOT NULL DEFAULT 0.5,
+            discovered_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+          );
+        `);
+      }
+      this.db.prepare("DELETE FROM app_state WHERE key = 'now_playing'").run();
+      this.db.prepare("DELETE FROM app_state WHERE key LIKE 'recommendation_refresh:%'").run();
+      this.db.exec("COMMIT");
+      this.migratedToV2 = true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private backfillCatalogTracks(): void {
+    const rows = this.db.prepare("SELECT track_json FROM track_stats").all() as Array<{ track_json: string }>;
+    for (const row of rows) {
+      const track = normalizeTrackIdentity(parseJson<Track>(row.track_json, {
+        id: 0,
+        title: "unknown",
+        artists: ["unknown"]
+      }));
+      this.upsertCatalogTrack(track);
+    }
+  }
+
+  private clearExpiredConfirmationCache(): void {
+    const cutoff = new Date(Date.now() - 2 * 60_000).toISOString();
+    this.db.prepare(
+      "DELETE FROM conversation_tool_calls WHERE consumed_at IS NOT NULL OR created_at < ?"
+    ).run(cutoff);
   }
 
   private ensureTrackStatsColumns(): void {
-    const columns = this.db.prepare("PRAGMA table_info(track_stats)").all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === "local_favorited_at")) {
+    const columns = this.tableColumns("track_stats");
+    if (!columns.includes("local_favorited_at")) {
       this.db.exec("ALTER TABLE track_stats ADD COLUMN local_favorited_at TEXT");
+    }
+  }
+
+  private ensureRecommendationCandidateColumns(): void {
+    const columns = this.tableColumns("recommendation_candidates");
+    if (!columns.includes("relevance_score")) {
+      this.db.exec("ALTER TABLE recommendation_candidates ADD COLUMN relevance_score REAL NOT NULL DEFAULT 0.5");
+    }
+    if (!columns.includes("provider")) {
+      this.db.exec("ALTER TABLE recommendation_candidates ADD COLUMN provider TEXT");
+    }
+    if (!columns.includes("discovery")) {
+      this.db.exec("ALTER TABLE recommendation_candidates ADD COLUMN discovery TEXT");
     }
   }
 
@@ -129,14 +365,14 @@ export class StateRepository {
       SET local_favorited_at = (
         SELECT MAX(play_events.at)
         FROM play_events
-        WHERE play_events.track_id = track_stats.track_id
+        WHERE play_events.track_key = track_stats.track_key
           AND play_events.event_type = 'like'
       )
       WHERE local_favorited_at IS NULL
         AND EXISTS (
           SELECT 1
           FROM play_events
-          WHERE play_events.track_id = track_stats.track_id
+          WHERE play_events.track_key = track_stats.track_key
             AND play_events.event_type = 'like'
         );
     `);
@@ -190,10 +426,14 @@ export class StateRepository {
   upsertTrackStats(stats: TrackStat[]): void {
     const statement = this.db.prepare(`
       INSERT INTO track_stats(
-        track_id, track_json, liked_at, local_favorited_at, play_count, last_played_at, last_played_hour
+        track_key, recording_key, source, source_id, track_json, liked_at,
+        local_favorited_at, play_count, last_played_at, last_played_hour
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(track_id) DO UPDATE SET
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_key) DO UPDATE SET
+        recording_key=excluded.recording_key,
+        source=excluded.source,
+        source_id=excluded.source_id,
         track_json=excluded.track_json,
         liked_at=COALESCE(excluded.liked_at, track_stats.liked_at),
         local_favorited_at=COALESCE(excluded.local_favorited_at, track_stats.local_favorited_at),
@@ -205,15 +445,20 @@ export class StateRepository {
     this.db.exec("BEGIN");
     try {
       for (const row of stats) {
+        const track = normalizeTrackIdentity(row.track);
         statement.run(
-          row.track.id,
-          JSON.stringify(row.track),
+          track.trackKey!,
+          track.recordingKey!,
+          track.source!,
+          track.sourceId!,
+          JSON.stringify(track),
           row.likedAt ?? null,
           row.localFavoritedAt ?? null,
           row.playCount,
           row.lastPlayedAt ?? null,
           row.lastPlayedHour ?? null
         );
+        this.upsertCatalogTrack(track);
       }
       this.db.exec("COMMIT");
     } catch (error) {
@@ -227,7 +472,7 @@ export class StateRepository {
       SELECT track_json, liked_at, play_count, last_played_at, last_played_hour
            , local_favorited_at
       FROM track_stats
-      ORDER BY (local_favorited_at IS NOT NULL) DESC, play_count DESC, track_id DESC
+      ORDER BY (local_favorited_at IS NOT NULL) DESC, play_count DESC, track_key DESC
       LIMIT ?;
     `);
     const rows = stmt.all(limit) as Array<{
@@ -241,11 +486,11 @@ export class StateRepository {
 
     return rows.map((row) => {
       const stat: TrackStat = {
-        track: parseJson<Track>(row.track_json, {
+        track: normalizeTrackIdentity(parseJson<Track>(row.track_json, {
           id: 0,
           title: "unknown",
           artists: ["unknown"]
-        }),
+        })),
         playCount: row.play_count
       };
       if (row.liked_at) {
@@ -271,10 +516,11 @@ export class StateRepository {
     return row.count;
   }
 
-  patchTrackSongUrl(trackId: number, songUrl: string): void {
+  patchTrackSongUrl(trackId: TrackReference, songUrl: string): void {
+    const trackKey = normalizeTrackReference(trackId);
     const row = this.db
-      .prepare("SELECT track_json FROM track_stats WHERE track_id = ?")
-      .get(trackId) as { track_json: string } | undefined;
+      .prepare("SELECT track_json FROM track_stats WHERE track_key = ?")
+      .get(trackKey) as { track_json: string } | undefined;
     if (!row) {
       return;
     }
@@ -285,38 +531,150 @@ export class StateRepository {
     });
     parsed.songUrl = songUrl;
     this.db
-      .prepare("UPDATE track_stats SET track_json = ? WHERE track_id = ?")
-      .run(JSON.stringify(parsed), trackId);
+      .prepare("UPDATE track_stats SET track_json = ? WHERE track_key = ?")
+      .run(JSON.stringify(normalizeTrackIdentity(parsed)), trackKey);
   }
 
   ensureTrack(track: Track): void {
+    const normalized = normalizeTrackIdentity(track);
     const existing = this.db
-      .prepare("SELECT track_id FROM track_stats WHERE track_id = ?")
-      .get(track.id) as { track_id: number } | undefined;
+      .prepare("SELECT track_key FROM track_stats WHERE track_key = ?")
+      .get(normalized.trackKey!) as { track_key: string } | undefined;
     if (existing) {
       this.db
-        .prepare("UPDATE track_stats SET track_json = ? WHERE track_id = ?")
-        .run(JSON.stringify(track), track.id);
+        .prepare(
+          "UPDATE track_stats SET recording_key = ?, source = ?, source_id = ?, track_json = ? WHERE track_key = ?"
+        )
+        .run(
+          normalized.recordingKey!,
+          normalized.source!,
+          normalized.sourceId!,
+          JSON.stringify(normalized),
+          normalized.trackKey!
+        );
       return;
     }
-    this.upsertTrackStats([{ track, playCount: 0 }]);
+    this.upsertTrackStats([{ track: normalized, playCount: 0 }]);
   }
 
-  markTrackLiked(trackId: number, likedAt: string): void {
+  upsertLibraryEvidence(items: LibraryEvidence[]): void {
+    const statement = this.db.prepare(`
+      INSERT INTO library_evidence(
+        track_key, recording_key, source, kind, observed_at, container_id, container_name, play_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_key, kind, observed_at, container_id) DO UPDATE SET
+        recording_key=excluded.recording_key,
+        container_name=excluded.container_name,
+        play_count=excluded.play_count
+    `);
+    this.db.exec("BEGIN");
+    try {
+      for (const item of items) {
+        statement.run(
+          item.trackKey,
+          item.recordingKey,
+          item.source,
+          item.kind,
+          item.observedAt,
+          item.containerId ?? "",
+          item.containerName ?? null,
+          item.playCount ?? null
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getLibraryEvidence(): LibraryEvidence[] {
+    const rows = this.db.prepare(`
+      SELECT track_key, recording_key, source, kind, observed_at, container_id, container_name, play_count
+      FROM library_evidence ORDER BY observed_at DESC
+    `).all() as Array<{
+      track_key: string;
+      recording_key: string;
+      source: LibraryEvidence["source"];
+      kind: LibraryEvidence["kind"];
+      observed_at: string;
+      container_id: string;
+      container_name: string | null;
+      play_count: number | null;
+    }>;
+    return rows.map((row) => ({
+      trackKey: row.track_key,
+      recordingKey: row.recording_key,
+      source: row.source,
+      kind: row.kind,
+      observedAt: row.observed_at,
+      ...(row.container_id ? { containerId: row.container_id } : {}),
+      ...(row.container_name ? { containerName: row.container_name } : {}),
+      ...(row.play_count !== null ? { playCount: row.play_count } : {})
+    }));
+  }
+
+  private upsertCatalogTrack(track: Track): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO recordings(recording_key, title, artists_json, duration_ms, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(recording_key) DO UPDATE SET
+        title=excluded.title,
+        artists_json=excluded.artists_json,
+        duration_ms=COALESCE(excluded.duration_ms, recordings.duration_ms),
+        updated_at=excluded.updated_at
+    `).run(
+      track.recordingKey!,
+      track.title,
+      JSON.stringify(track.artists),
+      track.durationMs ?? null,
+      now
+    );
+    this.db.prepare(`
+      INSERT INTO source_tracks(track_key, recording_key, source, source_id, track_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_key) DO UPDATE SET
+        recording_key=excluded.recording_key,
+        track_json=excluded.track_json,
+        updated_at=excluded.updated_at
+    `).run(
+      track.trackKey!,
+      track.recordingKey!,
+      track.source!,
+      track.sourceId!,
+      JSON.stringify(track),
+      now
+    );
+    const tagStatement = this.db.prepare(`
+      INSERT INTO track_tag_evidence(track_key, category, value, source, confidence, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_key, category, value, source) DO UPDATE SET
+        confidence=excluded.confidence,
+        updated_at=excluded.updated_at
+    `);
+    for (const tag of track.tagEvidence ?? []) {
+      tagStatement.run(track.trackKey!, tag.category, tag.value, tag.source, tag.confidence, now);
+    }
+  }
+
+  markTrackLiked(trackId: TrackReference, likedAt: string): void {
     this.setTrackFavorite(trackId, true, likedAt);
   }
 
-  setTrackFavorite(trackId: number, favorite: boolean, at = new Date().toISOString()): boolean {
+  setTrackFavorite(trackId: TrackReference, favorite: boolean, at = new Date().toISOString()): boolean {
+    const trackKey = normalizeTrackReference(trackId);
     this.db
-      .prepare("UPDATE track_stats SET local_favorited_at = ? WHERE track_id = ?")
-      .run(favorite ? at : null, trackId);
-    return this.isTrackFavorite(trackId);
+      .prepare("UPDATE track_stats SET local_favorited_at = ? WHERE track_key = ?")
+      .run(favorite ? at : null, trackKey);
+    return this.isTrackFavorite(trackKey);
   }
 
-  isTrackFavorite(trackId: number): boolean {
+  isTrackFavorite(trackId: TrackReference): boolean {
+    const trackKey = normalizeTrackReference(trackId);
     const row = this.db
-      .prepare("SELECT local_favorited_at FROM track_stats WHERE track_id = ?")
-      .get(trackId) as { local_favorited_at: string | null } | undefined;
+      .prepare("SELECT local_favorited_at FROM track_stats WHERE track_key = ?")
+      .get(trackKey) as { local_favorited_at: string | null } | undefined;
     return Boolean(row?.local_favorited_at);
   }
 
@@ -326,24 +684,31 @@ export class StateRepository {
     }
     const statement = this.db.prepare(`
       INSERT INTO recommendation_candidates(
-        track_id, track_json, source, tags_json, discovered_at, expires_at
+        track_key, track_json, source, provider, discovery, tags_json, relevance_score, discovered_at, expires_at
       )
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(track_id) DO UPDATE SET
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_key) DO UPDATE SET
         track_json=excluded.track_json,
         source=excluded.source,
+        provider=excluded.provider,
+        discovery=excluded.discovery,
         tags_json=excluded.tags_json,
+        relevance_score=excluded.relevance_score,
         discovered_at=excluded.discovered_at,
         expires_at=excluded.expires_at
     `);
     this.db.exec("BEGIN");
     try {
       for (const candidate of candidates) {
+        const track = normalizeTrackIdentity(candidate.track, candidate.provider ?? "ncm");
         statement.run(
-          candidate.track.id,
-          JSON.stringify({ ...candidate.track, tags: candidate.tags }),
+          getTrackKey(track),
+          JSON.stringify({ ...track, tags: candidate.tags }),
           candidate.source,
+          candidate.provider ?? track.source ?? null,
+          candidate.discovery ?? null,
           JSON.stringify(candidate.tags),
+          candidate.relevanceScore,
           candidate.discoveredAt,
           candidate.expiresAt
         );
@@ -361,23 +726,32 @@ export class StateRepository {
   ): RecommendationCandidate[] {
     const rows = this.db
       .prepare(`
-        SELECT track_json, source, tags_json, discovered_at, expires_at
+        SELECT track_json, source, provider, discovery, tags_json, relevance_score, discovered_at, expires_at
         FROM recommendation_candidates
         WHERE expires_at > ?
-        ORDER BY discovered_at DESC, track_id DESC
+        ORDER BY discovered_at DESC, relevance_score DESC, track_key DESC
         LIMIT ?
       `)
       .all(now, limit) as Array<{
       track_json: string;
       source: RecommendationSource;
+      provider: Track["source"] | null;
+      discovery: RecommendationCandidate["discovery"] | null;
       tags_json: string;
+      relevance_score: number;
       discovered_at: string;
       expires_at: string;
     }>;
     return rows.map((row) => ({
-      track: parseJson<Track>(row.track_json, { id: 0, title: "unknown", artists: ["unknown"] }),
+      track: normalizeTrackIdentity(
+        parseJson<Track>(row.track_json, { id: 0, title: "unknown", artists: ["unknown"] }),
+        row.provider ?? "ncm"
+      ),
       source: row.source,
+      ...(row.provider ? { provider: row.provider } : {}),
+      ...(row.discovery ? { discovery: row.discovery } : {}),
       tags: parseJson(row.tags_json, []),
+      relevanceScore: row.relevance_score,
       discoveredAt: row.discovered_at,
       expiresAt: row.expires_at
     }));
@@ -385,6 +759,22 @@ export class StateRepository {
 
   deleteExpiredRecommendationCandidates(now = new Date().toISOString()): void {
     this.db.prepare("DELETE FROM recommendation_candidates WHERE expires_at <= ?").run(now);
+  }
+
+  clearRecommendationCandidates(): void {
+    this.db.prepare("DELETE FROM recommendation_candidates").run();
+  }
+
+  resetRecommendationRefreshDates(): void {
+    this.db.prepare("DELETE FROM app_state WHERE key LIKE 'recommendation_refresh:%'").run();
+  }
+
+  getRecommendationDataVersion(): number {
+    return this.getAppState<number>("recommendation_data_version") ?? 0;
+  }
+
+  saveRecommendationDataVersion(version: number): void {
+    this.saveAppState("recommendation_data_version", version);
   }
 
   saveRecommendationRefreshDate(source: RecommendationSource, date: string): void {
@@ -396,34 +786,55 @@ export class StateRepository {
   }
 
   addPlayEvent(event: PlayEvent): void {
+    const trackKey = normalizeTrackReference(event.trackId);
     this.db
       .prepare(
-        "INSERT INTO play_events(track_id, event_type, at, metadata_json) VALUES (?, ?, ?, ?)"
+        "INSERT INTO play_events(track_key, event_type, at, metadata_json) VALUES (?, ?, ?, ?)"
       )
-      .run(event.trackId, event.type, event.at, JSON.stringify(event.metadata ?? {}));
+      .run(trackKey, event.type, event.at, JSON.stringify(event.metadata ?? {}));
 
     const hour = new Date(event.at).getHours();
     this.db
       .prepare(
-        "UPDATE track_stats SET last_played_at = ?, last_played_hour = ?, play_count = play_count + ? WHERE track_id = ?"
+        "UPDATE track_stats SET last_played_at = ?, last_played_hour = ?, play_count = play_count + ? WHERE track_key = ?"
       )
-      .run(event.at, hour, event.type === "complete" || event.type === "replay" ? 1 : 0, event.trackId);
+      .run(event.at, hour, event.type === "complete" || event.type === "replay" ? 1 : 0, trackKey);
   }
 
   getRecentPlayEvents(limit = 120): PlayEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT track_id, event_type, at, metadata_json FROM play_events ORDER BY id DESC LIMIT ?"
+        "SELECT track_key, event_type, at, metadata_json FROM play_events ORDER BY id DESC LIMIT ?"
       )
       .all(limit) as Array<{
-      track_id: number;
+      track_key: string;
       event_type: PlayEvent["type"];
       at: string;
       metadata_json: string | null;
     }>;
 
     return rows.map((row) => ({
-      trackId: row.track_id,
+      trackId: row.track_key,
+      type: row.event_type,
+      at: row.at,
+      metadata: parseJson(row.metadata_json, {})
+    }));
+  }
+
+  getPlayEventsSince(since: string): PlayEvent[] {
+    const rows = this.db
+      .prepare(
+        "SELECT track_key, event_type, at, metadata_json FROM play_events WHERE at >= ? ORDER BY id DESC"
+      )
+      .all(since) as Array<{
+      track_key: string;
+      event_type: PlayEvent["type"];
+      at: string;
+      metadata_json: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      trackId: row.track_key,
       type: row.event_type,
       at: row.at,
       metadata: parseJson(row.metadata_json, {})
@@ -450,6 +861,14 @@ export class StateRepository {
 
   saveNowPlaying(state: NowPlayingState): void {
     this.saveAppState("now_playing", state);
+  }
+
+  saveDailyPlan(plan: DailyPlan): void {
+    this.saveAppState("daily_plan", plan);
+  }
+
+  getDailyPlan(): DailyPlan | undefined {
+    return this.getAppState<DailyPlan>("daily_plan");
   }
 
   getNowPlaying(): NowPlayingState | undefined {
