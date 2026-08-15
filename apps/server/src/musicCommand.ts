@@ -2,10 +2,12 @@ import type {
   MusicCommandRequest,
   MusicCommandResult,
   NowPlayingState,
-  Track
+  Track,
+  TrackReference
 } from "@musicgpt/shared";
 
 import type { AiDjIntent } from "./aiDjAssistant.js";
+import { normalizeTrackReference } from "./musicCatalog.js";
 import { StateRepository } from "./stateRepository.js";
 
 const CONFIRMATION_TTL_MS = 120_000;
@@ -15,8 +17,8 @@ export interface MusicCommandRuntime {
   classify(request: string): Promise<AiDjIntent>;
   searchSongs(query: string): Promise<Track[]>;
   playTrack(track: Track, reason: string): Promise<NowPlayingState>;
-  setFavorite(trackId: number, favorite: boolean): Promise<void>;
-  replay(trackId: number): Promise<void>;
+  setFavorite(trackId: TrackReference, favorite: boolean): Promise<void>;
+  replay(trackId: TrackReference): Promise<void>;
   handleIntent(
     request: string,
     intent: AiDjIntent,
@@ -59,7 +61,11 @@ export class MusicCommandModule {
       const confirmation = this.repo.getConversationToolCall(request.confirmationToken);
       const result = confirmation?.result as MusicCommandResult | undefined;
       const createdAt = confirmation ? Date.parse(confirmation.createdAt) : Number.NaN;
-      confirmedTrack = result?.candidates?.find((track) => track.id === request.selectedTrackId);
+      confirmedTrack = result?.candidates?.find(
+        (track) =>
+          request.selectedTrackId !== undefined &&
+          normalizeTrackReference(track.id) === normalizeTrackReference(request.selectedTrackId)
+      );
       if (
         !confirmation ||
         confirmation.consumedAt ||
