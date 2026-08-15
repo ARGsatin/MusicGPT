@@ -24,7 +24,7 @@ Conversation Ledger 是 SQLite 中的统一事实源。文字和有效语音的�
 
 Music Command 是只负责读取或改变音乐状态的领域操作。它不生成或保存第二条聊天回复。Qwen 的 `call_id` 作为 `commandId`，服务端缓存结构化结果，重复或并发调用只执行一次。
 
-语音明确点歌和描述型推荐可以直接播放；歧义搜索最多返回三个候选。确认使用两分钟有效、只能消费一次的 `confirmationToken + selectedTrackId`。
+文字对话识别到明确歌名、描述型或当前氛围点歌后直接播放；“氛围点歌”按钮只是同一对话入口的快捷输入。语音明确点歌和描述型推荐也可以直接播放；歧义搜索最多返回三个候选。确认使用两分钟有效、只能消费一次的 `confirmationToken + selectedTrackId`。
 
 ## Narration
 
