@@ -59,6 +59,7 @@ describe("recommendation state migration", () => {
         track: { id: 88, title: "New Territory", artists: ["Explorer"] },
         source: "ncm_daily",
         tags: [{ category: "style", value: "爵士" }],
+        relevanceScore: 0.9,
         discoveredAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 60_000).toISOString()
       }
@@ -69,8 +70,67 @@ describe("recommendation state migration", () => {
       expect.objectContaining({
         track: expect.objectContaining({ id: 88 }),
         source: "ncm_daily",
-        tags: [{ category: "style", value: "爵士" }]
+        tags: [{ category: "style", value: "爵士" }],
+        relevanceScore: 0.9
       })
     ]);
+  });
+
+  it("rebuilds legacy recommendation candidates during the v2 identity migration", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-candidate-migration-"));
+    const dbPath = path.join(tmp, "state.db");
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`
+      CREATE TABLE recommendation_candidates (
+        track_id INTEGER PRIMARY KEY,
+        track_json TEXT NOT NULL,
+        source TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        discovered_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+    `);
+    legacy.prepare(`
+      INSERT INTO recommendation_candidates(
+        track_id, track_json, source, tags_json, discovered_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      99,
+      JSON.stringify({ id: 99, title: "Legacy Candidate", artists: ["A"] }),
+      "context_search",
+      "[]",
+      "2026-08-01T00:00:00.000Z",
+      "2099-08-02T00:00:00.000Z"
+    );
+    legacy.close();
+
+    const repo = new StateRepository(dbPath);
+
+    expect(repo.getRecommendationCandidates()).toEqual([]);
+  });
+
+  it("reads all feedback in the requested time window rather than a fixed row limit", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-feedback-window-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const now = Date.now();
+    for (let index = 0; index < 150; index += 1) {
+      repo.addPlayEvent({
+        type: "skip",
+        trackId: index + 1,
+        at: new Date(now - index * 1_000).toISOString()
+      });
+    }
+    repo.addPlayEvent({
+      type: "skip",
+      trackId: 999,
+      at: new Date(now - 100 * 24 * 60 * 60 * 1_000).toISOString()
+    });
+
+    const recent = repo.getPlayEventsSince(
+      new Date(now - 90 * 24 * 60 * 60 * 1_000).toISOString()
+    );
+
+    expect(recent).toHaveLength(150);
+    expect(recent.some((event) => event.trackId === 999)).toBe(false);
   });
 });

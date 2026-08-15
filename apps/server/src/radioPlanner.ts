@@ -1,5 +1,7 @@
 import { currentPeriod } from "./time.js";
 import { inferTrackTags, periodLabel, primaryStyle, weatherLabel } from "./trackTags.js";
+import { isEligibleRecommendationTrack } from "./recommendationQuality.js";
+import { getTrackKey, normalizeTrackReference } from "./musicCatalog.js";
 
 import type {
   DayPeriod,
@@ -21,6 +23,7 @@ interface PlanOptions {
   environment?: EnvironmentContext;
   candidates?: RecommendationCandidate[];
   contextTags?: MusicTag[];
+  allowAmbient?: boolean;
 }
 
 interface ScoredItem extends RadioPlanItem {
@@ -39,10 +42,15 @@ export class RadioPlanner {
   ): RadioPlanItem[] {
     const nowPeriod = options.environment?.dayPeriod ?? currentPeriod();
     const windowSize = options.windowSize ?? 10;
-    const recentSkipIds = new Set(
-      events.filter((event) => event.type === "skip").slice(0, 12).map((event) => event.trackId)
+    const feedbackByTrack = buildFeedbackSignals([
+      ...events,
+      ...stats.flatMap((entry): PlayEvent[] => entry.localFavoritedAt
+        ? [{ type: "like", trackId: entry.track.id, at: entry.localFavoritedAt }]
+        : [])
+    ]);
+    const recentPlayIds = new Set(
+      events.slice(0, 20).map((event) => normalizeTrackReference(event.trackId))
     );
-    const recentPlayIds = new Set(events.slice(0, 20).map((event) => event.trackId));
     const maxPlayCount = stats.reduce((max, item) => Math.max(max, item.playCount), 1);
     const periodWeights = this.periodWeightLookup(profile.favoritePeriods);
     const profileTagWeights = new Map(
@@ -51,7 +59,8 @@ export class RadioPlanner {
     const contextTags = options.contextTags ?? [];
 
     const familiar = stats
-      .filter((entry) => !recentSkipIds.has(entry.track.id))
+      .filter((entry) => isEligibleRecommendationTrack(entry.track, options.allowAmbient))
+      .filter((entry) => !feedbackByTrack.get(getTrackKey(entry.track))?.hidden)
       .map((entry) =>
         this.scoreTrack({
           track: entry.track,
@@ -66,14 +75,18 @@ export class RadioPlanner {
           familiarScore:
             (entry.localFavoritedAt ? 1 : 0) * 0.55 +
             normalize(entry.playCount, maxPlayCount) * 0.45,
-          recentlyPlayed: recentPlayIds.has(entry.track.id)
+          relevanceScore: 0,
+          feedbackMultiplier: feedbackByTrack.get(getTrackKey(entry.track))?.multiplier ?? 1,
+          recentlyPlayed: recentPlayIds.has(getTrackKey(entry.track))
         })
       );
 
-    const knownIds = new Set(stats.map((entry) => entry.track.id));
+    const knownIds = new Set(stats.map((entry) => getTrackKey(entry.track)));
     const explore = (options.candidates ?? [])
-      .filter((candidate) => !knownIds.has(candidate.track.id))
-      .filter((candidate) => !recentSkipIds.has(candidate.track.id))
+      .filter((candidate) => !knownIds.has(getTrackKey(candidate.track)))
+      .filter((candidate) => !feedbackByTrack.get(getTrackKey(candidate.track))?.hidden)
+      .filter((candidate) => candidate.relevanceScore >= 0.6)
+      .filter((candidate) => isEligibleRecommendationTrack(candidate.track, options.allowAmbient))
       .map((candidate) =>
         this.scoreTrack({
           track: { ...candidate.track, tags: candidate.tags },
@@ -85,53 +98,43 @@ export class RadioPlanner {
           desiredMood: options.desiredMood,
           nowPeriod,
           periodWeights,
-          familiarScore: 1,
-          recentlyPlayed: recentPlayIds.has(candidate.track.id)
+          familiarScore: 0,
+          relevanceScore: candidate.relevanceScore,
+          feedbackMultiplier: feedbackByTrack.get(getTrackKey(candidate.track))?.multiplier ?? 1,
+          recentlyPlayed: recentPlayIds.has(getTrackKey(candidate.track))
         })
-      );
+      )
+      .filter((item) => item.source === "ncm_daily" || item.score >= 0.3);
 
     familiar.sort((left, right) => right.score - left.score);
     explore.sort((left, right) => right.score - left.score);
 
-    const familiarTarget = Math.ceil(windowSize / 2);
-    const exploreTarget = Math.floor(windowSize / 2);
     const output: ScoredItem[] = [];
-    const selectedIds = new Set<number>();
-    let familiarUsed = 0;
-    let exploreUsed = 0;
+    const selectedIds = new Set<string>();
+    const normalExploreLimit = Math.floor(windowSize * 0.2);
+    const bootstrap = familiar.length < windowSize - normalExploreLimit;
+    const dailyExplore = explore.filter((item) => item.source === "ncm_daily");
+    const searchExplore = explore.filter((item) => item.source !== "ncm_daily");
+    const allowedExplore = bootstrap
+      ? [...dailyExplore, ...searchExplore.slice(0, normalExploreLimit)]
+          .sort((left, right) => right.score - left.score)
+      : explore.slice(0, normalExploreLimit);
 
-    while (output.length < windowSize) {
-      const preferExplore = output.length % 2 === 1;
-      const pool =
-        preferExplore && exploreUsed < exploreTarget
-          ? explore
-          : !preferExplore && familiarUsed < familiarTarget
-            ? familiar
-            : exploreUsed < exploreTarget
-              ? explore
-              : familiar;
-      const picked = pickDiverse(pool, output, selectedIds);
-      if (!picked) {
-        const fallbackPool = pool === familiar ? explore : familiar;
-        const fallback = pickDiverse(fallbackPool, output, selectedIds);
-        if (!fallback) {
+    if (bootstrap) {
+      appendDiverse(familiar, output, selectedIds, windowSize);
+      appendDiverse(allowedExplore, output, selectedIds, windowSize);
+    } else {
+      for (let index = 0; index < windowSize; index += 1) {
+        const scheduledExplore = (index + 1) % 5 === 0;
+        const primary = scheduledExplore ? allowedExplore : familiar;
+        const fallback = scheduledExplore ? familiar : undefined;
+        const picked = pickDiverse(primary, output, selectedIds) ??
+          (fallback ? pickDiverse(fallback, output, selectedIds) : undefined);
+        if (!picked) {
           break;
         }
-        output.push(fallback);
-        selectedIds.add(fallback.track.id);
-        if (fallback.bucket === "explore") {
-          exploreUsed += 1;
-        } else {
-          familiarUsed += 1;
-        }
-        continue;
-      }
-      output.push(picked);
-      selectedIds.add(picked.track.id);
-      if (picked.bucket === "explore") {
-        exploreUsed += 1;
-      } else {
-        familiarUsed += 1;
+        output.push(picked);
+        selectedIds.add(getTrackKey(picked.track));
       }
     }
     return output;
@@ -148,6 +151,8 @@ export class RadioPlanner {
     nowPeriod: DayPeriod;
     periodWeights: Map<DayPeriod, number>;
     familiarScore: number;
+    relevanceScore: number;
+    feedbackMultiplier: number;
     recentlyPlayed: boolean;
   }): ScoredItem {
     const tags = inferTrackTags(input.track);
@@ -172,12 +177,13 @@ export class RadioPlanner {
     const sourceScore = sourceQuality(input.source);
     const jitter = this.random();
     const rawScore =
-      contextScore * 0.35 +
-      Math.max(tasteScore, periodScore * 0.35) * 0.3 +
+      contextScore * 0.3 +
+      Math.max(tasteScore, periodScore * 0.35) * 0.25 +
       input.familiarScore * 0.2 +
       sourceScore * 0.1 +
+      input.relevanceScore * 0.1 +
       jitter * 0.05;
-    const score = rawScore * (input.recentlyPlayed ? 0.08 : 1);
+    const score = rawScore * input.feedbackMultiplier * (input.recentlyPlayed ? 0.08 : 1);
     const contextReason = input.environment
       ? [
           input.environment.weather === "unknown" ? undefined : weatherLabel(input.environment.weather),
@@ -240,9 +246,9 @@ function environmentPeriodScore(track: Track, nowPeriod: DayPeriod): number {
 function pickDiverse(
   pool: ScoredItem[],
   output: ScoredItem[],
-  selectedIds: Set<number>
+  selectedIds: Set<string>
 ): ScoredItem | undefined {
-  const candidates = pool.filter((item) => !selectedIds.has(item.track.id));
+  const candidates = pool.filter((item) => !selectedIds.has(getTrackKey(item.track)));
   return (
     candidates.find((item) => respectsArtist(item, output) && respectsStyleWindow(item, output)) ??
     candidates.find((item) => respectsArtist(item, output)) ??
@@ -289,6 +295,65 @@ function sourceLabel(source: RecommendationSource): string {
     chat_search: "DJ 搜索"
   };
   return labels[source];
+}
+
+function appendDiverse(
+  pool: ScoredItem[],
+  output: ScoredItem[],
+  selectedIds: Set<string>,
+  limit: number
+): void {
+  while (output.length < limit) {
+    const picked = pickDiverse(pool, output, selectedIds);
+    if (!picked) {
+      return;
+    }
+    output.push(picked);
+    selectedIds.add(getTrackKey(picked.track));
+  }
+}
+
+function buildFeedbackSignals(events: PlayEvent[]): Map<string, { hidden: boolean; multiplier: number }> {
+  const now = Date.now();
+  const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000;
+  const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
+  const grouped = new Map<string, PlayEvent[]>();
+  for (const event of events) {
+    const at = new Date(event.at).getTime();
+    if (!Number.isFinite(at) || at < ninetyDaysAgo) {
+      continue;
+    }
+    const trackKey = normalizeTrackReference(event.trackId);
+    const trackEvents = grouped.get(trackKey) ?? [];
+    trackEvents.push(event);
+    grouped.set(trackKey, trackEvents);
+  }
+
+  const result = new Map<string, { hidden: boolean; multiplier: number }>();
+  for (const [trackId, trackEvents] of grouped) {
+    const ordered = [...trackEvents].sort(
+      (left, right) => new Date(right.at).getTime() - new Date(left.at).getTime()
+    );
+    const latestPositiveAt = ordered
+      .filter((event) =>
+        event.type === "play" ||
+        event.type === "complete" ||
+        event.type === "replay" ||
+        event.type === "like"
+      )
+      .reduce((latest, event) => Math.max(latest, new Date(event.at).getTime()), Number.NEGATIVE_INFINITY);
+    const skipsSincePositive = ordered.filter((event) =>
+      event.type === "skip" && new Date(event.at).getTime() > latestPositiveAt
+    );
+    result.set(trackId, {
+      hidden: skipsSincePositive.length >= 2,
+      multiplier: skipsSincePositive.length === 1 &&
+        new Date(skipsSincePositive[0]!.at).getTime() >= thirtyDaysAgo
+        ? 0.15
+        : 1
+    });
+  }
+  return result;
 }
 
 function normalize(value: number, max: number): number {

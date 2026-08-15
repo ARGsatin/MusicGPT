@@ -1,4 +1,6 @@
 import { inferMood } from "./moodClassifier.js";
+import { normalizeTrackIdentity } from "./musicCatalog.js";
+import { hasRecommendationMetadata } from "./recommendationQuality.js";
 
 import type {
   LyricLine,
@@ -63,6 +65,9 @@ interface NcmSearchResponse {
     songs?: Array<{
       id: number;
       name: string;
+      ar?: Array<{ name: string }>;
+      al?: { name?: string; picUrl?: string };
+      dt?: number;
       artists?: Array<{ name: string }>;
       album?: { name?: string; picUrl?: string };
       duration?: number;
@@ -321,7 +326,7 @@ export class NcmConnector {
       );
     }
 
-    const details = await this.fetchSongDetails(normalizedLikedIds.slice(0, 1000));
+    const details = await this.fetchTrackDetails(normalizedLikedIds.slice(0, 1000));
     if (details.length === 0) {
       throw new NcmImportError(
         "ncm_track_details_empty",
@@ -344,7 +349,8 @@ export class NcmConnector {
     }
 
     return details.map((track) => {
-      const item = recordMap.get(track.id);
+      const ncmId = Number(track.sourceId ?? track.id);
+      const item = recordMap.get(ncmId);
       const stat: TrackStat = {
         track: {
           ...track,
@@ -352,7 +358,7 @@ export class NcmConnector {
         },
         playCount: item?.playCount ?? 0
       };
-      const likedAt = likedAtById.get(track.id);
+      const likedAt = likedAtById.get(ncmId);
       if (likedAt) {
         stat.likedAt = likedAt;
       }
@@ -371,7 +377,7 @@ export class NcmConnector {
     return typeof this.cookie === "function" ? this.cookie() : this.cookie;
   }
 
-  private async fetchSongDetails(ids: number[]): Promise<Track[]> {
+  async fetchTrackDetails(ids: number[]): Promise<Track[]> {
     if (ids.length === 0) {
       return [];
     }
@@ -398,7 +404,7 @@ export class NcmConnector {
         if (song.al?.picUrl) {
           track.coverUrl = song.al.picUrl;
         }
-        tracks.push(track);
+        tracks.push(normalizeTrackIdentity(track));
       }
     }
 
@@ -481,22 +487,25 @@ export class NcmConnector {
       `/cloudsearch?keywords=${encodeURIComponent(keyword)}&limit=8`
     );
     return (payload.result?.songs ?? []).map((song) => {
+      const artists = song.ar?.length ? song.ar : (song.artists ?? []);
+      const album = song.al ?? song.album;
+      const duration = song.dt ?? song.duration;
       const track: Track = {
         id: song.id,
         title: song.name,
-        artists: (song.artists ?? []).map((artist) => artist.name)
+        artists: artists.map((artist) => artist.name)
       };
-      if (song.album?.name) {
-        track.album = song.album.name;
+      if (album?.name) {
+        track.album = album.name;
       }
-      if (song.album?.picUrl) {
-        track.coverUrl = song.album.picUrl;
+      if (album?.picUrl) {
+        track.coverUrl = album.picUrl;
       }
-      if (song.duration) {
-        track.durationMs = song.duration;
+      if (duration) {
+        track.durationMs = duration;
       }
       return track;
-    });
+    }).filter(hasRecommendationMetadata);
   }
 }
 

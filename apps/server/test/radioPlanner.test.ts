@@ -69,6 +69,38 @@ describe("RadioPlanner", () => {
     expect(firstId).not.toBe(1);
   });
 
+  it("uses graded skip cooldowns and lets a later positive event restore a track", () => {
+    const planner = new RadioPlanner(() => 0.5);
+    const now = Date.now();
+    const feedbackStats: TrackStat[] = [
+      { track: { id: 11, title: "One Skip", artists: ["A"] }, playCount: 100 },
+      {
+        track: { id: 12, title: "Two Skips", artists: ["B"] },
+        playCount: 90,
+        localFavoritedAt: new Date(now - 5_000).toISOString()
+      },
+      { track: { id: 13, title: "Restored", artists: ["C"] }, playCount: 80 },
+      { track: { id: 14, title: "Steady", artists: ["D"] }, playCount: 10 }
+    ];
+    const events: PlayEvent[] = [
+      { type: "play", trackId: 13, at: new Date(now - 1_000).toISOString() },
+      { type: "skip", trackId: 11, at: new Date(now - 2_000).toISOString() },
+      { type: "skip", trackId: 12, at: new Date(now - 3_000).toISOString() },
+      { type: "skip", trackId: 12, at: new Date(now - 4_000).toISOString() },
+      { type: "skip", trackId: 13, at: new Date(now - 5_000).toISOString() },
+      { type: "skip", trackId: 13, at: new Date(now - 6_000).toISOString() }
+    ];
+
+    const plan = planner.plan(feedbackStats, profile, events, { windowSize: 4 });
+
+    expect(plan.map((item) => item.track.id)).toContain(11);
+    expect(plan.map((item) => item.track.id)).not.toContain(12);
+    expect(plan.map((item) => item.track.id)).toContain(13);
+    expect(plan.findIndex((item) => item.track.id === 11)).toBeGreaterThan(
+      plan.findIndex((item) => item.track.id === 14)
+    );
+  });
+
   it("boosts rainy-night friendly moods from environment context", () => {
     const planner = new RadioPlanner(() => 0.5);
     const plan = planner.plan(stats, profile, [], {
@@ -86,9 +118,9 @@ describe("RadioPlanner", () => {
     expect(plan[0]?.reason).toContain("深夜");
   });
 
-  it("interleaves a ten-track window into five familiar and five exploration picks", () => {
+  it("caps a ten-track window at two qualified exploration picks", () => {
     const planner = new RadioPlanner(() => 0.5);
-    const familiarStats: TrackStat[] = Array.from({ length: 6 }, (_, index) => ({
+    const familiarStats: TrackStat[] = Array.from({ length: 10 }, (_, index) => ({
       track: {
         id: index + 1,
         title: `Familiar ${index + 1}`,
@@ -106,6 +138,7 @@ describe("RadioPlanner", () => {
       },
       source: index % 2 === 0 ? "ncm_daily" : "style_search",
       tags: [{ category: "style", value: `Style ${index + 1}` }],
+      relevanceScore: 1 - index * 0.05,
       discoveredAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 60_000).toISOString()
     }));
@@ -121,11 +154,73 @@ describe("RadioPlanner", () => {
     });
 
     expect(plan).toHaveLength(10);
-    expect(plan.filter((item) => item.bucket === "familiar")).toHaveLength(5);
-    expect(plan.filter((item) => item.bucket === "explore")).toHaveLength(5);
+    expect(plan.filter((item) => item.bucket === "familiar")).toHaveLength(8);
+    expect(plan.filter((item) => item.bucket === "explore")).toHaveLength(2);
     expect(plan.map((item) => item.bucket)).toEqual([
-      "familiar", "explore", "familiar", "explore", "familiar",
-      "explore", "familiar", "explore", "familiar", "explore"
+      "familiar", "familiar", "familiar", "familiar", "explore",
+      "familiar", "familiar", "familiar", "familiar", "explore"
     ]);
+  });
+
+  it("does not force a weak search candidate into an otherwise healthy queue", () => {
+    const planner = new RadioPlanner(() => 0);
+    const familiarStats: TrackStat[] = Array.from({ length: 10 }, (_, index) => ({
+      track: { id: index + 1, title: `Known ${index + 1}`, artists: [`Artist ${index + 1}`] },
+      playCount: 20 - index
+    }));
+    const weakCandidate: RecommendationCandidate = {
+      track: { id: 300, title: "Unrelated Result", artists: ["Remote Artist"], moodTag: "unknown" },
+      source: "context_search",
+      tags: [],
+      relevanceScore: 0.6,
+      discoveredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    };
+
+    const plan = planner.plan(familiarStats, profile, [], {
+      windowSize: 10,
+      candidates: [weakCandidate],
+      environment: {
+        dayPeriod: "afternoon",
+        weather: "storm",
+        updatedAt: new Date().toISOString()
+      }
+    });
+
+    expect(plan).toHaveLength(10);
+    expect(plan.every((item) => item.bucket === "familiar")).toBe(true);
+  });
+
+  it("uses daily recommendations for bootstrap without letting broad search exceed twenty percent", () => {
+    const planner = new RadioPlanner(() => 0.5);
+    const familiarStats: TrackStat[] = Array.from({ length: 2 }, (_, index) => ({
+      track: { id: index + 1, title: `Known ${index + 1}`, artists: [`Artist ${index + 1}`] },
+      playCount: 2 - index
+    }));
+    const daily: RecommendationCandidate[] = Array.from({ length: 3 }, (_, index) => ({
+      track: { id: 100 + index, title: `Daily ${index + 1}`, artists: [`Daily Artist ${index + 1}`] },
+      source: "ncm_daily",
+      tags: [],
+      relevanceScore: 1,
+      discoveredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    }));
+    const search: RecommendationCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+      track: { id: 200 + index, title: `Search ${index + 1}`, artists: [`Search Artist ${index + 1}`] },
+      source: "context_search",
+      tags: [],
+      relevanceScore: 1,
+      discoveredAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString()
+    }));
+
+    const plan = planner.plan(familiarStats, profile, [], {
+      windowSize: 10,
+      candidates: [...daily, ...search]
+    });
+
+    expect(plan.filter((item) => item.source === "context_search").length).toBeLessThanOrEqual(2);
+    expect(plan.filter((item) => item.source === "ncm_daily")).toHaveLength(3);
+    expect(plan).toHaveLength(7);
   });
 });
