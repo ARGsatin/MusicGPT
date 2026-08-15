@@ -10,6 +10,7 @@ import type {
   RadioPlanItem,
   SystemStatus,
   TasteProfile,
+  TrackReference,
   WsPayload
 } from "@musicgpt/shared";
 import {
@@ -41,6 +42,7 @@ import {
 } from "./api";
 import { AmbientBackdrop } from "./components/AmbientBackdrop";
 import { ChatPanel, type PanelTab } from "./components/ChatPanel";
+import { DailyPlanPanel } from "./components/DailyPlanPanel";
 import { SignalTicker, StatusRibbon } from "./components/StatusRibbon";
 import { TurntableStage } from "./components/TurntableStage";
 import { settleChatStreamFailure, type ChatStreamFeedback } from "./chatStream";
@@ -153,7 +155,7 @@ export default function App() {
   const [speechNotice, setSpeechNotice] = useState<string | null>(null);
   const [streamingMessageAt, setStreamingMessageAt] = useState<string | null>(null);
   const [suggestionLoadingId, setSuggestionLoadingId] = useState<string | null>(null);
-  const [queueLoadingTrackId, setQueueLoadingTrackId] = useState<number | null>(null);
+  const [queueLoadingTrackId, setQueueLoadingTrackId] = useState<TrackReference | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [weatherLoading, setWeatherLoading] = useState(false);
@@ -922,6 +924,7 @@ export default function App() {
           messages={visibleMessages}
           nowTitle={trackTitle}
           queue={now.queue}
+          planPanel={<DailyPlanPanel />}
           queueLoadingTrackId={queueLoadingTrackId}
           realtimeStatus={realtimeStatus}
           realtimeStatusLabel={REALTIME_STATUS_LABELS[realtimeStatus]}
@@ -998,6 +1001,18 @@ export default function App() {
         >
           <span aria-hidden="true">≡</span>
           队列
+        </button>
+        <button
+          type="button"
+          className={mobileView === "panel" && panelTab === "plan" ? "mobile-nav-btn is-active" : "mobile-nav-btn"}
+          aria-pressed={mobileView === "panel" && panelTab === "plan"}
+          onClick={() => {
+            setPanelTab("plan");
+            setMobileView("panel");
+          }}
+        >
+          <span aria-hidden="true">◷</span>
+          今日
         </button>
       </nav>
 

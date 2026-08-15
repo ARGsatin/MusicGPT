@@ -14,11 +14,20 @@ import type {
   MusicCommandRequest,
   MusicCommandResult,
   PlayTrackResponse,
+  PlayDailyPlanResponse,
   RealtimeContextResponse,
   RecommendationImportResponse,
+  DailyPlan,
+  MusicSource,
+  MusicSourceStatus,
+  MusicSourceSyncResponse,
+  QqAuthQrResponse,
+  QqAuthStatusResponse,
   SystemStatus,
   TasteProfile,
+  TasteResponse,
   Track,
+  TrackReference,
   VoiceTurnCompleteRequest,
   VoiceTurnStartRequest,
   VoiceTurnStartResponse
@@ -40,7 +49,7 @@ export async function fetchNowPlaying(): Promise<NowPlayingState> {
   return (await response.json()) as NowPlayingState;
 }
 
-export async function fetchTaste(): Promise<TasteProfile | null> {
+export async function fetchTaste(): Promise<TasteResponse | null> {
   const response = await fetch("/api/taste");
   if (response.status === 204) {
     return null;
@@ -48,7 +57,7 @@ export async function fetchTaste(): Promise<TasteProfile | null> {
   if (!response.ok) {
     throw new Error("Failed to load taste profile");
   }
-  return (await response.json()) as TasteProfile;
+  return (await response.json()) as TasteResponse;
 }
 
 export async function sendChat(message: string, turnId?: string): Promise<ChatResponse> {
@@ -281,8 +290,8 @@ export async function playSuggestedTrack(track: Track, reason?: string): Promise
   return (await response.json()) as PlayTrackResponse;
 }
 
-export async function playQueuedTrack(trackId: number): Promise<PlayTrackResponse> {
-  const response = await fetch(`/api/queue/${trackId}/play`, {
+export async function playQueuedTrack(trackId: TrackReference): Promise<PlayTrackResponse> {
+  const response = await fetch(`/api/queue/${encodeURIComponent(String(trackId))}/play`, {
     method: "POST"
   });
   if (!response.ok) {
@@ -302,7 +311,7 @@ export async function sendFeedback(payload: FeedbackRequest): Promise<void> {
   }
 }
 
-export async function setFavorite(trackId: number, favorite: boolean): Promise<FavoriteResponse> {
+export async function setFavorite(trackId: TrackReference, favorite: boolean): Promise<FavoriteResponse> {
   const response = await fetch(API_ROUTES.favorite(trackId), {
     method: "PUT",
     headers: { "content-type": "application/json" },
@@ -383,4 +392,51 @@ export async function importFromNcm(): Promise<ImportNcmResponse> {
     throw new Error(payload.error ?? "NCM import failed");
   }
   return payload;
+}
+
+export async function fetchMusicSources(): Promise<MusicSourceStatus[]> {
+  const response = await fetch(API_ROUTES.musicSources);
+  if (!response.ok) throw new Error("Failed to load music sources");
+  return response.json() as Promise<MusicSourceStatus[]>;
+}
+
+export async function createQqAuthQr(): Promise<QqAuthQrResponse> {
+  const response = await fetch(API_ROUTES.qqAuthQr, { method: "POST" });
+  if (!response.ok) throw new Error("QQ QR login could not start");
+  return response.json() as Promise<QqAuthQrResponse>;
+}
+
+export async function pollQqAuthQr(sessionId: string): Promise<QqAuthStatusResponse> {
+  const response = await fetch(API_ROUTES.qqAuthQrStatus(sessionId));
+  if (!response.ok) throw new Error("QQ QR login status failed");
+  return response.json() as Promise<QqAuthStatusResponse>;
+}
+
+export async function disconnectQqMusic(): Promise<void> {
+  const response = await fetch(API_ROUTES.qqDisconnect, { method: "DELETE" });
+  if (!response.ok) throw new Error("QQ Music disconnect failed");
+}
+
+export async function syncMusicSource(source: MusicSource): Promise<MusicSourceSyncResponse> {
+  const response = await fetch(API_ROUTES.musicSourceSync(source), { method: "POST" });
+  if (!response.ok) throw new Error(`${source} sync failed`);
+  return response.json() as Promise<MusicSourceSyncResponse>;
+}
+
+export async function fetchDailyPlan(): Promise<DailyPlan | null> {
+  const response = await fetch(API_ROUTES.dailyPlan);
+  if (!response.ok) throw new Error("Failed to load daily plan");
+  return response.json() as Promise<DailyPlan | null>;
+}
+
+export async function regenerateDailyPlan(): Promise<DailyPlan> {
+  const response = await fetch(API_ROUTES.regenerateDailyPlan, { method: "POST" });
+  if (!response.ok) throw new Error("Daily plan regeneration failed");
+  return response.json() as Promise<DailyPlan>;
+}
+
+export async function playCurrentDailyPlanSegment(): Promise<PlayDailyPlanResponse> {
+  const response = await fetch(API_ROUTES.playDailyPlan, { method: "POST" });
+  if (!response.ok) throw new Error("当前时段暂无可播放歌曲，请先重排全天计划。");
+  return response.json() as Promise<PlayDailyPlanResponse>;
 }
