@@ -8,6 +8,49 @@ import { NcmConnector } from "../src/ncmConnector.js";
 import { StateRepository } from "../src/stateRepository.js";
 
 describe("NcmConnector integration", () => {
+  it("parses current cloudsearch track metadata", async () => {
+    const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", async (input) => {
+      expect(input.toString()).toContain("/cloudsearch");
+      return json({
+        result: {
+          songs: [
+            {
+              id: 188105,
+              name: "总发游",
+              ar: [{ name: "张雨生" }],
+              al: { name: "大海", picUrl: "https://example.com/current.jpg" },
+              dt: 268160
+            },
+            {
+              id: 188106,
+              name: "Missing Artist",
+              ar: [],
+              al: { name: "Broken Metadata" },
+              dt: 180000
+            },
+            {
+              id: 188107,
+              ar: [{ name: "Missing Title Artist" }],
+              al: { name: "Broken Metadata" },
+              dt: 180000
+            }
+          ]
+        }
+      });
+    });
+
+    await expect(connector.searchSongs("雷雨 午后")).resolves.toEqual([
+      {
+        id: 188105,
+        title: "总发游",
+        artists: ["张雨生"],
+        album: "大海",
+        coverUrl: "https://example.com/current.jpg",
+        durationMs: 268160
+      }
+    ]);
+  });
+
   it("parses logged-in daily recommendations into playable track metadata", async () => {
     const connector = new NcmConnector("http://mock-ncm", "MUSIC_U=test", async (input) => {
       expect(input.toString()).toContain("/recommend/songs");

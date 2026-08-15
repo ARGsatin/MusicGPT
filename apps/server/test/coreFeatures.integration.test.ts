@@ -81,10 +81,15 @@ describe("core feature integration", () => {
     expect(atmosphereRes.ok).toBe(true);
     const atmosphere = (await atmosphereRes.json()) as {
       action: string;
+      reply: string;
+      now: { track?: { id: number } };
       messages: Array<{ trackSuggestion?: { reason: string } }>;
     };
     expect(atmosphere.action).toBe("play_atmosphere");
-    expect(atmosphere.messages.at(-1)?.trackSuggestion?.reason).toMatch(/雨天|深夜|日推|氛围/);
+    expect(atmosphere.reply).toMatch(/雨天|深夜|日推|氛围/);
+    expect(atmosphere.reply).toContain("已切到");
+    expect(atmosphere.now.track?.id).toBeDefined();
+    expect(atmosphere.messages.at(-1)?.trackSuggestion).toBeUndefined();
 
     const settingsRes = await fetch(`${base}/api/dj/settings`, {
       method: "POST",
@@ -129,6 +134,35 @@ describe("core feature integration", () => {
     const thirdNow = await requestNext(base);
     expect(thirdNow.track?.id).toBeDefined();
     expect(thirdNow.djScript).toBeUndefined();
+  });
+
+  it("records an explicit play as positive recommendation feedback", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-explicit-play-"));
+    const repo = new StateRepository(path.join(tmp, "state.db"));
+    const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", createMockNcmFetch());
+    const app = await createServer({
+      repo,
+      ncm,
+      djBrain: new DjBrain(),
+      djBroadcastInterval: 4,
+      importRetryIntervalMs: 50
+    });
+    servers.push(app);
+
+    const base = await app.listen({ port: 0, host: "127.0.0.1" });
+    const response = await fetch(`${base}/api/play-track`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        track: { id: 44, title: "Chosen Track", artists: ["Listener Pick"] },
+        reason: "用户主动点播"
+      })
+    });
+
+    expect(response.ok).toBe(true);
+    expect(repo.getRecentPlayEvents(20)).toContainEqual(
+      expect.objectContaining({ type: "play", trackId: 44 })
+    );
   });
 
   it("updates local favorite state and exposes status/import endpoints", async () => {

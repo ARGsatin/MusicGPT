@@ -40,6 +40,7 @@ describe("API integration", () => {
       queue,
       paused: false
     });
+    repo.saveRecommendationDataVersion(2);
     const app = await createServer({
       repo,
       ncm: new NcmConnector("http://mock-ncm", "cookie=abc", mockNcmFetch),

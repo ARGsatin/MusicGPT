@@ -37,7 +37,7 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "播放 《In The End》");
 
     expect(response.action).toBe("play_specific");
-    expect(response.reply).toBe("找到《In The End》— Linkin Park。");
+    expect(response.reply).toBe("已切到《In The End》— Linkin Park。");
     expect(response.reply).not.toMatch(/分寸感|重点到了|扑得太满/);
   });
 
@@ -113,7 +113,7 @@ describe("AI DJ assistant chat", () => {
     expect(response.reply).not.toContain("好呀");
   });
 
-  it("selects a described song from the local library without changing playback", async () => {
+  it("selects and plays a described song from the local library", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "雨夜散步，不要太伤", searchQuery: "雨夜 散步" },
@@ -128,21 +128,19 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "点一首适合雨夜散步但不要太伤的歌");
 
     expect(response.action).toBe("play_by_description");
-    expect(response.now.track).toBeUndefined();
-    expect(response.now.queue).toHaveLength(0);
+    expect(response.now.track?.id).toBe(102);
+    expect(response.now.track?.songUrl).toBe("https://example.com/102.mp3");
     expect(response.reply).toContain("Rain Walk");
     expect(response.reply).toContain("散步通勤");
     expect(response.reply).toContain("夜听");
     expect(response.reply).not.toContain("给你～");
     expect(response.messages.at(-1)?.role).toBe("assistant");
-    const suggestion = response.messages.at(-1)?.trackSuggestion;
-    expect(suggestion?.track.id).toBe(102);
-    expect(suggestion?.track.songUrl).toBeUndefined();
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(fixture.assistant.lastCandidates.map((candidate) => candidate.id)).toContain(102);
     expect(fixture.ncmSearches).toHaveLength(0);
   });
 
-  it("plays a suggested track only after the user clicks the suggestion", async () => {
+  it("resolves the playback URL without requiring a suggestion click", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "play_by_description", description: "rain walk", searchQuery: "rain walk" },
@@ -154,14 +152,9 @@ describe("AI DJ assistant chat", () => {
     ]);
 
     const response = await postChat(fixture.base, "play something for rain walk");
-    const suggestion = response.messages.at(-1)?.trackSuggestion;
-    expect(suggestion?.track.id).toBe(102);
-    expect(response.now.track).toBeUndefined();
-
-    const playResponse = await postPlayTrack(fixture.base, suggestion!.track, suggestion!.reason);
-
-    expect(playResponse.now.track?.id).toBe(102);
-    expect(playResponse.now.track?.songUrl).toBe("https://example.com/102.mp3");
+    expect(response.now.track?.id).toBe(102);
+    expect(response.now.track?.songUrl).toBe("https://example.com/102.mp3");
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
   });
 
   it("falls back to NCM search when local candidates are weak", async () => {
@@ -179,9 +172,47 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "来点凌晨写代码的低频电子");
 
     expect(response.action).toBe("play_by_description");
-    expect(response.now.track).toBeUndefined();
-    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(202);
+    expect(response.now.track?.id).toBe(202);
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(fixture.ncmSearches).toEqual(["低频 电子"]);
+  });
+
+  it("filters ambient search results from an ordinary described-song request", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_by_description", description: "雨夜散步", searchQuery: "雨夜 散步" },
+        selection: { trackId: 210 }
+      }),
+      searchTracks: [
+        { id: 210, title: "雷雨声 白噪音 ASMR", artists: ["Nature Lab"] },
+        { id: 211, title: "Rain Walk", artists: ["Nocturne"], moodTag: "night" }
+      ]
+    });
+    const response = await postChat(fixture.base, "来点雨夜散步的歌");
+
+    expect(response.now.track?.id).toBe(211);
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
+  });
+
+  it("keeps ambient search results when the user explicitly requests them", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: {
+          type: "play_by_description",
+          description: "雨声白噪音助眠",
+          searchQuery: "雨声 白噪音 助眠"
+        },
+        selection: { trackId: 212 }
+      }),
+      searchTracks: [
+        { id: 212, title: "雷雨声 白噪音 ASMR", artists: ["Nature Lab"] }
+      ]
+    });
+
+    const response = await postChat(fixture.base, "播放雨声白噪音助眠");
+
+    expect(response.now.track?.id).toBe(212);
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
   });
 
   it("keeps built-in operation replies functional and neutral", async () => {
@@ -299,8 +330,8 @@ describe("AI DJ assistant chat", () => {
     expect(response.reply).toContain("Terminal Glow");
     expect(response.reply).toContain("专注");
     expect(response.reply).not.toContain("terminal window");
-    expect(response.now.track).toBeUndefined();
-    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(402);
+    expect(response.now.track?.id).toBe(402);
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(assistant.commentTrackCalls).toBe(0);
   });
 
@@ -317,10 +348,10 @@ describe("AI DJ assistant chat", () => {
     const response = await postChat(fixture.base, "play Nevada");
 
     expect(response.action).toBe("play_specific");
-    expect(response.now.track).toBeUndefined();
-    expect(response.messages.at(-1)?.trackSuggestion?.track.id).toBe(403);
+    expect(response.now.track?.id).toBe(403);
+    expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(response.reply).toContain("Nevada");
-    expect(response.reply).toBe("找到《Nevada》— Vicetone / Cozi Zuehlsdorff。");
+    expect(response.reply).toBe("已切到《Nevada》— Vicetone / Cozi Zuehlsdorff。");
     expect(response.reply).not.toContain("skyline");
     expect(assistant.commentTrackCalls).toBe(0);
   });
@@ -345,12 +376,116 @@ describe("AI DJ assistant chat", () => {
       .map((line) => JSON.parse(line) as {
         type: string;
         delta?: string;
-        response?: { messages: ChatMessage[] };
+        response?: { now: { track?: Track }; messages: ChatMessage[] };
       });
     const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
 
-    expect(deltas).toEqual(["找到《Nevada》— Vicetone。"]);
-    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(404);
+    expect(deltas).toEqual(["已切到《Nevada》— Vicetone。"]);
+    const result = events.find((event) => event.type === "result")?.response;
+    expect(result?.now.track?.id).toBe(404);
+    expect(result?.messages.at(-1)?.trackSuggestion).toBeUndefined();
+  });
+
+  it("switches tracks directly when streaming chat recognizes an explicit song request", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_specific", query: "Nevada", searchQuery: "Nevada" }
+      }),
+      searchTracks: [{ id: 414, title: "Nevada", artists: ["Vicetone"], moodTag: "energy" }]
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "播放 Nevada" })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        response?: {
+          now: { track?: Track };
+          messages: ChatMessage[];
+        };
+      });
+    const result = events.find((event) => event.type === "result")?.response;
+
+    expect(result?.now.track?.id).toBe(414);
+    expect(result?.messages.at(-1)?.trackSuggestion).toBeUndefined();
+  });
+
+  it("switches tracks directly when streaming chat recognizes a described-song request", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: {
+          type: "play_by_description",
+          description: "适合下雨散步",
+          searchQuery: "下雨 散步"
+        },
+        selection: { trackId: 415 }
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 415, title: "Rainy Steps", artists: ["Mori"], moodTag: "calm", playCount: 20 })
+    ]);
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "点一首适合下雨散步的歌" })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        response?: {
+          now: { track?: Track };
+          messages: ChatMessage[];
+        };
+      });
+    const result = events.find((event) => event.type === "result")?.response;
+
+    expect(result?.now.track?.id).toBe(415);
+    expect(result?.messages.at(-1)?.trackSuggestion).toBeUndefined();
+  });
+
+  it("switches tracks directly when streaming chat recognizes an atmosphere request", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_atmosphere" },
+        selection: { trackId: 416 }
+      })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 416, title: "Morning Signal", artists: ["North Loop"], moodTag: "focus", playCount: 12 })
+    ]);
+    fixture.repo.saveEnvironmentContext({
+      weather: "clear",
+      dayPeriod: "morning",
+      updatedAt: new Date().toISOString()
+    });
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "根据现在的天气和时间点歌" })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        response?: {
+          now: { track?: Track };
+          messages: ChatMessage[];
+        };
+      });
+    const result = events.find((event) => event.type === "result")?.response;
+
+    expect(result?.now.track?.id).toBe(416);
+    expect(result?.messages.at(-1)?.trackSuggestion).toBeUndefined();
   });
 
   it("emits one evidence-based result after a described-song selection", async () => {
@@ -380,7 +515,7 @@ describe("AI DJ assistant chat", () => {
       .map((line) => JSON.parse(line) as {
         type: string;
         delta?: string;
-        response?: { messages: ChatMessage[] };
+        response?: { now: { track?: Track }; messages: ChatMessage[] };
       });
     const deltas = events.filter((event) => event.type === "text_delta").map((event) => event.delta);
 
@@ -388,7 +523,9 @@ describe("AI DJ assistant chat", () => {
     expect(deltas[0]).toContain("散步通勤");
     expect(deltas[0]).toContain("Rainy Steps");
     expect(deltas[0]).not.toContain("吉他很松弛");
-    expect(events.find((event) => event.type === "result")?.response?.messages.at(-1)?.trackSuggestion?.track.id).toBe(405);
+    const result = events.find((event) => event.type === "result")?.response;
+    expect(result?.now.track?.id).toBe(405);
+    expect(result?.messages.at(-1)?.trackSuggestion).toBeUndefined();
   });
 
   it("uses factual atmosphere evidence in both chat endpoints without requesting a review", async () => {
@@ -408,9 +545,11 @@ describe("AI DJ assistant chat", () => {
     });
     const regular = await postChat(fixture.base, "根据现在的天气和时间点歌");
     expect(regular.action).toBe("play_atmosphere");
-    const regularReason = regular.messages.at(-1)?.trackSuggestion?.reason;
+    const regularReason = regular.reply.split("，已切到")[0];
     expect(regularReason).toMatch(/^晴天 · (早晨|午后|傍晚|深夜) · 熟悉偏好$/);
-    expect(regular.reply).toBe(`${regularReason}，选了《Morning Signal》— North Loop。`);
+    expect(regular.reply).toBe(`${regularReason}，已切到《Morning Signal》— North Loop。`);
+    expect(regular.now.track?.id).toBe(406);
+    expect(regular.messages.at(-1)?.trackSuggestion).toBeUndefined();
 
     const streamResponse = await fetch(`${fixture.base}/api/chat/stream`, {
       method: "POST",
@@ -423,14 +562,17 @@ describe("AI DJ assistant chat", () => {
       .map((line) => JSON.parse(line) as {
         type: string;
         delta?: string;
-        response?: { messages: ChatMessage[] };
+        response?: { now: { track?: Track }; messages: ChatMessage[] };
       });
-    const streamedReason = events.find((event) => event.type === "result")
-      ?.response?.messages.at(-1)?.trackSuggestion?.reason;
+    const streamedReply = events.find((event) => event.type === "text_delta")?.delta;
+    const streamedReason = streamedReply?.split("，已切到")[0];
     expect(streamedReason).toMatch(/^晴天 · (早晨|午后|傍晚|深夜) · 熟悉偏好$/);
     expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
-      `${streamedReason}，选了《Morning Signal》— North Loop。`
+      `${streamedReason}，已切到《Morning Signal》— North Loop。`
     ]);
+    const streamedResult = events.find((event) => event.type === "result")?.response;
+    expect(streamedResult?.now.track?.id).toBe(406);
+    expect(streamedResult?.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(assistant.commentTrackCalls).toBe(0);
   });
 });
@@ -565,18 +707,6 @@ async function postChat(base: string, message: string) {
     reply: string;
     now: { track?: Track; queue: unknown[]; paused: boolean };
     messages: Array<ChatMessage & { trackSuggestion?: { track: Track; reason: string } }>;
-  };
-}
-
-async function postPlayTrack(base: string, track: Track, reason: string) {
-  const response = await fetch(`${base}/api/play-track`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ track, reason })
-  });
-  expect(response.ok).toBe(true);
-  return (await response.json()) as {
-    now: { track?: Track; queue: unknown[]; paused: boolean };
   };
 }
 

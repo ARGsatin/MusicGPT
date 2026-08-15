@@ -1,4 +1,8 @@
 import { inferMood } from "./moodClassifier.js";
+import {
+  isEligibleRecommendationTrack,
+  isExplicitAmbientRequest
+} from "./recommendationQuality.js";
 import { StateRepository } from "./stateRepository.js";
 import {
   DISCOVERY_STYLES,
@@ -9,7 +13,6 @@ import {
 
 import type {
   EnvironmentContext,
-  MusicTag,
   RecommendationCandidate,
   TasteProfile,
   Track
@@ -28,7 +31,6 @@ export interface RecommendationImportResult {
 interface SearchSeed {
   query: string;
   source: "context_search" | "style_search";
-  tags: MusicTag[];
 }
 
 const SEARCH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,6 +55,7 @@ export class RecommendationImporter {
     const now = new Date();
     const discoveredAt = now.toISOString();
     const candidates = new Map<number, RecommendationCandidate>();
+    const allowAmbient = isExplicitAmbientRequest(contextText);
     let skippedCount = 0;
 
     const dailyDate = localDateKey(now);
@@ -62,10 +65,15 @@ export class RecommendationImporter {
     if (shouldRefreshDaily && this.searchProvider.fetchDailyRecommendations) {
       const dailyTracks = await this.searchProvider.fetchDailyRecommendations().catch(() => []);
       for (const track of dailyTracks) {
+        if (!isEligibleRecommendationTrack(track, allowAmbient)) {
+          skippedCount += 1;
+          continue;
+        }
         skippedCount += addCandidate(candidates, existingIds, {
           track,
           source: "ncm_daily",
           tags: inferTrackTags(track),
+          relevanceScore: 1,
           discoveredAt,
           expiresAt: new Date(now.getTime() + DAILY_TTL_MS).toISOString()
         });
@@ -83,16 +91,21 @@ export class RecommendationImporter {
       }))
     );
     for (const { seed, tracks } of batches) {
-      for (const track of tracks) {
+      const eligibleTracks = tracks
+        .filter((track) => isEligibleRecommendationTrack(track, allowAmbient))
+        .slice(0, 3);
+      skippedCount += tracks.length - eligibleTracks.length;
+      for (const [index, track] of eligibleTracks.entries()) {
         const normalized = {
           ...track,
           moodTag: track.moodTag ?? inferMood(track)
         };
-        const tags = inferTrackTags(normalized, seed.tags);
+        const tags = inferTrackTags(normalized);
         skippedCount += addCandidate(candidates, existingIds, {
           track: { ...normalized, tags },
           source: seed.source,
           tags,
+          relevanceScore: 1 - index * 0.2,
           discoveredAt,
           expiresAt: new Date(now.getTime() + SEARCH_TTL_MS).toISOString()
         });
@@ -114,6 +127,10 @@ function addCandidate(
   candidate: RecommendationCandidate
 ): number {
   if (existingIds.has(candidate.track.id) || candidates.has(candidate.track.id)) {
+    const existing = candidates.get(candidate.track.id);
+    if (existing && candidate.relevanceScore > existing.relevanceScore) {
+      candidates.set(candidate.track.id, candidate);
+    }
     return 1;
   }
   candidates.set(candidate.track.id, candidate);
@@ -138,8 +155,7 @@ function buildSeeds(
   if (atmosphere) {
     seeds.set(atmosphere, {
       query: atmosphere,
-      source: "context_search",
-      tags: contextTags
+      source: "context_search"
     });
   }
 
@@ -147,8 +163,7 @@ function buildSeeds(
     const query = `${artist.name} ${atmosphere || "相似推荐"}`;
     seeds.set(query, {
       query,
-      source: "context_search",
-      tags: contextTags
+      source: "context_search"
     });
   }
 
@@ -159,8 +174,7 @@ function buildSeeds(
     const query = `${tag.value} ${periodSeed(environment.dayPeriod)}`;
     seeds.set(query, {
       query,
-      source: "context_search",
-      tags: [{ category: tag.category, value: tag.value }, ...contextTags]
+      source: "context_search"
     });
   }
 
@@ -171,8 +185,7 @@ function buildSeeds(
     const query = `${style} ${periodSeed(environment.dayPeriod)}`;
     seeds.set(query, {
       query,
-      source: "style_search",
-      tags: [{ category: "style", value: style }, ...environmentTags(environment)]
+      source: "style_search"
     });
   }
   return [...seeds.values()].slice(0, 7);

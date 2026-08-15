@@ -33,6 +33,11 @@ import { NcmConnector, NcmImportError } from "./ncmConnector.js";
 import { MusicCommandModule } from "./musicCommand.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import { RecommendationImporter } from "./recommendationImporter.js";
+import {
+  hasRecommendationMetadata,
+  isEligibleRecommendationTrack,
+  isExplicitAmbientRequest
+} from "./recommendationQuality.js";
 import { StateRepository } from "./stateRepository.js";
 import { TasteEngine } from "./tasteEngine.js";
 import { currentPeriod } from "./time.js";
@@ -50,6 +55,8 @@ const QUEUE_TARGET_SIZE = 10;
 const QUEUE_REFILL_THRESHOLD = 6;
 const IMPORT_RETRY_INTERVAL_MS = 60_000;
 const CHAT_HISTORY_DISPLAY_LIMIT = 100;
+const RECOMMENDATION_DATA_VERSION = 2;
+const RECOMMENDATION_FEEDBACK_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
 const AI_OPEN_ENDED_REPLY_UNCONFIGURED =
   "尚未连接 DeepSeek/OpenAI，当前无法生成开放式回复。";
 const AI_OPEN_ENDED_REPLY_FAILED =
@@ -141,6 +148,7 @@ export class RadioOrchestrator {
   async initialize(): Promise<void> {
     this.state = this.repo.getNowPlaying() ?? { queue: [], paused: false };
     this.ensureDjSettings();
+    await this.repairRecommendationData();
     await this.refreshEnvironmentIfNeeded();
     if (this.repo.getTrackStatsCount() === 0) {
       await this.runNcmImport();
@@ -368,7 +376,7 @@ export class RadioOrchestrator {
     const planned = this.planner.plan(
       this.repo.getTrackStats(),
       profile,
-      this.repo.getRecentPlayEvents(120),
+      this.getRecommendationFeedbackEvents(),
       planOptions
     );
     this.state.queue = dedupeByTrackId([...this.state.queue, ...planned]).slice(0, QUEUE_TARGET_SIZE);
@@ -413,7 +421,9 @@ export class RadioOrchestrator {
       source: "chat_search",
       bucket: "explore"
     });
-    return this.nextTrack();
+    const now = await this.nextTrack();
+    this.recordExplicitPlay(now.track?.id);
+    return now;
   }
 
   async playQueuedTrack(trackId: number): Promise<NowPlayingState | undefined> {
@@ -422,7 +432,9 @@ export class RadioOrchestrator {
       return undefined;
     }
     this.state.queue.splice(0, queueIndex);
-    return this.nextTrack();
+    const now = await this.nextTrack();
+    this.recordExplicitPlay(now.track?.id);
+    return now;
   }
 
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {
@@ -502,13 +514,28 @@ export class RadioOrchestrator {
         const context = this.buildAiContext(message);
         const intent = await this.classifySafely(message, context);
         const response = await this.handleChatIntent(message, context, intent);
+        const suggestion = response.messages[0]?.trackSuggestion;
+        if (
+          (response.action === "play_specific" ||
+            response.action === "play_by_description" ||
+            response.action === "play_atmosphere") &&
+          suggestion
+        ) {
+          const now = await this.playSuggestedTrack(suggestion.track, suggestion.reason);
+          const playbackReply = response.action === "play_specific"
+            ? `已切到《${suggestion.track.title}》— ${formatArtists(suggestion.track)}。`
+            : `${suggestion.reason}，已切到《${suggestion.track.title}》— ${formatArtists(suggestion.track)}。`;
+          return {
+            action: response.action,
+            reply: playbackReply,
+            now
+          };
+        }
         return {
           action: response.action,
           reply: response.reply,
           now: response.now,
-          ...(response.messages[0]?.trackSuggestion
-            ? { trackSuggestion: response.messages[0].trackSuggestion }
-            : {})
+          ...(suggestion ? { trackSuggestion: suggestion } : {})
         };
       }
     );
@@ -645,12 +672,16 @@ export class RadioOrchestrator {
     intent: Extract<AiDjIntent, { type: "play_by_description" }>,
     context: AiDjContext
   ): Promise<ChatResponse> {
-    const local = this.findLocalCandidates(intent.description);
+    const allowAmbient = isExplicitAmbientRequest(
+      `${intent.description} ${intent.searchQuery ?? ""}`
+    );
+    const local = this.findLocalCandidates(intent.description, allowAmbient);
     let candidates = local.map((candidate) => candidate.track);
     const bestLocalScore = local[0]?.score ?? 0;
     if (bestLocalScore < 0.35) {
       const searchQuery = intent.searchQuery?.trim() || intent.description;
-      const remote = await this.ncm.searchSongs(searchQuery).catch(() => []);
+      const remote = (await this.ncm.searchSongs(searchQuery).catch(() => []))
+        .filter((track) => isEligibleRecommendationTrack(track, allowAmbient));
       candidates = dedupeTracks([...candidates, ...remote]).slice(0, 12);
     }
 
@@ -687,7 +718,7 @@ export class RadioOrchestrator {
     const plan = this.planner.plan(
       this.repo.getTrackStats(),
       profile,
-      this.repo.getRecentPlayEvents(120),
+      this.getRecommendationFeedbackEvents(),
       {
         windowSize: 12,
         environment,
@@ -739,7 +770,10 @@ export class RadioOrchestrator {
     return this.reply("comment_current", reply, this.state);
   }
 
-  private findLocalCandidates(description: string): Array<{ track: Track; score: number }> {
+  private findLocalCandidates(
+    description: string,
+    allowAmbient = false
+  ): Array<{ track: Track; score: number }> {
     const stats = this.repo.getTrackStats(800);
     const knownIds = new Set(stats.map((entry) => entry.track.id));
     const exploration = this.repo
@@ -747,6 +781,7 @@ export class RadioOrchestrator {
       .filter((candidate) => !knownIds.has(candidate.track.id))
       .map((candidate) => ({ track: candidate.track, playCount: 0 }));
     return [...stats, ...exploration]
+      .filter((entry) => isEligibleRecommendationTrack(entry.track, allowAmbient))
       .map((entry) => ({
         track: entry.track,
         score: scoreTrackForDescription(entry, description)
@@ -920,6 +955,7 @@ export class RadioOrchestrator {
   }
 
   private async postImportRefresh(): Promise<void> {
+    await this.repairMissingTrackMetadata();
     await this.refreshTasteProfile();
     await this.ensureQueue();
     if (!this.state.track && this.state.queue.length > 0) {
@@ -932,6 +968,72 @@ export class RadioOrchestrator {
 
   private async broadcastSystemStatus(): Promise<void> {
     this.wsHub.broadcast({ event: "system_status", data: await this.getSystemStatus() });
+  }
+
+  private getRecommendationFeedbackEvents(): PlayEvent[] {
+    return this.repo.getPlayEventsSince(
+      new Date(Date.now() - RECOMMENDATION_FEEDBACK_WINDOW_MS).toISOString()
+    );
+  }
+
+  private recordExplicitPlay(trackId: number | undefined): void {
+    if (trackId === undefined) {
+      return;
+    }
+    this.repo.addPlayEvent({
+      type: "play",
+      trackId,
+      at: new Date().toISOString()
+    });
+  }
+
+  private async repairRecommendationData(): Promise<void> {
+    if (this.repo.getRecommendationDataVersion() < RECOMMENDATION_DATA_VERSION) {
+      this.repo.clearRecommendationCandidates();
+      this.repo.resetRecommendationRefreshDates();
+      this.state.queue = [];
+      this.repo.saveNowPlaying(this.state);
+      this.repo.saveRecommendationDataVersion(RECOMMENDATION_DATA_VERSION);
+    }
+    await this.repairMissingTrackMetadata();
+  }
+
+  private async repairMissingTrackMetadata(): Promise<void> {
+    const incomplete = this.repo
+      .getTrackStats(5000)
+      .filter((stat) => !hasRecommendationMetadata(stat.track));
+    if (incomplete.length === 0) {
+      return;
+    }
+    const details = await this.ncm
+      .fetchTrackDetails(incomplete.map((stat) => stat.track.id))
+      .catch(() => []);
+    const detailsById = new Map(details.map((track) => [track.id, track]));
+    const repaired = incomplete.flatMap((stat) => {
+      const detail = detailsById.get(stat.track.id);
+      if (!detail || !hasRecommendationMetadata(detail)) {
+        return [];
+      }
+      const track: Track = {
+        ...stat.track,
+        ...detail,
+        ...(stat.track.moodTag ? { moodTag: stat.track.moodTag } : {}),
+        ...(stat.track.tags ? { tags: stat.track.tags } : {}),
+        ...(stat.track.songUrl ? { songUrl: stat.track.songUrl } : {})
+      };
+      return [{ ...stat, track }];
+    });
+    if (repaired.length === 0) {
+      return;
+    }
+    this.repo.upsertTrackStats(repaired);
+    const currentRepair = this.state.track
+      ? repaired.find((stat) => stat.track.id === this.state.track?.id)
+      : undefined;
+    if (currentRepair) {
+      this.state.track = currentRepair.track;
+      this.repo.saveNowPlaying(this.state);
+    }
   }
 
   private ensureDjSettings(): DjSettings {

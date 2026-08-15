@@ -29,6 +29,8 @@ export type DayPeriod = "morning" | "afternoon" | "evening" | "late_night";
 
 export type FeedbackType = "skip" | "like" | "unlike" | "replay" | "complete";
 
+export type PlayEventType = FeedbackType | "play";
+
 export type WeatherKind = "clear" | "cloudy" | "rain" | "snow" | "fog" | "storm" | "unknown";
 
 export type DjTone = "lively" | "calm" | "professional";
@@ -145,12 +147,13 @@ export interface RecommendationCandidate {
   track: Track;
   source: RecommendationSource;
   tags: MusicTag[];
+  relevanceScore: number;
   discoveredAt: string;
   expiresAt: string;
 }
 
 export interface PlayEvent {
-  type: FeedbackType;
+  type: PlayEventType;
   trackId: number;
   at: string;
   metadata?: Record<string, string | number | boolean>;

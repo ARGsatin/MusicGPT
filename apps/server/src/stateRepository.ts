@@ -105,6 +105,7 @@ export class StateRepository {
         track_json TEXT NOT NULL,
         source TEXT NOT NULL,
         tags_json TEXT NOT NULL,
+        relevance_score REAL NOT NULL DEFAULT 0.5,
         discovered_at TEXT NOT NULL,
         expires_at TEXT NOT NULL
       );
@@ -113,6 +114,7 @@ export class StateRepository {
     this.ensureConversationColumns();
     this.ensureConversationRevision();
     this.ensureTrackStatsColumns();
+    this.ensureRecommendationCandidateColumns();
     this.migrateLegacyLocalFavorites();
   }
 
@@ -120,6 +122,13 @@ export class StateRepository {
     const columns = this.db.prepare("PRAGMA table_info(track_stats)").all() as Array<{ name: string }>;
     if (!columns.some((column) => column.name === "local_favorited_at")) {
       this.db.exec("ALTER TABLE track_stats ADD COLUMN local_favorited_at TEXT");
+    }
+  }
+
+  private ensureRecommendationCandidateColumns(): void {
+    const columns = this.db.prepare("PRAGMA table_info(recommendation_candidates)").all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === "relevance_score")) {
+      this.db.exec("ALTER TABLE recommendation_candidates ADD COLUMN relevance_score REAL NOT NULL DEFAULT 0.5");
     }
   }
 
@@ -326,13 +335,14 @@ export class StateRepository {
     }
     const statement = this.db.prepare(`
       INSERT INTO recommendation_candidates(
-        track_id, track_json, source, tags_json, discovered_at, expires_at
+        track_id, track_json, source, tags_json, relevance_score, discovered_at, expires_at
       )
-      VALUES (?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(track_id) DO UPDATE SET
         track_json=excluded.track_json,
         source=excluded.source,
         tags_json=excluded.tags_json,
+        relevance_score=excluded.relevance_score,
         discovered_at=excluded.discovered_at,
         expires_at=excluded.expires_at
     `);
@@ -344,6 +354,7 @@ export class StateRepository {
           JSON.stringify({ ...candidate.track, tags: candidate.tags }),
           candidate.source,
           JSON.stringify(candidate.tags),
+          candidate.relevanceScore,
           candidate.discoveredAt,
           candidate.expiresAt
         );
@@ -361,16 +372,17 @@ export class StateRepository {
   ): RecommendationCandidate[] {
     const rows = this.db
       .prepare(`
-        SELECT track_json, source, tags_json, discovered_at, expires_at
+        SELECT track_json, source, tags_json, relevance_score, discovered_at, expires_at
         FROM recommendation_candidates
         WHERE expires_at > ?
-        ORDER BY discovered_at DESC, track_id DESC
+        ORDER BY discovered_at DESC, relevance_score DESC, track_id DESC
         LIMIT ?
       `)
       .all(now, limit) as Array<{
       track_json: string;
       source: RecommendationSource;
       tags_json: string;
+      relevance_score: number;
       discovered_at: string;
       expires_at: string;
     }>;
@@ -378,6 +390,7 @@ export class StateRepository {
       track: parseJson<Track>(row.track_json, { id: 0, title: "unknown", artists: ["unknown"] }),
       source: row.source,
       tags: parseJson(row.tags_json, []),
+      relevanceScore: row.relevance_score,
       discoveredAt: row.discovered_at,
       expiresAt: row.expires_at
     }));
@@ -385,6 +398,22 @@ export class StateRepository {
 
   deleteExpiredRecommendationCandidates(now = new Date().toISOString()): void {
     this.db.prepare("DELETE FROM recommendation_candidates WHERE expires_at <= ?").run(now);
+  }
+
+  clearRecommendationCandidates(): void {
+    this.db.prepare("DELETE FROM recommendation_candidates").run();
+  }
+
+  resetRecommendationRefreshDates(): void {
+    this.db.prepare("DELETE FROM app_state WHERE key LIKE 'recommendation_refresh:%'").run();
+  }
+
+  getRecommendationDataVersion(): number {
+    return this.getAppState<number>("recommendation_data_version") ?? 0;
+  }
+
+  saveRecommendationDataVersion(version: number): void {
+    this.saveAppState("recommendation_data_version", version);
   }
 
   saveRecommendationRefreshDate(source: RecommendationSource, date: string): void {
@@ -416,6 +445,26 @@ export class StateRepository {
         "SELECT track_id, event_type, at, metadata_json FROM play_events ORDER BY id DESC LIMIT ?"
       )
       .all(limit) as Array<{
+      track_id: number;
+      event_type: PlayEvent["type"];
+      at: string;
+      metadata_json: string | null;
+    }>;
+
+    return rows.map((row) => ({
+      trackId: row.track_id,
+      type: row.event_type,
+      at: row.at,
+      metadata: parseJson(row.metadata_json, {})
+    }));
+  }
+
+  getPlayEventsSince(since: string): PlayEvent[] {
+    const rows = this.db
+      .prepare(
+        "SELECT track_id, event_type, at, metadata_json FROM play_events WHERE at >= ? ORDER BY id DESC"
+      )
+      .all(since) as Array<{
       track_id: number;
       event_type: PlayEvent["type"];
       at: string;
