@@ -39,6 +39,7 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   nowTitle: string;
   queue: RadioPlanItem[];
+  queueError: string | null;
   planPanel: ReactNode;
   queueLoadingTrackId: TrackReference | null;
   realtimeStatus: RealtimeVoiceStatus;
@@ -510,11 +511,14 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           </form>
         </>
       ) : activeTab === "queue" ? (
-        <QueueRail
-          loadingTrackId={props.queueLoadingTrackId}
-          onPlayTrack={props.onPlayQueueTrack}
-          queue={queue}
-        />
+        <>
+          {props.queueError ? <p className="chat-error" role="alert">{props.queueError}</p> : null}
+          <QueueRail
+            loadingTrackId={props.queueLoadingTrackId}
+            onPlayTrack={props.onPlayQueueTrack}
+            queue={queue}
+          />
+        </>
       ) : (
         props.planPanel
       )}

@@ -40,6 +40,7 @@ export class MusicCatalog {
   private readonly adapters = new Map<MusicSource, MusicSourceAdapter>();
   private readonly variantsByRecording = new Map<string, Track[]>();
   private readonly playbackCooldownUntil = new Map<TrackKey, number>();
+  private readonly fallbackDiscoveryCooldownUntil = new Map<string, number>();
 
   constructor(adapters: MusicSourceAdapter[]) {
     for (const adapter of adapters) {
@@ -118,7 +119,11 @@ export class MusicCatalog {
       }
       this.playbackCooldownUntil.set(variantKey, Date.now() + 15 * 60_000);
     }
-    if (normalized.source === "qq") {
+    const recordingKey = normalized.recordingKey!;
+    if (
+      normalized.source === "qq" &&
+      (this.fallbackDiscoveryCooldownUntil.get(recordingKey) ?? 0) <= Date.now()
+    ) {
       const fallback = this.adapters.get("ncm");
       const query = [normalized.title, ...normalized.artists].join(" ");
       const discovered = await fallback?.search(query).catch(() => []);
@@ -136,6 +141,7 @@ export class MusicCatalog {
           this.playbackCooldownUntil.set(variantKey, Date.now() + 15 * 60_000);
         }
       }
+      this.fallbackDiscoveryCooldownUntil.set(recordingKey, Date.now() + 15 * 60_000);
     }
     return undefined;
   }

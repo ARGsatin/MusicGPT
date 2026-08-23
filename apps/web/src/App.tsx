@@ -143,6 +143,7 @@ export default function App() {
   const [memoryClearing, setMemoryClearing] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [queueError, setQueueError] = useState<string | null>(null);
   const [chatStreamFeedback, setChatStreamFeedback] = useState<ChatStreamFeedback | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
   const [chatClearing, setChatClearing] = useState(false);
@@ -304,7 +305,7 @@ export default function App() {
             paused: response.now.paused,
             track: response.now.track
               ? {
-                  id: response.now.track.id,
+                  id: response.now.track.trackKey ?? response.now.track.id,
                   title: response.now.track.title,
                   artists: response.now.track.artists
                 }
@@ -655,7 +656,7 @@ export default function App() {
         return;
       }
       setQueueLoadingTrackId(trackId);
-      setChatError(null);
+      setQueueError(null);
       try {
         await runWithAdvanceLock(async () => {
           const response = await playQueuedTrack(trackId);
@@ -663,7 +664,7 @@ export default function App() {
           await refreshTaste();
         });
       } catch (error) {
-        setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
+        setQueueError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
       } finally {
         setQueueLoadingTrackId(null);
       }
@@ -676,7 +677,7 @@ export default function App() {
       await runWithAdvanceLock(async () => {
         const currentTrack = currentTrackRef.current;
         if (recordSkip && currentTrack) {
-          await sendFeedback({ type: "skip", trackId: currentTrack.id });
+          await sendFeedback({ type: "skip", trackId: currentTrack.trackKey ?? currentTrack.id });
         }
         const response = await requestNext();
         setNow(response.now);
@@ -692,7 +693,7 @@ export default function App() {
       if (!currentTrack) {
         return;
       }
-      await sendFeedback({ type: "complete", trackId: currentTrack.id });
+      await sendFeedback({ type: "complete", trackId: currentTrack.trackKey ?? currentTrack.id });
       const response = await requestNext();
       setNow(response.now);
       await refreshTaste();
@@ -705,7 +706,7 @@ export default function App() {
       if (!currentTrack) {
         return;
       }
-      await sendFeedback({ type, trackId: currentTrack.id });
+      await sendFeedback({ type, trackId: currentTrack.trackKey ?? currentTrack.id });
       if (type === "skip") {
         await onRequestNext();
         return;
@@ -720,9 +721,12 @@ export default function App() {
     if (!currentTrack) {
       return;
     }
-    const result = await updateFavorite(currentTrack.id, favorite);
+    const trackReference = currentTrack.trackKey ?? currentTrack.id;
+    const result = await updateFavorite(trackReference, favorite);
     setNow((current) =>
-      current.track?.id === currentTrack.id ? { ...current, isFavorite: result.favorite } : current
+      (current.track?.trackKey ?? current.track?.id) === trackReference
+        ? { ...current, isFavorite: result.favorite }
+        : current
     );
     setTaste(result.taste);
   }, []);
@@ -924,6 +928,7 @@ export default function App() {
           messages={visibleMessages}
           nowTitle={trackTitle}
           queue={now.queue}
+          queueError={queueError}
           planPanel={<DailyPlanPanel />}
           queueLoadingTrackId={queueLoadingTrackId}
           realtimeStatus={realtimeStatus}

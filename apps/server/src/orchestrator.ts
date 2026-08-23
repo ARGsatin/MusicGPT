@@ -382,7 +382,7 @@ export class RadioOrchestrator {
       .slice(0, QUEUE_TARGET_SIZE);
     this.repo.saveNowPlaying(this.state);
     this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
-    this.recordExplicitPlay(now.track?.id);
+    this.recordExplicitPlay(now.track ? getTrackKey(now.track) : undefined);
     return { period: segment.period, now: this.state };
   }
 
@@ -535,7 +535,7 @@ export class RadioOrchestrator {
     return profile;
   }
 
-  async ensureQueue(): Promise<void> {
+  async ensureQueue(forceFill = false): Promise<void> {
     const previousDailyPlan = this.repo.getDailyPlan();
     const hadUsableQueue = this.state.queue.length >= QUEUE_REFILL_THRESHOLD;
     const dailyPlan = await this.regenerateDailyPlan(false);
@@ -555,7 +555,7 @@ export class RadioOrchestrator {
       const queueOwnedByPlan = this.state.queue.length > 0 && this.state.queue.every((item) =>
         previousPlanKeys.has(getTrackKey(item.track))
       );
-      if (hadUsableQueue && (!contextChanged || !queueOwnedByPlan)) return;
+      if (!forceFill && hadUsableQueue && (!contextChanged || !queueOwnedByPlan)) return;
       const planned = rollingWindow(dailyPlan, new Date(), QUEUE_TARGET_SIZE);
       const explicit = this.state.queue.filter((item) => item.source === "chat_search");
       this.state.queue = contextChanged
@@ -565,7 +565,7 @@ export class RadioOrchestrator {
       this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
       return;
     }
-    if (this.state.queue.length >= QUEUE_REFILL_THRESHOLD) return;
+    if (!forceFill && this.state.queue.length >= QUEUE_REFILL_THRESHOLD) return;
     const profile = this.repo.getTasteProfile() ?? (await this.refreshTasteProfile());
     const planOptions = this.desiredMood
       ? {
@@ -605,7 +605,7 @@ export class RadioOrchestrator {
     const resolved = await this.hydrateTrack(next);
     if (next.track.source === "qq" && !resolved.item.track.songUrl) {
       this.recordUnavailableTrack(next.track);
-      await this.ensureQueue();
+      await this.ensureQueue(true);
       return this.nextTrack(false);
     }
     return this.activateResolvedTrack(resolved);
@@ -664,7 +664,7 @@ export class RadioOrchestrator {
     if (target.track.source === "qq" && !resolved.item.track.songUrl) {
       this.state.queue.splice(0, queueIndex + 1);
       this.recordUnavailableTrack(target.track);
-      await this.ensureQueue();
+      await this.ensureQueue(true);
       this.repo.saveNowPlaying(this.state);
       this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
       throw new QueuedTrackPlaybackError(

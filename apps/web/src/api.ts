@@ -295,7 +295,14 @@ export async function playQueuedTrack(trackId: TrackReference): Promise<PlayTrac
     method: "POST"
   });
   if (!response.ok) {
-    throw new Error("Failed to play queued track");
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    if (body.error === "qq_subscription_required") {
+      throw new Error("这首 QQ 音乐需要额外播放权益，且未找到网易云同录音版本；已从队列跳过。");
+    }
+    if (body.error === "qq_playback_unavailable") {
+      throw new Error("这首 QQ 音乐暂时不可播放，也未找到网易云同录音版本；已从队列跳过。");
+    }
+    throw new Error("这首歌暂时切不过去，请稍后重试。");
   }
   return (await response.json()) as PlayTrackResponse;
 }

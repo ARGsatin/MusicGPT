@@ -10,6 +10,7 @@ import type { MusicSource, MusicSourceStatus, Track, TrackLyrics } from "@musicg
 
 class FakeSource implements MusicSourceAdapter {
   playbackCalls = 0;
+  searchCalls = 0;
 
   constructor(
     readonly source: MusicSource,
@@ -26,6 +27,7 @@ class FakeSource implements MusicSourceAdapter {
   }
 
   async search(): Promise<Track[]> {
+    this.searchCalls += 1;
     return this.tracks;
   }
 
@@ -124,5 +126,49 @@ describe("MusicCatalog", () => {
       url: "https://example.test/ncm-99.mp3",
       track: { trackKey: "ncm:99", source: "ncm" }
     });
+  });
+
+  it("cools down failed NCM fallback discovery for an unavailable QQ recording", async () => {
+    const qq = new FakeSource("qq", []);
+    const ncm = new FakeSource("ncm", []);
+    const catalog = new MusicCatalog([qq, ncm]);
+    const [queuedQq] = catalog.registerTracks([{
+      id: "unavailable-mid",
+      source: "qq",
+      sourceId: "unavailable-mid",
+      title: "Unavailable Song",
+      artists: ["Unavailable Artist"],
+      durationMs: 200_000
+    }]);
+
+    await catalog.resolvePlayback(queuedQq!);
+    await catalog.resolvePlayback(queuedQq!);
+
+    expect(ncm.searchCalls).toBe(1);
+  });
+
+  it.each([
+    ["different artist", { id: 101, title: "Exact Song", artists: ["Cover Artist"], durationMs: 200_000 }],
+    ["duration beyond five seconds", { id: 102, title: "Exact Song", artists: ["Exact Artist"], durationMs: 206_000 }],
+    ["missing duration", { id: 103, title: "Exact Song", artists: ["Exact Artist"] }]
+  ])("refuses an unsafe NCM fallback with %s", async (_label, candidate) => {
+    const qq = new FakeSource("qq", []);
+    const ncm = new FakeSource(
+      "ncm",
+      [candidate],
+      new Map([[String(candidate.id), `https://example.test/ncm-${candidate.id}.mp3`]])
+    );
+    const catalog = new MusicCatalog([qq, ncm]);
+    const [queuedQq] = catalog.registerTracks([{
+      id: "exact-mid",
+      source: "qq",
+      sourceId: "exact-mid",
+      title: "Exact Song",
+      artists: ["Exact Artist"],
+      durationMs: 200_000
+    }]);
+
+    await expect(catalog.resolvePlayback(queuedQq!)).resolves.toBeUndefined();
+    expect(ncm.playbackCalls).toBe(0);
   });
 });
