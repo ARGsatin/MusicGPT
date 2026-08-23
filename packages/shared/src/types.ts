@@ -62,6 +62,12 @@ export interface Track {
   recordingKey?: string;
   source?: MusicSource;
   sourceId?: string;
+  /** Provider media identifier when playback needs a key distinct from sourceId. */
+  playbackId?: string;
+  /** Provider identifier used by the lyrics endpoint when it differs from sourceId. */
+  lyricsId?: string;
+  /** Provider metadata indicating that playback may require an active subscription. */
+  requiresSubscription?: boolean;
   title: string;
   artists: string[];
   album?: string;

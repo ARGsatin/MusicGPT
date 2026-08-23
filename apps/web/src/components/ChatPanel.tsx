@@ -270,14 +270,16 @@ export const QueueRail = memo(function QueueRail({
   return (
     <ol className="queue-rail">
       {queue.slice(0, 10).map((item, index) => {
-        const loading = loadingTrackId === item.track.id;
+        const trackReference = item.track.trackKey ?? item.track.id;
+        const loading = loadingTrackId === trackReference;
         return (
-          <li key={item.track.trackKey ?? item.track.id}>
+          <li key={trackReference}>
             <button
               aria-label={`立即播放 ${item.track.title}`}
               className={item.bucket === "explore" ? "queue-card is-explore" : "queue-card"}
+              data-track-reference={String(trackReference)}
               disabled={loadingTrackId !== null}
-              onClick={() => onPlayTrack(item.track.id)}
+              onClick={() => onPlayTrack(trackReference)}
               type="button"
             >
               <span className="queue-index">{String(index + 1).padStart(2, "0")}</span>

@@ -93,6 +93,15 @@ export interface ChatStreamCallbacks {
   onResult(response: ChatResponse): void;
 }
 
+export type QueuedTrackPlaybackErrorCode = "qq_subscription_required" | "qq_playback_unavailable";
+
+export class QueuedTrackPlaybackError extends Error {
+  constructor(readonly code: QueuedTrackPlaybackErrorCode) {
+    super(code);
+    this.name = "QueuedTrackPlaybackError";
+  }
+}
+
 export class RadioOrchestrator {
   private state: NowPlayingState = { queue: [], paused: false };
   private desiredMood?: string;
@@ -595,26 +604,21 @@ export class RadioOrchestrator {
     this.repo.ensureTrack(next.track);
     const resolved = await this.hydrateTrack(next);
     if (next.track.source === "qq" && !resolved.item.track.songUrl) {
-      const failedKey = getTrackKey(next.track);
-      this.repo.addPlayEvent({
-        type: "skip",
-        trackId: failedKey,
-        at: new Date().toISOString(),
-        metadata: { reason: "playback_unavailable" }
-      });
-      const failedPlan = this.repo.getDailyPlan();
-      if (failedPlan && !failedPlan.consumedTrackKeys.includes(failedKey)) {
-        failedPlan.consumedTrackKeys.push(failedKey);
-        this.repo.saveDailyPlan(failedPlan);
-      }
+      this.recordUnavailableTrack(next.track);
       await this.ensureQueue();
       return this.nextTrack(false);
     }
+    return this.activateResolvedTrack(resolved);
+  }
+
+  private async activateResolvedTrack(
+    resolved: { item: RadioPlanItem; lyrics: TrackLyrics }
+  ): Promise<NowPlayingState> {
     this.state.track = resolved.item.track;
     this.state.lyrics = resolved.lyrics;
     this.state.startedAt = new Date().toISOString();
     this.state.paused = false;
-    this.state.isFavorite = this.repo.isTrackFavorite(resolved.item.track.id);
+    this.state.isFavorite = this.repo.isTrackFavorite(getTrackKey(resolved.item.track));
     const dailyPlan = this.repo.getDailyPlan();
     if (dailyPlan) {
       const key = getTrackKey(resolved.item.track);
@@ -645,7 +649,7 @@ export class RadioOrchestrator {
       bucket: "explore"
     });
     const now = await this.nextTrack();
-    this.recordExplicitPlay(now.track?.id);
+    this.recordExplicitPlay(now.track ? getTrackKey(now.track) : undefined);
     return now;
   }
 
@@ -655,10 +659,39 @@ export class RadioOrchestrator {
     if (queueIndex < 0) {
       return undefined;
     }
-    this.state.queue.splice(0, queueIndex);
-    const now = await this.nextTrack();
-    this.recordExplicitPlay(now.track?.id);
+    const target = this.state.queue[queueIndex]!;
+    const resolved = await this.hydrateTrack(target);
+    if (target.track.source === "qq" && !resolved.item.track.songUrl) {
+      this.state.queue.splice(0, queueIndex + 1);
+      this.recordUnavailableTrack(target.track);
+      await this.ensureQueue();
+      this.repo.saveNowPlaying(this.state);
+      this.wsHub.broadcast({ event: "queue_updated", data: this.state.queue });
+      throw new QueuedTrackPlaybackError(
+        target.track.requiresSubscription ? "qq_subscription_required" : "qq_playback_unavailable"
+      );
+    }
+    this.state.queue.splice(0, queueIndex + 1);
+    const now = await this.activateResolvedTrack(resolved);
+    this.recordExplicitPlay(now.track ? getTrackKey(now.track) : undefined);
     return now;
+  }
+
+  private recordUnavailableTrack(track: Track): void {
+    const failedKey = getTrackKey(track);
+    this.repo.addPlayEvent({
+      type: "skip",
+      trackId: failedKey,
+      at: new Date().toISOString(),
+      metadata: {
+        reason: track.requiresSubscription ? "subscription_required" : "playback_unavailable"
+      }
+    });
+    const failedPlan = this.repo.getDailyPlan();
+    if (failedPlan && !failedPlan.consumedTrackKeys.includes(failedKey)) {
+      failedPlan.consumedTrackKeys.push(failedKey);
+      this.repo.saveDailyPlan(failedPlan);
+    }
   }
 
   async handleFeedback(feedback: FeedbackRequest): Promise<void> {

@@ -20,7 +20,7 @@ import { DailyPlanEngine } from "./dailyPlan.js";
 import { LocalRoutineProvider, type RoutineProvider } from "./routineProvider.js";
 import { TasteDocumentManager } from "./tasteDocuments.js";
 import { TrackTagEnricher, createAiTagCompleter } from "./trackTagEnricher.js";
-import { RadioOrchestrator } from "./orchestrator.js";
+import { QueuedTrackPlaybackError, RadioOrchestrator } from "./orchestrator.js";
 import { RadioPlanner } from "./radioPlanner.js";
 import {
   buildRealtimeSessionConfig,
@@ -437,7 +437,15 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const now = await orchestrator.playQueuedTrack(parsed.data.trackId);
+    let now;
+    try {
+      now = await orchestrator.playQueuedTrack(parsed.data.trackId);
+    } catch (error) {
+      if (error instanceof QueuedTrackPlaybackError) {
+        return reply.status(503).send({ error: error.code });
+      }
+      throw error;
+    }
     if (!now) {
       return reply.status(404).send({ error: "queued_track_not_found" });
     }

@@ -118,6 +118,25 @@ export class MusicCatalog {
       }
       this.playbackCooldownUntil.set(variantKey, Date.now() + 15 * 60_000);
     }
+    if (normalized.source === "qq") {
+      const fallback = this.adapters.get("ncm");
+      const query = [normalized.title, ...normalized.artists].join(" ");
+      const discovered = await fallback?.search(query).catch(() => []);
+      if (fallback && discovered) {
+        this.registerMany(discovered, "ncm");
+        for (const variant of this.orderedVariants(normalized)) {
+          if (variant.source !== "ncm") continue;
+          const variantKey = getTrackKey(variant);
+          if ((this.playbackCooldownUntil.get(variantKey) ?? 0) > Date.now()) continue;
+          const url = await fallback.resolvePlayback(variant).catch(() => undefined);
+          if (url) {
+            this.playbackCooldownUntil.delete(variantKey);
+            return { track: { ...variant, songUrl: url }, url };
+          }
+          this.playbackCooldownUntil.set(variantKey, Date.now() + 15 * 60_000);
+        }
+      }
+    }
     return undefined;
   }
 

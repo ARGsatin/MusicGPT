@@ -12,6 +12,7 @@ import type {
 
 import type { MusicSourceAdapter, MusicSourceSyncResult } from "./musicCatalog.js";
 import { normalizeTrackIdentity } from "./musicCatalog.js";
+import { resolveQqPlayback } from "./qqPlayback.js";
 
 export interface QqQrSecret {
   imageDataUrl: string;
@@ -40,6 +41,9 @@ export interface QqPlaylistPage {
 
 export interface QqTrackRecord {
   sourceId: string;
+  playbackId?: string;
+  lyricsId?: string;
+  requiresSubscription?: boolean;
   title: string;
   artists: string[];
   album?: string;
@@ -53,8 +57,12 @@ export interface QqMusicClient {
   listPlaylists(input: { accountId: string; cookie: string; offset: number; limit: number }): Promise<QqPlaylistPage>;
   getPlaylistTracks(playlistId: string, cookie: string): Promise<QqTrackRecord[]>;
   search(query: string, cookie?: string): Promise<QqTrackRecord[]>;
-  resolvePlayback(sourceId: string, cookie?: string): Promise<string | undefined>;
-  getLyrics(sourceId: string, cookie?: string): Promise<Omit<TrackLyrics, "trackId">>;
+  resolvePlayback(
+    sourceId: string,
+    cookie?: string,
+    metadata?: Pick<Track, "playbackId" | "requiresSubscription">
+  ): Promise<string | undefined>;
+  getLyrics(sourceId: string, cookie?: string, lyricsId?: string): Promise<Omit<TrackLyrics, "trackId">>;
 }
 
 interface QqSessionFile {
@@ -210,13 +218,23 @@ export class QqMusicAdapter implements MusicSourceAdapter {
   }
 
   async resolvePlayback(track: Track): Promise<string | undefined> {
-    return this.client.resolvePlayback(track.sourceId ?? String(track.id), this.readSession()?.cookie);
+    return this.client.resolvePlayback(
+      track.sourceId ?? String(track.id),
+      this.readSession()?.cookie,
+      {
+        ...(track.playbackId ? { playbackId: track.playbackId } : {}),
+        ...(track.requiresSubscription !== undefined
+          ? { requiresSubscription: track.requiresSubscription }
+          : {})
+      }
+    );
   }
 
   async getLyrics(track: Track): Promise<TrackLyrics> {
     const result = await this.client.getLyrics(
       track.sourceId ?? String(track.id),
-      this.readSession()?.cookie
+      this.readSession()?.cookie,
+      track.lyricsId
     );
     return { trackId: track.trackKey ?? `qq:${track.sourceId ?? track.id}`, ...result };
   }
@@ -247,6 +265,11 @@ function normalizeQqTrack(record: QqTrackRecord): Track {
       id: record.sourceId,
       source: "qq",
       sourceId: record.sourceId,
+      ...(record.playbackId ? { playbackId: record.playbackId } : {}),
+      ...(record.lyricsId ? { lyricsId: record.lyricsId } : {}),
+      ...(record.requiresSubscription !== undefined
+        ? { requiresSubscription: record.requiresSubscription }
+        : {}),
       title: record.title,
       artists: record.artists,
       ...(record.album ? { album: record.album } : {}),
@@ -374,20 +397,18 @@ function createDefaultQqMusicClient(configDir: string): QqMusicClient {
       return findArray(requireQqResponse(response, "qq_search_failed"), ["list", "songlist", "songs"])
         .flatMap(normalizeUnknownQqTrack);
     },
-    resolvePlayback: async (sourceId, cookie) => {
-      const response = await callQqSdkSafely(async () =>
-        (await sdk()).getPlayUrl({
-          songmid: sourceId,
-          ...(cookie ? { cookie } : {})
-        })
-      );
-      const body = requireQqResponse(response, "qq_playback_unavailable");
-      return findStringDeep(body, [sourceId, "url"]);
+    resolvePlayback: async (sourceId, cookie, metadata) => {
+      return resolveQqPlayback({
+        sourceId,
+        ...(metadata?.playbackId ? { mediaId: metadata.playbackId } : {}),
+        ...(cookie ? { cookie } : {})
+      });
     },
-    getLyrics: async (sourceId, cookie) => {
+    getLyrics: async (sourceId, cookie, lyricsId) => {
       const response = await callQqSdkSafely(async () =>
         (await sdk()).lyric({
           songmid: sourceId,
+          ...(lyricsId ? { songid: lyricsId } : {}),
           isFormat: false,
           ...(cookie ? { cookie } : {})
         })
@@ -490,8 +511,18 @@ function normalizeUnknownQqTrack(value: unknown): QqTrackRecord[] {
     typeof item === "string" ? [item] : isObject(item) ? [pickOptionalString(item, ["name", "title"]) ?? ""] : []
   ).filter(Boolean);
   const seconds = pickOptionalNumber(value, ["interval", "duration"]);
+  const file = isObject(value.file) ? value.file : {};
+  const pay = isObject(value.pay) ? value.pay : {};
+  const playbackId = pickOptionalString(file, ["media_mid", "mediaMid", "strMediaMid"])
+    ?? pickOptionalString(value, ["media_mid", "mediaMid", "strMediaMid"]);
+  const lyricsId = pickOptionalString(value, ["songid", "song_id"]);
+  const payPlay = pickOptionalNumber(pay, ["payplay", "pay_play"])
+    ?? pickOptionalNumber(value, ["payplay", "pay_play"]);
   return [{
     sourceId,
+    ...(playbackId ? { playbackId } : {}),
+    ...(lyricsId ? { lyricsId } : {}),
+    ...(payPlay !== undefined ? { requiresSubscription: payPlay > 0 } : {}),
     title,
     artists: artists.length > 0 ? artists : ["未知艺术家"],
     ...(pickOptionalString(value, ["albumname", "album_name"]) ? { album: pickString(value, ["albumname", "album_name"]) } : {}),
@@ -522,22 +553,6 @@ function findNamedArray(value: unknown, keys: string[]): unknown[] | undefined {
   for (const key of keys) if (Array.isArray(value[key])) return value[key] as unknown[];
   for (const nested of Object.values(value)) {
     const found = findNamedArray(nested, keys);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function findStringDeep(value: unknown, pathKeys: string[]): string | undefined {
-  if (typeof value === "string" && /^https?:/i.test(value)) return value;
-  if (!isObject(value)) return undefined;
-  for (const key of pathKeys) {
-    const candidate = value[key];
-    if (typeof candidate === "string" && /^https?:/i.test(candidate)) return candidate;
-    const nested = findStringDeep(candidate, pathKeys);
-    if (nested) return nested;
-  }
-  for (const nested of Object.values(value)) {
-    const found = findStringDeep(nested, pathKeys);
     if (found) return found;
   }
   return undefined;

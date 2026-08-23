@@ -80,6 +80,83 @@ describe("v2 public APIs", () => {
     expect(legacyFavorite.statusCode).toBe(200);
     expect(repo.isTrackFavorite("ncm:1")).toBe(true);
   });
+
+  it("keeps the current song and reports an unavailable queued QQ track instead of silently switching", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-v2-qq-unavailable-"));
+    const repo = new StateRepository(path.join(dir, "state.db"));
+    const current = {
+      id: 1,
+      trackKey: "ncm:1",
+      source: "ncm" as const,
+      sourceId: "1",
+      title: "Current Song",
+      artists: ["Current Artist"],
+      songUrl: "https://ncm.example/1.mp3"
+    };
+    const unavailableQq = {
+      id: "qq-paid-mid",
+      trackKey: "qq:qq-paid-mid",
+      source: "qq" as const,
+      sourceId: "qq-paid-mid",
+      title: "Paid QQ Song",
+      artists: ["QQ Artist"],
+      durationMs: 200_000,
+      requiresSubscription: true
+    };
+    const ncmQueue = Array.from({ length: 9 }, (_, index) => ({
+      track: {
+        id: 10 + index,
+        title: `Next ${10 + index}`,
+        artists: ["Next Artist"],
+        songUrl: `https://ncm.example/${10 + index}.mp3`
+      },
+      score: 0.8,
+      reason: "Queued next",
+      source: "library" as const,
+      bucket: "familiar" as const
+    }));
+    repo.saveNowPlaying({
+      track: current,
+      queue: [{
+        track: unavailableQq,
+        score: 0.9,
+        reason: "QQ recommendation",
+        source: "library",
+        bucket: "familiar"
+      }, ...ncmQueue],
+      paused: false
+    });
+    repo.ensureTrack(unavailableQq);
+    repo.saveRecommendationDataVersion(2);
+    const qqMusic = new QqMusicAdapter(dir, {
+      createQr: async () => ({ imageDataUrl: "data:image/png;base64,qr", token: "token", signature: "signature" }),
+      checkQr: async () => ({ status: "pending" }),
+      listPlaylists: async () => ({ total: 0, items: [] }),
+      getPlaylistTracks: async () => [],
+      search: async () => [],
+      resolvePlayback: async () => undefined,
+      getLyrics: async () => ({ pureMusic: true, lines: [] })
+    });
+    const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", async (input) => {
+      const url = input.toString();
+      if (url.includes("/cloudsearch")) return json({ result: { songs: [] } });
+      if (url.includes("/lyric")) return json({ nolyric: true });
+      return json({ code: 200, account: { id: 1 }, profile: { userId: 1 } });
+    });
+    const app = await createServer({ repo, ncm, qqMusic, importRetryIntervalMs: 60_000 });
+    servers.push(app);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/queue/qq%3Aqq-paid-mid/play"
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ error: "qq_subscription_required" });
+    const now = await app.inject({ method: "GET", url: "/api/now" });
+    expect(now.json()).toMatchObject({ track: { trackKey: "ncm:1" } });
+    expect(now.body).not.toContain("qq:qq-paid-mid");
+  });
 });
 
 function json(value: unknown, status = 200): Response {

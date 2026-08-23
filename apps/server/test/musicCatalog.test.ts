@@ -100,4 +100,29 @@ describe("MusicCatalog", () => {
     expect(qq.playbackCalls).toBe(1);
     expect(ncm.playbackCalls).toBe(2);
   });
+
+  it("discovers an NCM fallback when a queued QQ-only recording is unavailable", async () => {
+    const qq = new FakeSource("qq", []);
+    const ncm = new FakeSource(
+      "ncm",
+      [{ id: 99, title: "Queue Song", artists: ["Queue Artist"], durationMs: 200_000 }],
+      new Map([["99", "https://example.test/ncm-99.mp3"]])
+    );
+    const catalog = new MusicCatalog([qq, ncm]);
+    const [queuedQq] = catalog.registerTracks([{
+      id: "qq-only-mid",
+      source: "qq",
+      sourceId: "qq-only-mid",
+      title: "Queue Song",
+      artists: ["Queue Artist"],
+      durationMs: 202_000
+    }]);
+
+    const resolved = await catalog.resolvePlayback(queuedQq!);
+
+    expect(resolved).toMatchObject({
+      url: "https://example.test/ncm-99.mp3",
+      track: { trackKey: "ncm:99", source: "ncm" }
+    });
+  });
 });

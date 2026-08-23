@@ -23,9 +23,12 @@ describe("QQ Music adapter", () => {
               dissname: "我喜欢",
               songlist: [{
                 songmid: "003abc",
+                songid: 12345,
                 songname: "QQ Song",
                 singer: [{ name: "QQ Artist" }],
-                interval: 201
+                interval: 201,
+                file: { media_mid: "001media" },
+                pay: { payplay: 1 }
               }]
             }]
           }
@@ -35,10 +38,54 @@ describe("QQ Music adapter", () => {
 
     expect(tracks).toEqual([{
       sourceId: "003abc",
+      playbackId: "001media",
+      lyricsId: "12345",
+      requiresSubscription: true,
       title: "QQ Song",
       artists: ["QQ Artist"],
       durationMs: 201_000
     }]);
+  });
+
+  it("uses the preserved QQ media and lyrics identifiers at provider boundaries", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-qq-identifiers-"));
+    const playbackCalls: unknown[][] = [];
+    const lyricCalls: unknown[][] = [];
+    const client: QqMusicClient = {
+      createQr: async () => ({ imageDataUrl: "data:image/png;base64,abc", token: "token", signature: "sig" }),
+      checkQr: async () => ({ status: "pending" }),
+      listPlaylists: async () => ({ total: 0, items: [] }),
+      getPlaylistTracks: async () => [],
+      search: async () => [],
+      resolvePlayback: async (...args) => {
+        playbackCalls.push(args);
+        return "https://stream.qq.example/song.mp3";
+      },
+      getLyrics: async (...args) => {
+        lyricCalls.push(args);
+        return { pureMusic: true, lines: [] };
+      }
+    };
+    const adapter = new QqMusicAdapter(dir, client);
+    const track = {
+      id: "003abc",
+      source: "qq" as const,
+      sourceId: "003abc",
+      playbackId: "001media",
+      lyricsId: "12345",
+      requiresSubscription: true,
+      title: "QQ Song",
+      artists: ["QQ Artist"]
+    };
+
+    await adapter.resolvePlayback(track);
+    await adapter.getLyrics(track);
+
+    expect(playbackCalls).toEqual([["003abc", undefined, {
+      playbackId: "001media",
+      requiresSubscription: true
+    }]]);
+    expect(lyricCalls).toEqual([["003abc", undefined, "12345"]]);
   });
 
   it("keeps QR secrets server-side, persists the cookie locally and paginates account playlists", async () => {
