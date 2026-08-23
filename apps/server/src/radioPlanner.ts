@@ -104,7 +104,7 @@ export class RadioPlanner {
           recentlyPlayed: recentPlayIds.has(getTrackKey(candidate.track))
         })
       )
-      .filter((item) => item.source === "ncm_daily" || item.score >= 0.3);
+      .filter((item) => item.source === "ncm_daily" || item.score >= 0.35);
 
     familiar.sort((left, right) => right.score - left.score);
     explore.sort((left, right) => right.score - left.score);

@@ -221,6 +221,6 @@ describe("RadioPlanner", () => {
 
     expect(plan.filter((item) => item.source === "context_search").length).toBeLessThanOrEqual(2);
     expect(plan.filter((item) => item.source === "ncm_daily")).toHaveLength(3);
-    expect(plan).toHaveLength(7);
+    expect(plan).toHaveLength(5);
   });
 });
