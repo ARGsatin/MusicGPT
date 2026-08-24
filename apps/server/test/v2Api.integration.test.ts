@@ -66,7 +66,9 @@ describe("v2 public APIs", () => {
     const taste = await app.inject({ method: "GET", url: "/api/taste" });
     expect(taste.json()).toEqual(expect.objectContaining({ manualRules: expect.any(Object), document: expect.objectContaining({ valid: true }) }));
     const plan = await app.inject({ method: "GET", url: "/api/daily-plan" });
-    expect((plan.json() as { segments: unknown[] }).segments).toHaveLength(4);
+    const segments = (plan.json() as { segments: Array<{ period: string; items: unknown[] }> }).segments;
+    expect(segments.map((segment) => segment.period)).toEqual(["morning", "afternoon", "evening"]);
+    expect(segments.every((segment) => segment.items.length <= 10)).toBe(true);
 
     const audio = await app.inject({ method: "GET", url: "/api/tracks/qq%3Aqq-mid-1/audio" });
     expect(audio.statusCode).toBe(302);

@@ -22,9 +22,9 @@ import {
 } from "../api";
 
 const PERIOD_LABELS: Record<DayPeriod, string> = {
-  morning: "早晨",
-  afternoon: "午后",
-  evening: "傍晚",
+  morning: "晨间探索",
+  afternoon: "午后柔和",
+  evening: "晚间回忆",
   late_night: "深夜"
 };
 
@@ -186,32 +186,64 @@ export function DailyPlanPanel() {
 
       {error ? <p className="plan-error">{error}</p> : null}
       {notice ? <p className="plan-success" role="status">{notice}</p> : null}
-      <section className="plan-segments" aria-label="今日音乐计划">
-        {plan?.segments.map((segment) => (
-          <article className="plan-segment" key={segment.period}>
-            <header>
-              <div>
-                <span>{PERIOD_LABELS[segment.period]}</span>
-                <strong>{new Date(segment.start).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</strong>
-              </div>
-              <small>{segment.targetDurationMs === 0 ? "静音时段" : `${Math.round(segment.targetDurationMs / 3_600_000)} 小时 · ${segment.items.length} 首`}</small>
-            </header>
-            {segment.routine.length > 0 ? (
-              <p className="segment-context">{segment.routine.map((block) => block.activity).join(" / ")} · {weatherName(segment.weather)}</p>
-            ) : <p className="segment-context">{weatherName(segment.weather)}</p>}
-            <ol>
-              {segment.items.slice(0, 8).map((item) => (
-                <li key={item.track.trackKey ?? item.track.id}>
-                  <span className={`source-dot source-${item.track.source ?? "ncm"}`}>{item.track.source === "qq" ? "Q" : "N"}</span>
-                  <span><strong>{item.track.title}</strong><small>{item.track.artists.join(" / ")} · {item.reason}</small></span>
-                </li>
-              ))}
-            </ol>
-          </article>
-        )) ?? <p className="plan-empty">全天计划正在生成。</p>}
-      </section>
+      {plan ? <DailyPlanSegments plan={plan} /> : (
+        <section className="plan-segments" aria-label="今日音乐计划">
+          <p className="plan-empty">全天计划正在生成。</p>
+        </section>
+      )}
     </div>
   );
+}
+
+export function DailyPlanSegments({ plan }: { plan: DailyPlan }) {
+  return (
+    <section className="plan-segments" aria-label="今日音乐计划">
+      {plan.segments.map((segment) => (
+        <article className="plan-segment" key={segment.period}>
+          <header>
+            <div>
+              <span>{PERIOD_LABELS[segment.period]}</span>
+              <strong>{periodRange(segment.start, segment.end, plan.timezone)}</strong>
+            </div>
+            <small>{segment.items.length === 0
+              ? "暂无可播放歌曲"
+              : `约 ${Math.round(segment.targetDurationMs / 60_000)} 分钟 · ${segment.items.length} 首`}</small>
+          </header>
+          {segment.routine.length > 0 ? (
+            <p className="segment-context">{segment.routine.map((block) => block.activity).join(" / ")} · {weatherName(segment.weather)}</p>
+          ) : <p className="segment-context">{weatherName(segment.weather)}</p>}
+          <ol>
+            {segment.items.map((item) => (
+              <li key={item.track.trackKey ?? item.track.id}>
+                <span className={`source-dot source-${item.track.source ?? "ncm"}`}>{item.track.source === "qq" ? "Q" : "N"}</span>
+                <span><strong>{item.track.title}</strong><small>{item.track.artists.join(" / ")} · {item.reason}</small></span>
+              </li>
+            ))}
+          </ol>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function periodRange(start: string, end: string, timezone: string): string {
+  const startTime = planTime(start, timezone);
+  const rawEndTime = planTime(end, timezone);
+  const endTime = rawEndTime === "00:00" && Date.parse(end) > Date.parse(start)
+    ? "24:00"
+    : rawEndTime;
+  return `${startTime}–${endTime}`;
+}
+
+function planTime(value: string, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: timezone,
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date(value));
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.hour}:${values.minute}`;
 }
 
 function weatherName(weather: string): string {

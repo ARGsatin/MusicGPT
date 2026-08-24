@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { DailyPlanEngine, rollingWindow } from "../src/dailyPlan.js";
+import { DailyPlanEngine, playbackSegment, rollingWindow } from "../src/dailyPlan.js";
 import { LocalRoutineProvider } from "../src/routineProvider.js";
 
 describe("daily music plan", () => {
@@ -56,7 +56,7 @@ describe("daily music plan", () => {
       .some((item) => item.track.source === "qq")).toBe(true);
   });
 
-  it("builds a deterministic four-period eight-hour plan without recording repeats", () => {
+  it("builds a deterministic three-period ten-track plan without recording repeats", () => {
     const tracks = Array.from({ length: 160 }, (_, index) => ({
       track: {
         id: index + 1,
@@ -97,12 +97,378 @@ describe("daily music plan", () => {
     expect(first.segments.map((segment) => segment.period)).toEqual([
       "morning",
       "afternoon",
-      "evening",
-      "late_night"
+      "evening"
     ]);
-    expect(first.segments.reduce((total, segment) => total + segment.targetDurationMs, 0)).toBe(8 * 60 * 60 * 1000);
+    expect(first.segments.map((segment) => [segment.start, segment.end])).toEqual([
+      ["2026-08-15T06:00:00+08:00", "2026-08-15T12:00:00+08:00"],
+      ["2026-08-15T12:00:00+08:00", "2026-08-15T18:00:00+08:00"],
+      ["2026-08-15T18:00:00+08:00", "2026-08-16T00:00:00+08:00"]
+    ]);
+    expect(first.segments.map((segment) => segment.items.length)).toEqual([10, 10, 10]);
+    expect(first.segments.map((segment) => segment.targetDurationMs)).toEqual([
+      40 * 60 * 1000,
+      40 * 60 * 1000,
+      40 * 60 * 1000
+    ]);
     expect(new Set(keys).size).toBe(keys.length);
     expect(second.segments.flatMap((segment) => segment.items.map((item) => item.track.trackKey))).toEqual(keys);
+  });
+
+  it("gives morning discovery, afternoon softness and evening long-term favorites", () => {
+    const makeStat = (
+      id: number,
+      title: string,
+      playCount: number,
+      tags: Array<{ category: "style" | "scene"; value: string }> = [],
+      moodTag: "calm" | "energy" | "unknown" = "unknown"
+    ) => ({
+      track: {
+        id,
+        trackKey: `ncm:${id}`,
+        recordingKey: `rec:${id}`,
+        source: "ncm" as const,
+        sourceId: String(id),
+        title,
+        artists: [`Artist ${id}`],
+        durationMs: 240_000,
+        moodTag,
+        tags
+      },
+      playCount
+    });
+    const stats = [
+      ...Array.from({ length: 4 }, (_, index) => makeStat(index + 1, `Discover ${index + 1}`, 0)),
+      ...Array.from({ length: 2 }, (_, index) => makeStat(
+        index + 11,
+        `Classical ${index + 1}`,
+        3,
+        [{ category: "style", value: "古典/器乐" }],
+        "calm"
+      )),
+      ...Array.from({ length: 5 }, (_, index) => makeStat(index + 21, `Soft ${index + 1}`, 3, [], "calm")),
+      ...Array.from({ length: 8 }, (_, index) => makeStat(index + 31, `Memory ${index + 1}`, 100 - index)),
+      ...Array.from({ length: 24 }, (_, index) => makeStat(index + 51, `Filler ${index + 1}`, 2, [], "energy"))
+    ];
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: "2026-08-15T00:00:00.000Z", summary: "themes", topArtists: [], topTracks: [],
+        favoritePeriods: [],
+        moodWeights: { calm: 0.5, focus: 0, warm: 0, night: 0, energy: 0.5, nostalgia: 0, unknown: 0 },
+        preferenceTags: [], pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: {}, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" }
+    });
+    const [morning, afternoon, evening] = plan.segments;
+    const isSoft = (title: string) => title.startsWith("Classical") || title.startsWith("Soft");
+
+    expect(morning?.items.filter((item) => item.bucket === "explore")).toHaveLength(4);
+    expect(afternoon?.items.filter((item) => isSoft(item.track.title)).length).toBeGreaterThanOrEqual(7);
+    expect(afternoon?.items.filter((item) => item.track.title.startsWith("Classical"))).toHaveLength(2);
+    expect(evening?.items.filter((item) => item.track.title.startsWith("Memory")).length).toBeGreaterThanOrEqual(8);
+    expect(morning?.items.some((item) => item.reason.includes("晨间探索"))).toBe(true);
+    expect(afternoon?.items.some((item) => item.reason.includes("午后柔和"))).toBe(true);
+    expect(evening?.items.some((item) => item.reason.includes("晚间回忆"))).toBe(true);
+  });
+
+  it("keeps morning exploration near forty percent and spreads it through the segment", () => {
+    const stats = [
+      ...Array.from({ length: 20 }, (_, index) => ({
+        track: {
+          id: index + 1,
+          title: `Explore ${index + 1}`,
+          artists: [`Explore Artist ${index + 1}`],
+          durationMs: 240_000
+        },
+        playCount: 0
+      })),
+      ...Array.from({ length: 40 }, (_, index) => ({
+        track: {
+          id: index + 101,
+          title: `Familiar ${index + 1}`,
+          artists: [`Familiar Artist ${index + 1}`],
+          durationMs: 240_000
+        },
+        playCount: 1
+      }))
+    ];
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: "2026-08-15T00:00:00.000Z", summary: "balanced discovery", topArtists: [], topTracks: [],
+        favoritePeriods: [],
+        moodWeights: { calm: 0, focus: 0, warm: 0, night: 0, energy: 0, nostalgia: 0, unknown: 1 },
+        preferenceTags: [], pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: {}, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" }
+    });
+    const morning = plan.segments[0]!.items;
+    const explorePositions = morning
+      .map((item, index) => item.bucket === "explore" ? index : -1)
+      .filter((index) => index >= 0);
+
+    expect(explorePositions).toEqual([0, 3, 6, 9]);
+  });
+
+  it("applies feedback cooldown to every source variant of the same recording", () => {
+    const sharedRecording = "rec:shared";
+    const stats = [
+      {
+        track: {
+          id: 1,
+          trackKey: "ncm:1",
+          recordingKey: sharedRecording,
+          source: "ncm" as const,
+          sourceId: "1",
+          title: "Shared recording",
+          artists: ["Shared Artist"],
+          durationMs: 240_000
+        },
+        playCount: 100
+      },
+      {
+        track: {
+          id: "qq-shared",
+          trackKey: "qq:qq-shared",
+          recordingKey: sharedRecording,
+          source: "qq" as const,
+          sourceId: "qq-shared",
+          title: "Shared recording",
+          artists: ["Shared Artist"],
+          durationMs: 240_000
+        },
+        playCount: 0
+      },
+      {
+        track: {
+          id: 2,
+          trackKey: "ncm:2",
+          recordingKey: "rec:known",
+          source: "ncm" as const,
+          sourceId: "2",
+          title: "Known recording",
+          artists: ["Known Artist"],
+          durationMs: 240_000
+        },
+        playCount: 80
+      },
+      {
+        track: {
+          id: "qq-known",
+          trackKey: "qq:qq-known",
+          recordingKey: "rec:known",
+          source: "qq" as const,
+          sourceId: "qq-known",
+          title: "Known recording",
+          artists: ["Known Artist"],
+          durationMs: 240_000
+        },
+        playCount: 0
+      },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        track: {
+          id: index + 10,
+          trackKey: `ncm:${index + 10}`,
+          recordingKey: `rec:${index + 10}`,
+          source: "ncm" as const,
+          sourceId: String(index + 10),
+          title: `Safe ${index + 1}`,
+          artists: [`Safe Artist ${index + 1}`],
+          durationMs: 240_000
+        },
+        playCount: index % 4
+      }))
+    ];
+    const now = Date.now();
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: new Date(now).toISOString(), summary: "cooldown", topArtists: [], topTracks: [],
+        favoritePeriods: [],
+        moodWeights: { calm: 0, focus: 0, warm: 0, night: 0, energy: 0, nostalgia: 0, unknown: 1 },
+        preferenceTags: [], pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: {}, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" },
+      feedback: [
+        { type: "skip", trackId: "qq-shared", at: new Date(now - 1_000).toISOString() },
+        { type: "skip", trackId: "qq-shared", at: new Date(now - 2_000).toISOString() }
+      ]
+    });
+
+    const items = plan.segments.flatMap((segment) => segment.items);
+    expect(items.some((item) => item.track.recordingKey === sharedRecording)).toBe(false);
+    expect(items.find((item) => item.track.recordingKey === "rec:known")?.bucket).toBe("familiar");
+  });
+
+  it("does not square manual tag weights when inferred and evidence tags overlap", () => {
+    const stats = [
+      {
+        track: {
+          id: 1,
+          title: "Single calm tag",
+          artists: ["Artist One"],
+          moodTag: "calm" as const,
+          durationMs: 240_000
+        },
+        playCount: 1
+      },
+      {
+        track: {
+          id: 2,
+          title: "Duplicate calm tag",
+          artists: ["Artist Two"],
+          moodTag: "calm" as const,
+          tagEvidence: [{ category: "mood" as const, value: "calm", confidence: 0.95, source: "ai" as const }],
+          durationMs: 240_000
+        },
+        playCount: 1
+      },
+      ...Array.from({ length: 40 }, (_, index) => ({
+        track: {
+          id: index + 10,
+          title: `Weight filler ${index + 1}`,
+          artists: [`Weight Artist ${index + 1}`],
+          durationMs: 240_000
+        },
+        playCount: 1
+      }))
+    ];
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: "2026-08-15T00:00:00.000Z", summary: "deduped tags", topArtists: [], topTracks: [],
+        favoritePeriods: [],
+        moodWeights: { calm: 1, focus: 0, warm: 0, night: 0, energy: 0, nostalgia: 0, unknown: 0 },
+        preferenceTags: [], pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: { "mood:calm": 2 }, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" }
+    });
+    const items = plan.segments.flatMap((segment) => segment.items);
+    const single = items.find((item) => item.track.id === 1);
+    const duplicate = items.find((item) => item.track.id === 2);
+
+    expect(single?.score).toBeTypeOf("number");
+    expect(duplicate?.score).toBe(single?.score);
+  });
+
+  it("uses the themed source variant when a reserved recording has mixed metadata", () => {
+    const themedVariants = [1, 2].flatMap((id) => [
+      {
+        track: {
+          id: `qq-mixed-${id}`,
+          trackKey: `qq:qq-mixed-${id}`,
+          recordingKey: `rec:mixed-${id}`,
+          source: "qq" as const,
+          sourceId: `qq-mixed-${id}`,
+          title: `Mixed ${id}`,
+          artists: [`Mixed Artist ${id}`],
+          moodTag: "energy" as const,
+          durationMs: 240_000
+        },
+        playCount: 3
+      },
+      {
+        track: {
+          id: id + 500,
+          trackKey: `ncm:${id + 500}`,
+          recordingKey: `rec:mixed-${id}`,
+          source: "ncm" as const,
+          sourceId: String(id + 500),
+          title: `Mixed ${id}`,
+          artists: [`Mixed Artist ${id}`],
+          moodTag: "calm" as const,
+          tags: [{ category: "style" as const, value: "古典/器乐" }],
+          durationMs: 240_000
+        },
+        playCount: 3
+      }
+    ]);
+    const stats = [
+      ...themedVariants,
+      ...Array.from({ length: 50 }, (_, index) => ({
+        track: {
+          id: index + 1_000,
+          title: `Mixed filler ${index + 1}`,
+          artists: [`Mixed Filler Artist ${index + 1}`],
+          moodTag: "energy" as const,
+          durationMs: 240_000
+        },
+        playCount: 3
+      }))
+    ];
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: "2026-08-15T00:00:00.000Z", summary: "mixed source tags", topArtists: [], topTracks: [],
+        favoritePeriods: [],
+        moodWeights: { calm: 0, focus: 0, warm: 0, night: 0, energy: 1, nostalgia: 0, unknown: 0 },
+        preferenceTags: [], pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: { "mood:energy": 10 }, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" }
+    });
+    const mixed = plan.segments[1]!.items.filter((item) => item.track.recordingKey?.startsWith("rec:mixed"));
+
+    expect(mixed).toHaveLength(2);
+    expect(mixed.every((item) => item.track.source === "ncm" && item.reason.includes("古典/器乐"))).toBe(true);
+  });
+
+  it("does not label low-history profile top tracks as long-term memories", () => {
+    const stats = Array.from({ length: 36 }, (_, index) => ({
+      track: {
+        id: index + 1,
+        trackKey: `ncm:${index + 1}`,
+        recordingKey: `rec:${index + 1}`,
+        source: "ncm" as const,
+        sourceId: String(index + 1),
+        title: `Low History ${index + 1}`,
+        artists: [`Low Artist ${index + 1}`],
+        durationMs: 240_000
+      },
+      playCount: index === 0 ? 0 : 1,
+      ...(index === 0 ? { lastPlayedAt: "2026-08-14T12:00:00.000Z" } : {})
+    }));
+    const plan = new DailyPlanEngine().generate({
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      stats,
+      profile: {
+        generatedAt: "2026-08-15T00:00:00.000Z",
+        summary: "low history",
+        topArtists: [{ name: "Low Artist 1", weight: 1 }],
+        topTracks: stats.slice(0, 12).map((stat) => ({ id: stat.track.trackKey, title: stat.track.title, playCount: 1 })),
+        favoritePeriods: [],
+        moodWeights: { calm: 0, focus: 0, warm: 0, night: 0, energy: 0, nostalgia: 0, unknown: 1 },
+        preferenceTags: [],
+        pacingPreference: "balanced"
+      },
+      rules: { artistWeights: {}, tagWeights: {}, blockedArtists: [], blockedTags: [] },
+      routine: [],
+      weather: { weather: "unknown" }
+    });
+
+    expect(plan.segments[2]?.items.filter((item) => item.reason.includes("晚间回忆"))).toHaveLength(0);
+    expect(plan.segments.flatMap((segment) => segment.items)
+      .find((item) => item.track.trackKey === "ncm:1")?.bucket).toBe("familiar");
   });
 
   it("honors routine overrides and keeps the last valid file after invalid edits", () => {
@@ -129,16 +495,29 @@ describe("daily music plan", () => {
 
   it("applies manual blocks, feedback cooldown and per-period weather before ranking", () => {
     const now = Date.now();
-    const stats = Array.from({ length: 60 }, (_, index) => ({
-      track: {
-        id: index + 1,
-        title: `Song ${index + 1}`,
-        artists: [`Artist ${index % 10}`],
-        durationMs: 240_000,
-        moodTag: index % 2 === 0 ? "energy" as const : "calm" as const
+    const stats = [
+      {
+        track: {
+          id: 999,
+          title: "Moonlit No. 3",
+          artists: ["Composer X"],
+          durationMs: 240_000,
+          moodTag: "calm" as const,
+          tagEvidence: [{ category: "style" as const, value: "古典/器乐", confidence: 0.95, source: "ai" as const }]
+        },
+        playCount: 20
       },
-      playCount: 1
-    }));
+      ...Array.from({ length: 60 }, (_, index) => ({
+        track: {
+          id: index + 1,
+          title: `Song ${index + 1}`,
+          artists: [`Artist ${index % 10}`],
+          durationMs: 240_000,
+          moodTag: index % 2 === 0 ? "energy" as const : "calm" as const
+        },
+        playCount: 1
+      }))
+    ];
     const plan = new DailyPlanEngine().generate({
       date: "2026-08-15",
       timezone: "Asia/Shanghai",
@@ -149,10 +528,15 @@ describe("daily music plan", () => {
         moodWeights: { calm: .5, focus: 0, warm: 0, night: 0, energy: .5, nostalgia: 0, unknown: 0 },
         preferenceTags: [], pacingPreference: "balanced"
       },
-      rules: { artistWeights: { "Artist 2": 2 }, tagWeights: {}, blockedArtists: ["Artist 1"], blockedTags: [] },
+      rules: {
+        artistWeights: { "Artist 2": 2 },
+        tagWeights: {},
+        blockedArtists: ["Artist 1"],
+        blockedTags: ["style:古典/器乐"]
+      },
       routine: [],
       weather: { weather: "unknown" },
-      weatherByPeriod: { morning: { weather: "clear", temperature: 30 }, late_night: { weather: "rain", temperature: 23 } },
+      weatherByPeriod: { morning: { weather: "clear", temperature: 30 }, evening: { weather: "rain", temperature: 23 } },
       feedback: [
         { type: "skip", trackId: "ncm:3", at: new Date(now - 1_000).toISOString() },
         { type: "skip", trackId: "ncm:3", at: new Date(now - 2_000).toISOString() }
@@ -160,10 +544,11 @@ describe("daily music plan", () => {
     });
     const items = plan.segments.flatMap((segment) => segment.items);
     expect(items.some((item) => item.track.artists.includes("Artist 1"))).toBe(false);
+    expect(items.some((item) => item.track.id === 999)).toBe(false);
     expect(items.some((item) => item.track.id === 3)).toBe(false);
     expect(items[0]?.track.artists).toContain("Artist 2");
     expect(plan.segments[0]).toMatchObject({ weather: "clear", temperature: 30 });
-    expect(plan.segments[3]).toMatchObject({ weather: "rain", temperature: 23 });
+    expect(plan.segments[2]).toMatchObject({ weather: "rain", temperature: 23 });
     for (let index = 0; index < items.length; index += 1) {
       const artist = items[index]!.track.artists[0];
       const previous = items.slice(Math.max(0, index - 4), index);
@@ -212,6 +597,53 @@ describe("daily music plan", () => {
     expect(replanned.contextHash).not.toBe(first.contextHash);
     expect(replanned.consumedTrackKeys).toEqual(locked);
     expect(replannedKeys).toEqual(expect.arrayContaining(locked));
-    expect(replanned.segments[3]?.targetDurationMs).toBe(60 * 60 * 1000);
+    expect(replanned.segments[2]?.items).toHaveLength(10);
+    expect(replanned.segments[2]?.targetDurationMs).toBe(40 * 60 * 1000);
+    expect(replanned.segments[2]?.end).toBe("2026-08-16T00:00:00+08:00");
+
+    const silenced = engine.generate({
+      ...common,
+      routine: [
+        { start: "18:00", end: "22:00", activity: "安静时间", tags: [], energy: "low", musicAllowed: false },
+        { start: "21:00", end: "24:00", activity: "休息", tags: [], energy: "low", musicAllowed: false }
+      ],
+      weather: { weather: "clear" as const }
+    });
+    expect(silenced.segments[2]?.items).toHaveLength(0);
+    expect(silenced.segments[2]?.targetDurationMs).toBe(0);
+  });
+
+  it("selects the current or next themed period at public time boundaries", () => {
+    const plan = {
+      date: "2026-08-15",
+      timezone: "Asia/Shanghai",
+      revision: 1,
+      generatedAt: "2026-08-15T00:00:00.000Z",
+      contextHash: "boundaries",
+      consumedTrackKeys: [],
+      segments: [
+        { period: "morning" as const, start: "2026-08-15T06:00:00+08:00", end: "2026-08-15T12:00:00+08:00", targetDurationMs: 0, weather: "unknown" as const, routine: [], items: [] },
+        { period: "afternoon" as const, start: "2026-08-15T12:00:00+08:00", end: "2026-08-15T18:00:00+08:00", targetDurationMs: 0, weather: "unknown" as const, routine: [], items: [] },
+        { period: "evening" as const, start: "2026-08-15T18:00:00+08:00", end: "2026-08-16T00:00:00+08:00", targetDurationMs: 0, weather: "unknown" as const, routine: [], items: [] }
+      ]
+    };
+
+    expect([
+      "2026-08-15T00:00:00+08:00",
+      "2026-08-15T06:00:00+08:00",
+      "2026-08-15T11:59:59+08:00",
+      "2026-08-15T12:00:00+08:00",
+      "2026-08-15T17:59:59+08:00",
+      "2026-08-15T18:00:00+08:00",
+      "2026-08-15T23:59:59+08:00"
+    ].map((at) => playbackSegment(plan, new Date(at))?.period)).toEqual([
+      "morning",
+      "morning",
+      "morning",
+      "afternoon",
+      "afternoon",
+      "evening",
+      "evening"
+    ]);
   });
 });

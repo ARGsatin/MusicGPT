@@ -7,7 +7,7 @@ import type {
 } from "@musicgpt/shared";
 
 import type { AiDjIntent } from "./aiDjAssistant.js";
-import { normalizeTrackReference } from "./musicCatalog.js";
+import { getTrackKey, normalizeTrackReference } from "./musicCatalog.js";
 import { StateRepository } from "./stateRepository.js";
 
 const CONFIRMATION_TTL_MS = 120_000;
@@ -127,15 +127,15 @@ export class MusicCommandModule {
       };
     }
     if (/取消收藏|不喜欢|别收藏/u.test(text) && current) {
-      await runtime.setFavorite(current.id, false);
+      await runtime.setFavorite(getTrackKey(current), false);
       return { action: "unlike", outcome: "executed", summary: "已取消收藏这首歌。", now: runtime.getNow() };
     }
     if (/收藏|喜欢这首|标记喜欢/u.test(text) && current) {
-      await runtime.setFavorite(current.id, true);
+      await runtime.setFavorite(getTrackKey(current), true);
       return { action: "like", outcome: "executed", summary: "已收藏这首歌。", now: runtime.getNow() };
     }
     if (/重播|再放一遍|从头/u.test(text) && current) {
-      await runtime.replay(current.id);
+      await runtime.replay(getTrackKey(current));
       return { action: "replay", outcome: "executed", summary: "已从头重播。", now: runtime.getNow() };
     }
 

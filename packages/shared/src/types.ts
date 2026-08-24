@@ -442,6 +442,7 @@ export interface DailyPlanSegment {
   period: DayPeriod;
   start: string;
   end: string;
+  /** Estimated playback duration of the selected items, using the planner fallback for unknown lengths. */
   targetDurationMs: number;
   weather: WeatherKind;
   temperature?: number;

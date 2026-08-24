@@ -608,11 +608,12 @@ export class RadioOrchestrator {
       await this.ensureQueue(true);
       return this.nextTrack(false);
     }
-    return this.activateResolvedTrack(resolved);
+    return this.activateResolvedTrack(resolved, getTrackKey(next.track));
   }
 
   private async activateResolvedTrack(
-    resolved: { item: RadioPlanItem; lyrics: TrackLyrics }
+    resolved: { item: RadioPlanItem; lyrics: TrackLyrics },
+    plannedTrackKey?: string
   ): Promise<NowPlayingState> {
     this.state.track = resolved.item.track;
     this.state.lyrics = resolved.lyrics;
@@ -621,11 +622,17 @@ export class RadioOrchestrator {
     this.state.isFavorite = this.repo.isTrackFavorite(getTrackKey(resolved.item.track));
     const dailyPlan = this.repo.getDailyPlan();
     if (dailyPlan) {
-      const key = getTrackKey(resolved.item.track);
-      if (!dailyPlan.consumedTrackKeys.includes(key)) {
+      const consumedKeys = new Set([
+        getTrackKey(resolved.item.track),
+        ...(plannedTrackKey ? [plannedTrackKey] : [])
+      ]);
+      let changed = false;
+      for (const key of consumedKeys) {
+        if (dailyPlan.consumedTrackKeys.includes(key)) continue;
         dailyPlan.consumedTrackKeys.push(key);
-        this.repo.saveDailyPlan(dailyPlan);
+        changed = true;
       }
+      if (changed) this.repo.saveDailyPlan(dailyPlan);
     }
 
     await this.ensureQueue();
@@ -672,7 +679,7 @@ export class RadioOrchestrator {
       );
     }
     this.state.queue.splice(0, queueIndex + 1);
-    const now = await this.activateResolvedTrack(resolved);
+    const now = await this.activateResolvedTrack(resolved, getTrackKey(target.track));
     this.recordExplicitPlay(now.track ? getTrackKey(now.track) : undefined);
     return now;
   }
@@ -825,7 +832,7 @@ export class RadioOrchestrator {
     switch (intent.type) {
       case "skip":
         if (this.state.track) {
-          await this.handleFeedback({ type: "skip", trackId: this.state.track.id });
+          await this.handleFeedback({ type: "skip", trackId: getTrackKey(this.state.track) });
         }
         return this.reply("skip", "已切到下一首。", await this.nextTrack());
       case "pause":
