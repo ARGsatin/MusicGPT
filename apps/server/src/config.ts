@@ -46,6 +46,8 @@ const schema = z.object({
   NCM_COOKIE: optionalString(),
   NCM_BASE_URL: z.string().url().default("http://127.0.0.1:3001"),
   DB_PATH: z.string().default("./state/musicgpt.db"),
+  STATE_DIR: optionalString(),
+  ROUTINE_PATH: optionalString(),
   DJ_BROADCAST_INTERVAL: z.coerce.number().int().min(1).max(10).default(4),
   SERVER_PORT: z.coerce.number().int().min(1).max(65535).default(8787)
 });
@@ -91,6 +93,12 @@ const aiProvider = resolveAiProvider(parsed);
 const resolvedDbPath = path.isAbsolute(parsed.DB_PATH)
   ? parsed.DB_PATH
   : path.resolve(process.cwd(), parsed.DB_PATH);
+const resolvedStateDir = parsed.STATE_DIR
+  ? (path.isAbsolute(parsed.STATE_DIR) ? parsed.STATE_DIR : path.resolve(process.cwd(), parsed.STATE_DIR))
+  : path.dirname(resolvedDbPath);
+const resolvedRoutinePath = parsed.ROUTINE_PATH
+  ? (path.isAbsolute(parsed.ROUTINE_PATH) ? parsed.ROUTINE_PATH : path.resolve(process.cwd(), parsed.ROUTINE_PATH))
+  : path.join(resolvedStateDir, "routine.json");
 
 export const config = {
   aiProvider: aiProvider.provider,
@@ -106,6 +114,8 @@ export const config = {
   ncmCookie: parsed.NCM_COOKIE,
   ncmBaseUrl: parsed.NCM_BASE_URL,
   dbPath: resolvedDbPath,
+  stateDir: resolvedStateDir,
+  routinePath: resolvedRoutinePath,
   djBroadcastInterval: parsed.DJ_BROADCAST_INTERVAL,
   serverPort: parsed.SERVER_PORT
 };

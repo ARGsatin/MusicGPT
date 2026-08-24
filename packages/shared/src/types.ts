@@ -13,11 +13,29 @@ export type MusicTagCategory =
   | "style"
   | "scene"
   | "period"
-  | "weather";
+  | "weather"
+  | "routine";
+
+export type IntrinsicMusicTagCategory = "artist" | "mood" | "style" | "scene";
+
+export type MusicSource = "ncm" | "qq";
+
+export type TrackKey = string;
+
+/** Bare numbers remain accepted for the v1 NCM compatibility window. */
+export type TrackReference = TrackKey | number;
 
 export interface MusicTag {
   category: MusicTagCategory;
   value: string;
+}
+
+export type TrackTagSource = "platform" | "playlist" | "rule" | "ai" | "manual";
+
+export interface TrackTagEvidence extends MusicTag {
+  category: IntrinsicMusicTagCategory;
+  confidence: number;
+  source: TrackTagSource;
 }
 
 export interface PreferenceTag extends MusicTag {
@@ -38,7 +56,18 @@ export type DjTone = "lively" | "calm" | "professional";
 export type VoiceGender = "female" | "male";
 
 export interface Track {
-  id: number;
+  /** @deprecated Use trackKey. Kept while v1 clients still send numeric NCM IDs. */
+  id: TrackReference;
+  trackKey?: TrackKey;
+  recordingKey?: string;
+  source?: MusicSource;
+  sourceId?: string;
+  /** Provider media identifier when playback needs a key distinct from sourceId. */
+  playbackId?: string;
+  /** Provider identifier used by the lyrics endpoint when it differs from sourceId. */
+  lyricsId?: string;
+  /** Provider metadata indicating that playback may require an active subscription. */
+  requiresSubscription?: boolean;
   title: string;
   artists: string[];
   album?: string;
@@ -47,6 +76,7 @@ export interface Track {
   songUrl?: string;
   moodTag?: MoodTag;
   tags?: MusicTag[];
+  tagEvidence?: TrackTagEvidence[];
 }
 
 export interface TrackStat {
@@ -65,7 +95,7 @@ export interface LyricLine {
 }
 
 export interface TrackLyrics {
-  trackId: number;
+  trackId: TrackReference;
   pureMusic: boolean;
   lines: LyricLine[];
 }
@@ -80,7 +110,7 @@ export interface TasteProfile {
   summary: string;
   topArtists: TopArtist[];
   topTracks: Array<{
-    id: number;
+    id: TrackReference;
     title: string;
     playCount: number;
   }>;
@@ -104,6 +134,18 @@ export interface EnvironmentContext {
   weather: WeatherKind;
   temperature?: number;
   location?: EnvironmentLocation;
+  updatedAt: string;
+}
+
+export interface EnvironmentForecastPoint {
+  at: string;
+  weather: WeatherKind;
+  temperature?: number;
+}
+
+export interface EnvironmentTimeline {
+  timezone: string;
+  points: EnvironmentForecastPoint[];
   updatedAt: string;
 }
 
@@ -146,6 +188,8 @@ export type RecommendationSource =
 export interface RecommendationCandidate {
   track: Track;
   source: RecommendationSource;
+  provider?: MusicSource;
+  discovery?: "library" | "daily" | "context_search" | "style_search" | "chat_search";
   tags: MusicTag[];
   relevanceScore: number;
   discoveredAt: string;
@@ -154,7 +198,7 @@ export interface RecommendationCandidate {
 
 export interface PlayEvent {
   type: PlayEventType;
-  trackId: number;
+  trackId: TrackReference;
   at: string;
   metadata?: Record<string, string | number | boolean>;
 }
@@ -163,7 +207,7 @@ export interface DjScript {
   id: string;
   text: string;
   reason: string;
-  trackIds: number[];
+  trackIds: TrackReference[];
   createdAt: string;
 }
 
@@ -245,7 +289,7 @@ export interface MusicCommandRequest {
   request: string;
   mode: "text_suggest" | "voice_direct";
   confirmationToken?: string;
-  selectedTrackId?: number;
+  selectedTrackId?: TrackReference;
 }
 
 export interface MusicCommandResult {
@@ -298,7 +342,127 @@ export interface RealtimeSessionResponse {
 
 export interface FeedbackRequest {
   type: FeedbackType;
-  trackId: number;
+  trackId: TrackReference;
+}
+
+export type LibraryEvidenceKind =
+  | "platform_like"
+  | "playlist"
+  | "recent_play"
+  | "local_favorite";
+
+export interface LibraryEvidence {
+  recordingKey: string;
+  trackKey: TrackKey;
+  source: MusicSource;
+  kind: LibraryEvidenceKind;
+  observedAt: string;
+  containerId?: string;
+  containerName?: string;
+  playCount?: number;
+}
+
+export interface MusicSourceStatus {
+  source: MusicSource;
+  enabled: boolean;
+  connected: boolean;
+  accountLabel?: string;
+  lastSyncAt?: string;
+  lastError?: string;
+  capabilities?: {
+    accountLibrary: boolean;
+    recentPlays: boolean;
+    search: boolean;
+    recommendations: boolean;
+    playback: boolean;
+    lyrics: boolean;
+  };
+}
+
+export interface MusicSourceSyncResponse {
+  source: MusicSource;
+  importedCount: number;
+  evidenceCount: number;
+  warnings: string[];
+  status: MusicSourceStatus;
+}
+
+export interface QqAuthQrResponse {
+  sessionId: string;
+  imageDataUrl: string;
+  expiresAt: string;
+}
+
+export interface QqAuthStatusResponse {
+  sessionId: string;
+  status: "pending" | "authorized" | "expired" | "error";
+  message?: string;
+}
+
+export interface TasteManualRules {
+  tagWeights: Record<string, number>;
+  artistWeights: Record<string, number>;
+  blockedTags: string[];
+  blockedArtists: string[];
+}
+
+export interface TasteDocumentStatus {
+  path: string;
+  updatedAt?: string;
+  valid: boolean;
+  error?: string;
+  manualRules: TasteManualRules;
+}
+
+export interface TasteResponse extends TasteProfile {
+  manualRules: TasteManualRules;
+  document: TasteDocumentStatus;
+}
+
+export type RoutineEnergy = "low" | "medium" | "high";
+
+export interface RoutineBlock {
+  start: string;
+  end: string;
+  activity: string;
+  tags: MusicTag[];
+  energy: RoutineEnergy;
+  musicAllowed: boolean;
+}
+
+export interface RoutineDocumentStatus {
+  path: string;
+  valid: boolean;
+  timezone: string;
+  updatedAt?: string;
+  error?: string;
+}
+
+export interface DailyPlanSegment {
+  period: DayPeriod;
+  start: string;
+  end: string;
+  /** Estimated playback duration of the selected items, using the planner fallback for unknown lengths. */
+  targetDurationMs: number;
+  weather: WeatherKind;
+  temperature?: number;
+  routine: RoutineBlock[];
+  items: RadioPlanItem[];
+}
+
+export interface DailyPlan {
+  date: string;
+  timezone: string;
+  revision: number;
+  generatedAt: string;
+  contextHash: string;
+  consumedTrackKeys: TrackKey[];
+  segments: DailyPlanSegment[];
+}
+
+export interface PlayDailyPlanResponse {
+  period: DayPeriod;
+  now: NowPlayingState;
 }
 
 export interface FavoriteRequest {
@@ -354,6 +518,10 @@ export interface SystemStatus {
   realtimeConversationMode?: "unified" | "legacy";
   inputTranscriptionEnabled?: boolean;
   realtimeLastError?: string;
+  musicSources?: MusicSourceStatus[];
+  tasteDocument?: TasteDocumentStatus;
+  routineDocument?: RoutineDocumentStatus;
+  dailyPlanRevision?: number;
 }
 
 export interface ImportNcmResponse {
@@ -371,6 +539,9 @@ export interface WsPayload {
     | "dj_script_ready"
     | "system_status"
     | "chat_memory_updated"
-    | "conversation_updated";
+    | "conversation_updated"
+    | "music_sources_updated"
+    | "taste_updated"
+    | "daily_plan_updated";
   data: unknown;
 }

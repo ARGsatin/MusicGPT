@@ -155,12 +155,12 @@ describe("API integration", () => {
 
     const nowRes = await fetch(`${base}/api/now`);
     const now = (await nowRes.json()) as {
-      track?: { id: number };
-      lyrics?: { trackId: number; pureMusic: boolean; lines: Array<{ text: string; translation?: string }> };
+      track?: { id: number; trackKey?: string };
+      lyrics?: { trackId: string; pureMusic: boolean; lines: Array<{ text: string; translation?: string }> };
     };
     expect(now.track?.id).toBeDefined();
     expect(now.lyrics).toMatchObject({
-      trackId: now.track?.id,
+      trackId: now.track?.trackKey,
       pureMusic: false,
       lines: [{ text: "I won't see you tonight", translation: "今晚若见你" }]
     });

@@ -1,11 +1,12 @@
 # MusicGPT
 
-本地私有运行的 AI 音乐电台：连接网易云音乐，用你的收藏与播放行为生成个人电台，并让 AI DJ 陪你聊天、点歌和播报。
+本地私有运行的 AI 音乐电台：连接网易云与 QQ 音乐，用收藏、歌单和播放行为生成结构化品味与全天计划，并让 AI DJ 陪你聊天、点歌和播报。
 
 ## 核心能力
 
-- 网易云历史偏好 + 本地收藏标签建模（艺人、氛围、风格、场景、时段、天气）
-- 自动电台续播（10 首窗口按 5 首熟悉口味 + 5 首新风格交错规划）
+- 网易云 + QQ 音乐双曲源；统一 `trackKey`，同一录音的跨平台版本可在播放失败时自动回退
+- SQLite 事实库原子生成 `state/library.json` 与可人工调权的 `state/taste.md`
+- 晨间探索、午后柔和、晚间回忆三时段全天计划；每段最多 10 首，播放队列是全天计划的滚动窗口
 - 网易云每日推荐、环境搜索与轮换风格组成的探索候选池
 - 自由聊天：可以聊任何日常话题，开放式回复通过套话与近期重复检查后再显示
 - 原生实时语音：`qwen3.5-omni-plus-realtime` 直接理解和生成音频，支持自然轮次、随时打断与语音点歌
@@ -85,6 +86,45 @@ DeepSeek V4 默认开启思考模式；MusicGPT 会在短对话、意图识别�
 
 Realtime 语音要求同时配置 `DASHSCOPE_API_KEY`，以及 `DASHSCOPE_WORKSPACE_ID` 或 `DASHSCOPE_REALTIME_BASE_URL` 其中之一。`GET /api/realtime/session` 只有在密钥和端点都完整时才返回 `enabled: true`，因此不会在配置不完整时提前申请麦克风权限。
 
+### QQ 音乐、品味文件与 Routine
+
+启动页面后打开“今日计划”，点击“扫码连接”即可使用 QQ 音乐 Node SDK 登录。实现固定使用 `@sansenjian/qq-music-api@2.4.0`；二维码会返回页面，登录 Cookie 只写入已忽略的 `state/qqmusic/`，不会出现在 API 响应或日志中。首次授权会同步“我喜欢”和自建歌单，随后在启动、每 6 小时或手动点击时幂等同步。固定版 SDK 当前没有近期播放接口，因此曲源状态会明确返回 `recentPlays: false` 和 `qq_recent_plays_unavailable` 警告，不会伪造近期播放证据。SDK 参考：[快速开始](https://sansenjian.github.io/qq-music-api/guide/quickstart.html)、[登录](https://sansenjian.github.io/qq-music-api/guide/authentication.html)。
+
+`state/taste.md` 的 YAML 区可以设置人工规则，系统只重写 `musicgpt:auto` 标记区。权重范围是 `0.5–2.0`；语法错误时服务继续使用最后有效规则，并在页面显示警告：
+
+```yaml
+---
+artistWeights:
+  宇多田ヒカル: 1.6
+tagWeights:
+  style:dream pop: 1.3
+blockedArtists: []
+blockedTags:
+  - style:metal
+---
+```
+
+`state/routine.json` 支持 weekly 与日期 override。本版不提供编辑器，只在页面展示解析状态和路径：
+
+```json
+{
+  "version": 1,
+  "timezone": "Asia/Shanghai",
+  "weekly": {
+    "monday": [
+      { "start": "09:00", "end": "12:00", "activity": "工作", "expectedTags": ["focus"], "energy": "medium", "musicAllowed": true }
+    ]
+  },
+  "overrides": {}
+}
+```
+
+当天逐小时天气来自 [Open-Meteo Forecast API](https://open-meteo.com/en/docs)。未配置定位或天气请求失败时，全天计划仍使用时段、routine 与本地品味生成。
+
+“今日计划”每天生成三个最多 10 首的主题时段：06:00–12:00 是“晨间探索”（目标 40% 真正未听过的录音），12:00–18:00 是“午后柔和”（目标 70% 柔和歌曲并优先 2 首古典/器乐），18:00–24:00 是“晚间回忆”（目标 80% 有长期播放或收藏证据的歌曲）。主题候选不足时会回退到合格的熟悉口味，不会为凑比例放入低质量歌曲；跨网易云与 QQ 的同一录音共享播放、收藏和跳过历史。
+
+“今日计划”中的“一键播放当前时段”会立即切换播放器：06:00–24:00 播放当前主题时段，00:00–06:00 播放当天接下来的晨间计划；已播放歌曲会跳过，后续队列只取自所选时段且最多 10 首。页面展示全天计划中的全部歌曲和预计播放分钟数。
+
 3. 启动
 
 ```bash
@@ -119,6 +159,15 @@ npm run dev
 - `PUT /api/favorites/:trackId`（本地收藏/取消收藏，不写回网易云）
 - `GET /api/system/status`
 - `POST /api/import/ncm`
+- `GET /api/music-sources`
+- `POST /api/music-sources/qq/auth/qr`
+- `GET /api/music-sources/qq/auth/qr/:sessionId`
+- `DELETE /api/music-sources/qq/auth`
+- `POST /api/music-sources/:source/sync`
+- `GET /api/library/export`
+- `GET /api/daily-plan`
+- `POST /api/daily-plan/regenerate`
+- `POST /api/daily-plan/play`（切换到当前或紧邻的下一计划时段并立即播放）
 - `GET /api/environment`
 - `POST /api/environment/location`
 - `POST /api/recommendations/import`

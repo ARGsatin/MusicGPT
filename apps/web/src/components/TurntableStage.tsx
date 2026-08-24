@@ -302,6 +302,11 @@ export const TurntableStage = memo(function TurntableStage({
 
       <div className="stage-meta">
         <p className="micro-label">NOW SPINNING</p>
+        {now.track ? (
+          <span className={`now-source-badge source-${now.track.source ?? "ncm"}`}>
+            {now.track.source === "qq" ? "QQ 音乐" : "网易云"}
+          </span>
+        ) : null}
         <h1 className="stage-title">{now.track?.title ?? "等待开播"}</h1>
         <p className="stage-artist">{formatArtists(now.track?.artists)}</p>
         <div className={isPlaying ? "equalizer is-live" : "equalizer"} aria-hidden="true">
@@ -406,7 +411,7 @@ export const TurntableStage = memo(function TurntableStage({
       <audio
         ref={audioRef}
         autoPlay
-        src={now.track ? `/api/tracks/${now.track.id}/audio` : undefined}
+        src={now.track ? `/api/tracks/${encodeURIComponent(String(now.track.trackKey ?? now.track.id))}/audio` : undefined}
         onEnded={() => void onTrackEnded()}
         onPlay={() => setPlaybackPaused(false)}
         onPause={() => setPlaybackPaused(true)}

@@ -11,7 +11,10 @@ export function hasRecommendationMetadata(track: Track): boolean {
   const hasArtist = Array.isArray(track.artists) && track.artists.some(
     (artist) => typeof artist === "string" && Boolean(artist.trim())
   );
-  return Number.isFinite(track.id) && track.id > 0 && Boolean(
+  const hasId = typeof track.id === "number"
+    ? Number.isFinite(track.id) && track.id > 0
+    : track.id.trim().length > 0;
+  return hasId && Boolean(
     title && title.toLowerCase() !== "unknown" && hasArtist
   );
 }

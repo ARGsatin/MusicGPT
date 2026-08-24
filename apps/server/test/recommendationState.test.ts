@@ -76,7 +76,7 @@ describe("recommendation state migration", () => {
     ]);
   });
 
-  it("migrates legacy recommendation candidates with a neutral relevance score", () => {
+  it("rebuilds legacy recommendation candidates during the v2 identity migration", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-candidate-migration-"));
     const dbPath = path.join(tmp, "state.db");
     const legacy = new DatabaseSync(dbPath);
@@ -106,7 +106,7 @@ describe("recommendation state migration", () => {
 
     const repo = new StateRepository(dbPath);
 
-    expect(repo.getRecommendationCandidates()[0]?.relevanceScore).toBe(0.5);
+    expect(repo.getRecommendationCandidates()).toEqual([]);
   });
 
   it("reads all feedback in the requested time window rather than a fixed row limit", () => {

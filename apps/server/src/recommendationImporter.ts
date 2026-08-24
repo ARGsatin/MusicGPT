@@ -1,4 +1,5 @@
 import { inferMood } from "./moodClassifier.js";
+import { getTrackKey } from "./musicCatalog.js";
 import {
   isEligibleRecommendationTrack,
   isExplicitAmbientRequest
@@ -50,11 +51,11 @@ export class RecommendationImporter {
     includeSearch = true
   ): Promise<RecommendationImportResult> {
     this.repo.deleteExpiredRecommendationCandidates();
-    const existingIds = new Set(this.repo.getTrackStats(5000).map((item) => item.track.id));
+    const existingIds = new Set(this.repo.getTrackStats(5000).map((item) => getTrackKey(item.track)));
 
     const now = new Date();
     const discoveredAt = now.toISOString();
-    const candidates = new Map<number, RecommendationCandidate>();
+    const candidates = new Map<string, RecommendationCandidate>();
     const allowAmbient = isExplicitAmbientRequest(contextText);
     let skippedCount = 0;
 
@@ -72,6 +73,8 @@ export class RecommendationImporter {
         skippedCount += addCandidate(candidates, existingIds, {
           track,
           source: "ncm_daily",
+          provider: track.source ?? "ncm",
+          discovery: "daily",
           tags: inferTrackTags(track),
           relevanceScore: 1,
           discoveredAt,
@@ -104,6 +107,8 @@ export class RecommendationImporter {
         skippedCount += addCandidate(candidates, existingIds, {
           track: { ...normalized, tags },
           source: seed.source,
+          provider: normalized.source ?? "ncm",
+          discovery: seed.source,
           tags,
           relevanceScore: 1 - index * 0.2,
           discoveredAt,
@@ -122,18 +127,19 @@ export class RecommendationImporter {
 }
 
 function addCandidate(
-  candidates: Map<number, RecommendationCandidate>,
-  existingIds: Set<number>,
+  candidates: Map<string, RecommendationCandidate>,
+  existingIds: Set<string>,
   candidate: RecommendationCandidate
 ): number {
-  if (existingIds.has(candidate.track.id) || candidates.has(candidate.track.id)) {
-    const existing = candidates.get(candidate.track.id);
+  const trackKey = getTrackKey(candidate.track);
+  if (existingIds.has(trackKey) || candidates.has(trackKey)) {
+    const existing = candidates.get(trackKey);
     if (existing && candidate.relevanceScore > existing.relevanceScore) {
-      candidates.set(candidate.track.id, candidate);
+      candidates.set(trackKey, candidate);
     }
     return 1;
   }
-  candidates.set(candidate.track.id, candidate);
+  candidates.set(trackKey, candidate);
   return 0;
 }
 

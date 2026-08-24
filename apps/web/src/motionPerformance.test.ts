@@ -2,11 +2,17 @@ import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 
 describe("ambient motion performance budget", () => {
-  it("allows only the compositor-safe status ticker to run infinitely", () => {
+  it("allows only the compositor-safe turntable and status ticker to run infinitely", () => {
     const styles = fs.readFileSync(new URL("./styles.css", import.meta.url), "utf8");
     const infiniteAnimations = styles.match(/animation\s*:[^;{}]*\binfinite\b/g) ?? [];
 
-    expect(infiniteAnimations).toEqual(["animation: ticker-scroll 42s linear infinite"]);
+    expect(infiniteAnimations).toEqual([
+      "animation: vinyl-spin 24s linear infinite",
+      "animation: ticker-scroll 42s linear infinite"
+    ]);
+    expect(styles).toMatch(
+      /\.vinyl\.is-spinning\s*\{[^}]*animation:\s*vinyl-spin 24s linear infinite;[^}]*will-change:\s*transform;/s,
+    );
     expect(styles).toMatch(
       /\.ticker-track\s*\{[^}]*display:\s*flex;[^}]*animation:\s*ticker-scroll 42s linear infinite;[^}]*will-change:\s*transform;/s,
     );

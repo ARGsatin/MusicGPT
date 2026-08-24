@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { FormEvent, RefObject } from "react";
+import type { FormEvent, ReactNode, RefObject } from "react";
 
 import type {
   ChatMemory,
   ChatMessage,
   DjSettings,
-  RadioPlanItem
+  RadioPlanItem,
+  TrackReference
 } from "@musicgpt/shared";
 import aiDjAvatarUrl from "../assets/ai-dj-avatar.svg";
 import { ChatMemoryPanel } from "../ChatMemoryPanel";
@@ -14,7 +15,7 @@ import type { ChatStreamFeedback } from "../chatStream";
 import type { RealtimeVoiceStatus } from "../realtimeVoice";
 import type { StreamingTextStore } from "../streamingTextStore";
 
-export type PanelTab = "chat" | "queue";
+export type PanelTab = "chat" | "queue" | "plan";
 
 interface ChatPanelProps {
   activeSpeechKey: string | undefined;
@@ -38,7 +39,9 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   nowTitle: string;
   queue: RadioPlanItem[];
-  queueLoadingTrackId: number | null;
+  queueError: string | null;
+  planPanel: ReactNode;
+  queueLoadingTrackId: TrackReference | null;
   realtimeStatus: RealtimeVoiceStatus;
   realtimeStatusLabel: string;
   speechNotice: string | null;
@@ -53,7 +56,7 @@ interface ChatPanelProps {
   onFeedbackRetry: () => void;
   onForgetMemory: (memory: ChatMemory) => void;
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => void;
-  onPlayQueueTrack: (trackId: number) => void;
+  onPlayQueueTrack: (trackId: TrackReference) => void;
   onQuickPrompt: (prompt: string) => void;
   onReplayDj: () => void;
   onSpeakMessage: (message: ChatMessage) => void;
@@ -252,8 +255,8 @@ export const QueueRail = memo(function QueueRail({
   onPlayTrack,
   queue
 }: {
-  loadingTrackId: number | null;
-  onPlayTrack: (trackId: number) => void;
+  loadingTrackId: TrackReference | null;
+  onPlayTrack: (trackId: TrackReference) => void;
   queue: RadioPlanItem[];
 }) {
   if (queue.length === 0) {
@@ -268,14 +271,16 @@ export const QueueRail = memo(function QueueRail({
   return (
     <ol className="queue-rail">
       {queue.slice(0, 10).map((item, index) => {
-        const loading = loadingTrackId === item.track.id;
+        const trackReference = item.track.trackKey ?? item.track.id;
+        const loading = loadingTrackId === trackReference;
         return (
-          <li key={item.track.id}>
+          <li key={trackReference}>
             <button
               aria-label={`立即播放 ${item.track.title}`}
               className={item.bucket === "explore" ? "queue-card is-explore" : "queue-card"}
+              data-track-reference={String(trackReference)}
               disabled={loadingTrackId !== null}
-              onClick={() => onPlayTrack(item.track.id)}
+              onClick={() => onPlayTrack(trackReference)}
               type="button"
             >
               <span className="queue-index">{String(index + 1).padStart(2, "0")}</span>
@@ -285,6 +290,9 @@ export const QueueRail = memo(function QueueRail({
               <span className="queue-copy">
                 <strong>{item.track.title}</strong>
                 <em>{formatArtists(item.track.artists)}</em>
+              </span>
+              <span className={`queue-source source-${item.track.source ?? "ncm"}`}>
+                {item.track.source === "qq" ? "QQ" : "网易云"}
               </span>
               <span className="queue-bucket">
                 {loading ? "切换中" : item.bucket === "explore" ? "探索" : "口味"}
@@ -362,6 +370,15 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             onClick={() => onChangeTab("queue")}
           >
             队列 <i>{queue.length}</i>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "plan"}
+            className={activeTab === "plan" ? "panel-tab is-active" : "panel-tab"}
+            onClick={() => onChangeTab("plan")}
+          >
+            今日计划
           </button>
         </div>
         {activeTab === "chat" ? (
@@ -493,12 +510,17 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             )}
           </form>
         </>
+      ) : activeTab === "queue" ? (
+        <>
+          {props.queueError ? <p className="chat-error" role="alert">{props.queueError}</p> : null}
+          <QueueRail
+            loadingTrackId={props.queueLoadingTrackId}
+            onPlayTrack={props.onPlayQueueTrack}
+            queue={queue}
+          />
+        </>
       ) : (
-        <QueueRail
-          loadingTrackId={props.queueLoadingTrackId}
-          onPlayTrack={props.onPlayQueueTrack}
-          queue={queue}
-        />
+        props.planPanel
       )}
     </aside>
   );

@@ -1,6 +1,7 @@
 import { currentPeriod } from "./time.js";
 import { inferTrackTags, periodLabel, primaryStyle, weatherLabel } from "./trackTags.js";
 import { isEligibleRecommendationTrack } from "./recommendationQuality.js";
+import { getTrackKey, normalizeTrackReference } from "./musicCatalog.js";
 
 import type {
   DayPeriod,
@@ -47,7 +48,9 @@ export class RadioPlanner {
         ? [{ type: "like", trackId: entry.track.id, at: entry.localFavoritedAt }]
         : [])
     ]);
-    const recentPlayIds = new Set(events.slice(0, 20).map((event) => event.trackId));
+    const recentPlayIds = new Set(
+      events.slice(0, 20).map((event) => normalizeTrackReference(event.trackId))
+    );
     const maxPlayCount = stats.reduce((max, item) => Math.max(max, item.playCount), 1);
     const periodWeights = this.periodWeightLookup(profile.favoritePeriods);
     const profileTagWeights = new Map(
@@ -57,7 +60,7 @@ export class RadioPlanner {
 
     const familiar = stats
       .filter((entry) => isEligibleRecommendationTrack(entry.track, options.allowAmbient))
-      .filter((entry) => !feedbackByTrack.get(entry.track.id)?.hidden)
+      .filter((entry) => !feedbackByTrack.get(getTrackKey(entry.track))?.hidden)
       .map((entry) =>
         this.scoreTrack({
           track: entry.track,
@@ -73,15 +76,15 @@ export class RadioPlanner {
             (entry.localFavoritedAt ? 1 : 0) * 0.55 +
             normalize(entry.playCount, maxPlayCount) * 0.45,
           relevanceScore: 0,
-          feedbackMultiplier: feedbackByTrack.get(entry.track.id)?.multiplier ?? 1,
-          recentlyPlayed: recentPlayIds.has(entry.track.id)
+          feedbackMultiplier: feedbackByTrack.get(getTrackKey(entry.track))?.multiplier ?? 1,
+          recentlyPlayed: recentPlayIds.has(getTrackKey(entry.track))
         })
       );
 
-    const knownIds = new Set(stats.map((entry) => entry.track.id));
+    const knownIds = new Set(stats.map((entry) => getTrackKey(entry.track)));
     const explore = (options.candidates ?? [])
-      .filter((candidate) => !knownIds.has(candidate.track.id))
-      .filter((candidate) => !feedbackByTrack.get(candidate.track.id)?.hidden)
+      .filter((candidate) => !knownIds.has(getTrackKey(candidate.track)))
+      .filter((candidate) => !feedbackByTrack.get(getTrackKey(candidate.track))?.hidden)
       .filter((candidate) => candidate.relevanceScore >= 0.6)
       .filter((candidate) => isEligibleRecommendationTrack(candidate.track, options.allowAmbient))
       .map((candidate) =>
@@ -97,8 +100,8 @@ export class RadioPlanner {
           periodWeights,
           familiarScore: 0,
           relevanceScore: candidate.relevanceScore,
-          feedbackMultiplier: feedbackByTrack.get(candidate.track.id)?.multiplier ?? 1,
-          recentlyPlayed: recentPlayIds.has(candidate.track.id)
+          feedbackMultiplier: feedbackByTrack.get(getTrackKey(candidate.track))?.multiplier ?? 1,
+          recentlyPlayed: recentPlayIds.has(getTrackKey(candidate.track))
         })
       )
       .filter((item) => item.source === "ncm_daily" || item.score >= 0.35);
@@ -107,7 +110,7 @@ export class RadioPlanner {
     explore.sort((left, right) => right.score - left.score);
 
     const output: ScoredItem[] = [];
-    const selectedIds = new Set<number>();
+    const selectedIds = new Set<string>();
     const normalExploreLimit = Math.floor(windowSize * 0.2);
     const bootstrap = familiar.length < windowSize - normalExploreLimit;
     const dailyExplore = explore.filter((item) => item.source === "ncm_daily");
@@ -131,7 +134,7 @@ export class RadioPlanner {
           break;
         }
         output.push(picked);
-        selectedIds.add(picked.track.id);
+        selectedIds.add(getTrackKey(picked.track));
       }
     }
     return output;
@@ -243,9 +246,9 @@ function environmentPeriodScore(track: Track, nowPeriod: DayPeriod): number {
 function pickDiverse(
   pool: ScoredItem[],
   output: ScoredItem[],
-  selectedIds: Set<number>
+  selectedIds: Set<string>
 ): ScoredItem | undefined {
-  const candidates = pool.filter((item) => !selectedIds.has(item.track.id));
+  const candidates = pool.filter((item) => !selectedIds.has(getTrackKey(item.track)));
   return (
     candidates.find((item) => respectsArtist(item, output) && respectsStyleWindow(item, output)) ??
     candidates.find((item) => respectsArtist(item, output)) ??
@@ -297,7 +300,7 @@ function sourceLabel(source: RecommendationSource): string {
 function appendDiverse(
   pool: ScoredItem[],
   output: ScoredItem[],
-  selectedIds: Set<number>,
+  selectedIds: Set<string>,
   limit: number
 ): void {
   while (output.length < limit) {
@@ -306,26 +309,27 @@ function appendDiverse(
       return;
     }
     output.push(picked);
-    selectedIds.add(picked.track.id);
+    selectedIds.add(getTrackKey(picked.track));
   }
 }
 
-function buildFeedbackSignals(events: PlayEvent[]): Map<number, { hidden: boolean; multiplier: number }> {
+function buildFeedbackSignals(events: PlayEvent[]): Map<string, { hidden: boolean; multiplier: number }> {
   const now = Date.now();
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000;
   const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
-  const grouped = new Map<number, PlayEvent[]>();
+  const grouped = new Map<string, PlayEvent[]>();
   for (const event of events) {
     const at = new Date(event.at).getTime();
     if (!Number.isFinite(at) || at < ninetyDaysAgo) {
       continue;
     }
-    const trackEvents = grouped.get(event.trackId) ?? [];
+    const trackKey = normalizeTrackReference(event.trackId);
+    const trackEvents = grouped.get(trackKey) ?? [];
     trackEvents.push(event);
-    grouped.set(event.trackId, trackEvents);
+    grouped.set(trackKey, trackEvents);
   }
 
-  const result = new Map<number, { hidden: boolean; multiplier: number }>();
+  const result = new Map<string, { hidden: boolean; multiplier: number }>();
   for (const [trackId, trackEvents] of grouped) {
     const ordered = [...trackEvents].sort(
       (left, right) => new Date(right.at).getTime() - new Date(left.at).getTime()

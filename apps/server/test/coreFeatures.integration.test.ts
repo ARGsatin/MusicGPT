@@ -161,7 +161,7 @@ describe("core feature integration", () => {
 
     expect(response.ok).toBe(true);
     expect(repo.getRecentPlayEvents(20)).toContainEqual(
-      expect.objectContaining({ type: "play", trackId: 44 })
+      expect.objectContaining({ type: "play", trackId: "ncm:44" })
     );
   });
 

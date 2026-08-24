@@ -1,5 +1,6 @@
 import { periodFromHour } from "./time.js";
 import { inferTrackTags } from "./trackTags.js";
+import { getTrackKey, normalizeTrackReference } from "./musicCatalog.js";
 
 import type {
   MusicTag,
@@ -57,14 +58,15 @@ export class TasteEngine {
       ["unknown", 0]
     ]);
 
-    const statByTrackId = new Map(stats.map((stat) => [stat.track.id, stat]));
-    const latestFavoriteEvent = new Map<number, PlayEvent>();
+    const statByTrackId = new Map(stats.map((stat) => [getTrackKey(stat.track), stat]));
+    const latestFavoriteEvent = new Map<string, PlayEvent>();
     for (const event of recentEvents) {
       if (event.type !== "like" && event.type !== "unlike") {
         continue;
       }
-      if (!latestFavoriteEvent.has(event.trackId)) {
-        latestFavoriteEvent.set(event.trackId, event);
+      const trackKey = normalizeTrackReference(event.trackId);
+      if (!latestFavoriteEvent.has(trackKey)) {
+        latestFavoriteEvent.set(trackKey, event);
       }
     }
 
@@ -95,7 +97,7 @@ export class TasteEngine {
       moodWeights.set(mood, (moodWeights.get(mood) ?? 0) + weight);
 
       if (stat.localFavoritedAt) {
-        const favoriteEvent = latestFavoriteEvent.get(stat.track.id);
+        const favoriteEvent = latestFavoriteEvent.get(getTrackKey(stat.track));
         if (favoriteEvent?.type === "like") {
           for (const tag of tagsFromEventMetadata(favoriteEvent)) {
             addTagWeight(tagWeights, tag, 3 * recency(favoriteEvent.at), 1);
@@ -105,7 +107,7 @@ export class TasteEngine {
     }
 
     for (const event of recentEvents) {
-      const stat = statByTrackId.get(event.trackId);
+      const stat = statByTrackId.get(normalizeTrackReference(event.trackId));
       const eventWeight =
         event.type === "replay"
           ? 2
@@ -154,7 +156,7 @@ export class TasteEngine {
       .sort((a, b) => b.playCount - a.playCount)
       .slice(0, 12)
       .map((item) => ({
-        id: item.track.id,
+        id: getTrackKey(item.track),
         title: item.track.title,
         playCount: item.playCount
       }));

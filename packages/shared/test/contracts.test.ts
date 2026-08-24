@@ -35,7 +35,7 @@ describe("contracts", () => {
         reason: "matches the requested mood"
       })
     ).toBe(true);
-    expect(isPlayTrackRequest({ track: { id: "99", title: "Night Drive", artists: ["Ari"] } })).toBe(false);
+    expect(isPlayTrackRequest({ track: { id: "99", title: "Night Drive", artists: ["Ari"] } })).toBe(true);
   });
 
   it("encodes ws payload", () => {
@@ -75,6 +75,10 @@ describe("contracts", () => {
   it("exposes persistent chat memory routes", () => {
     expect(API_ROUTES.chatMemories).toBe("/api/chat/memories");
     expect(API_ROUTES.chatMemory(7)).toBe("/api/chat/memories/7");
+  });
+
+  it("exposes one-click playback for the current daily-plan segment", () => {
+    expect(API_ROUTES.playDailyPlan).toBe("/api/daily-plan/play");
   });
 
   it("validates environment location payload", () => {

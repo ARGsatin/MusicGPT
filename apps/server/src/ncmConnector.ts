@@ -1,4 +1,5 @@
 import { inferMood } from "./moodClassifier.js";
+import { normalizeTrackIdentity } from "./musicCatalog.js";
 import { hasRecommendationMetadata } from "./recommendationQuality.js";
 
 import type {
@@ -348,7 +349,8 @@ export class NcmConnector {
     }
 
     return details.map((track) => {
-      const item = recordMap.get(track.id);
+      const ncmId = Number(track.sourceId ?? track.id);
+      const item = recordMap.get(ncmId);
       const stat: TrackStat = {
         track: {
           ...track,
@@ -356,7 +358,7 @@ export class NcmConnector {
         },
         playCount: item?.playCount ?? 0
       };
-      const likedAt = likedAtById.get(track.id);
+      const likedAt = likedAtById.get(ncmId);
       if (likedAt) {
         stat.likedAt = likedAt;
       }
@@ -402,7 +404,7 @@ export class NcmConnector {
         if (song.al?.picUrl) {
           track.coverUrl = song.al.picUrl;
         }
-        tracks.push(track);
+        tracks.push(normalizeTrackIdentity(track));
       }
     }
 

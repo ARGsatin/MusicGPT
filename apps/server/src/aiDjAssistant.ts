@@ -9,7 +9,8 @@ import type {
   PlayEvent,
   RadioPlanItem,
   TasteProfile,
-  Track
+  Track,
+  TrackReference
 } from "@musicgpt/shared";
 import {
   generateAcceptedOpenEndedReply,
@@ -30,7 +31,7 @@ export type AiDjIntent =
   | { type: "chat" };
 
 export interface TrackSelection {
-  trackId?: number | undefined;
+  trackId?: TrackReference | undefined;
 }
 
 export interface AiDjContext {

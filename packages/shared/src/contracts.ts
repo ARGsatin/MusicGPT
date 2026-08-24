@@ -6,6 +6,7 @@ import type {
   FeedbackRequest,
   NextRequest,
   PlayTrackRequest,
+  TrackReference,
   WsPayload
 } from "./types.js";
 
@@ -26,12 +27,21 @@ export const API_ROUTES = {
   playTrack: "/api/play-track",
   taste: "/api/taste",
   feedback: "/api/feedback",
-  favorite: (trackId: number) => `/api/favorites/${trackId}`,
+  favorite: (trackId: TrackReference) => `/api/favorites/${encodeURIComponent(String(trackId))}`,
   systemStatus: "/api/system/status",
   importNcm: "/api/import/ncm",
   environment: "/api/environment",
   environmentLocation: "/api/environment/location",
   importRecommendations: "/api/recommendations/import",
+  musicSources: "/api/music-sources",
+  qqAuthQr: "/api/music-sources/qq/auth/qr",
+  qqAuthQrStatus: (sessionId: string) => `/api/music-sources/qq/auth/qr/${encodeURIComponent(sessionId)}`,
+  qqDisconnect: "/api/music-sources/qq/auth",
+  musicSourceSync: (source: "ncm" | "qq") => `/api/music-sources/${source}/sync`,
+  libraryExport: "/api/library/export",
+  dailyPlan: "/api/daily-plan",
+  regenerateDailyPlan: "/api/daily-plan/regenerate",
+  playDailyPlan: "/api/daily-plan/play",
   djSettings: "/api/dj/settings",
   ws: "/ws/stream"
 } as const;
@@ -58,7 +68,7 @@ export function isFeedbackRequest(value: unknown): value is FeedbackRequest {
   }
   const maybe = value as FeedbackRequest;
   return (
-    typeof maybe.trackId === "number" &&
+    (typeof maybe.trackId === "number" || typeof maybe.trackId === "string") &&
     ["skip", "like", "unlike", "replay", "complete"].includes(maybe.type)
   );
 }
@@ -78,7 +88,7 @@ export function isPlayTrackRequest(value: unknown): value is PlayTrackRequest {
   return (
     Boolean(maybe.track) &&
     typeof maybe.track === "object" &&
-    typeof maybe.track.id === "number" &&
+    (typeof maybe.track.id === "number" || typeof maybe.track.id === "string") &&
     typeof maybe.track.title === "string" &&
     Array.isArray(maybe.track.artists) &&
     maybe.track.artists.every((artist) => typeof artist === "string") &&
