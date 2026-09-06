@@ -77,6 +77,7 @@ describe("chat memory service", () => {
     expect(service.relevantTo("雨天听什么爵士好？")[0]?.content).toBe(
       "用户喜欢雨天听轻爵士"
     );
+    expect(service.relevantTo("解释一下量子纠缠")).toEqual([]);
   });
 
   it("isolates extractor failures from later memory updates", async () => {

@@ -121,7 +121,9 @@ describe("core feature integration", () => {
     const base = await app.listen({ port: 0, host: "127.0.0.1" });
     const firstNow = await requestNext(base);
     expect(firstNow.track?.id).toBeDefined();
-    expect(repo.getRecentPlayEvents(20)).toHaveLength(0);
+    const activationFacts = repo.getRecentPlayEvents(20);
+    expect(activationFacts.filter((event) => event.type === "impression")).toHaveLength(2);
+    expect(activationFacts.filter((event) => event.type === "play_start")).toHaveLength(2);
 
     await sendFeedback(base, "complete", firstNow.track!.id);
     const afterFirstComplete = repo.getRecentPlayEvents(20);
@@ -186,13 +188,19 @@ describe("core feature integration", () => {
       ncmReachable: boolean;
       trackStatsCount: number;
       queueLength: number;
+      intelligencePolicy: { mode: string; version: string };
     };
     expect(status.runningRoot.length).toBeGreaterThan(0);
     expect(status.ncmReachable).toBe(true);
     expect(status.trackStatsCount).toBeGreaterThan(0);
     expect(status.queueLength).toBeGreaterThanOrEqual(0);
+    expect(status.intelligencePolicy).toMatchObject({ mode: "shadow", version: "listening-policy-v1" });
 
     const now = await requestNext(base);
+    const shadowStatus = (await (await fetch(`${base}/api/system/status`)).json()) as {
+      intelligencePolicy: { shadowSampleCount: number };
+    };
+    expect(shadowStatus.intelligencePolicy.shadowSampleCount).toBeGreaterThanOrEqual(1);
     const favoriteRes = await fetch(`${base}/api/favorites/${now.track!.id}`, {
       method: "PUT",
       headers: { "content-type": "application/json" },

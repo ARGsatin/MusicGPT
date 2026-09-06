@@ -11,11 +11,13 @@ import type {
 import aiDjAvatarUrl from "../assets/ai-dj-avatar.svg";
 import { ChatMemoryPanel } from "../ChatMemoryPanel";
 import { ChatStreamFeedbackNotice } from "../ChatStreamFeedbackNotice";
+import { MusicClarificationCard } from "./LearningControls";
 import type { ChatStreamFeedback } from "../chatStream";
+import type { PendingMusicClarification } from "../musicClarification";
 import type { RealtimeVoiceStatus } from "../realtimeVoice";
 import type { StreamingTextStore } from "../streamingTextStore";
 
-export type PanelTab = "chat" | "queue" | "plan";
+export type PanelTab = "chat" | "queue" | "plan" | "profile";
 
 interface ChatPanelProps {
   activeSpeechKey: string | undefined;
@@ -36,11 +38,15 @@ interface ChatPanelProps {
   memoryClearing: boolean;
   memoryError: string | null;
   memoryOpen: boolean;
+  musicClarification: PendingMusicClarification | null;
+  musicClarificationBusy: boolean;
+  musicClarificationError: string | null;
   messages: ChatMessage[];
   nowTitle: string;
   queue: RadioPlanItem[];
   queueError: string | null;
   planPanel: ReactNode;
+  profilePanel: ReactNode;
   queueLoadingTrackId: TrackReference | null;
   realtimeStatus: RealtimeVoiceStatus;
   realtimeStatusLabel: string;
@@ -52,11 +58,13 @@ interface ChatPanelProps {
   onChangeTone: (tone: DjSettings["tone"]) => void;
   onClearHistory: () => void;
   onClearMemories: () => void;
+  onCancelMusicClarification: () => void;
   onFeedbackContinue: () => void;
   onFeedbackRetry: () => void;
   onForgetMemory: (memory: ChatMemory) => void;
   onPlaySuggestion: (suggestion: NonNullable<ChatMessage["trackSuggestion"]>) => void;
   onPlayQueueTrack: (trackId: TrackReference) => void;
+  onSelectMusicClarification: (track: PendingMusicClarification["candidates"][number]) => void;
   onQuickPrompt: (prompt: string) => void;
   onReplayDj: () => void;
   onSpeakMessage: (message: ChatMessage) => void;
@@ -380,6 +388,15 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
           >
             今日计划
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "profile"}
+            className={activeTab === "profile" ? "panel-tab is-active" : "panel-tab"}
+            onClick={() => onChangeTab("profile")}
+          >
+            音乐画像
+          </button>
         </div>
         {activeTab === "chat" ? (
           <div className="panel-tools">
@@ -436,6 +453,16 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
               onClear={props.onClearMemories}
             />
           </div>
+
+          {props.musicClarification ? (
+            <MusicClarificationCard
+              busy={props.musicClarificationBusy}
+              clarification={props.musicClarification}
+              error={props.musicClarificationError}
+              onCancel={props.onCancelMusicClarification}
+              onSelect={props.onSelectMusicClarification}
+            />
+          ) : null}
 
           <MessageList
             activeSpeechKey={props.activeSpeechKey}
@@ -519,8 +546,10 @@ export const ChatPanel = memo(function ChatPanel(props: ChatPanelProps) {
             queue={queue}
           />
         </>
-      ) : (
+      ) : activeTab === "plan" ? (
         props.planPanel
+      ) : (
+        props.profilePanel
       )}
     </aside>
   );

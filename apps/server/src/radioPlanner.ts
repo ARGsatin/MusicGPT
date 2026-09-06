@@ -1,21 +1,26 @@
 import { currentPeriod } from "./time.js";
 import { inferTrackTags, periodLabel, primaryStyle, weatherLabel } from "./trackTags.js";
 import { isEligibleRecommendationTrack } from "./recommendationQuality.js";
-import { getTrackKey, normalizeTrackReference } from "./musicCatalog.js";
+import { getTrackKey, normalizeTrackIdentity, normalizeTrackReference } from "./musicCatalog.js";
 
 import type {
   DayPeriod,
   EnvironmentContext,
+  IntelligencePolicyMode,
+  ListeningConstraint,
   MoodTag,
   MusicTag,
   PlayEvent,
   RadioPlanItem,
   RecommendationCandidate,
   RecommendationSource,
+  TasteManualRules,
   TasteProfile,
   Track,
   TrackStat
 } from "@musicgpt/shared";
+import { ListeningPolicy, satisfiesListeningConstraints } from "./listeningPolicy.js";
+import type { RankedDecision } from "./listeningPolicy.js";
 
 interface PlanOptions {
   windowSize?: number;
@@ -24,6 +29,12 @@ interface PlanOptions {
   candidates?: RecommendationCandidate[];
   contextTags?: MusicTag[];
   allowAmbient?: boolean;
+  rules?: TasteManualRules;
+  sessionId?: string;
+  policyMode?: IntelligencePolicyMode;
+  constraints?: ListeningConstraint[];
+  onPolicyError?: (error: unknown) => void;
+  onShadowRanking?: (decisions: RankedDecision[]) => void;
 }
 
 interface ScoredItem extends RadioPlanItem {
@@ -32,7 +43,10 @@ interface ScoredItem extends RadioPlanItem {
 }
 
 export class RadioPlanner {
-  constructor(private readonly random: () => number = Math.random) {}
+  constructor(
+    private readonly random: () => number = Math.random,
+    private readonly listeningPolicy = new ListeningPolicy()
+  ) {}
 
   plan(
     stats: TrackStat[],
@@ -42,75 +56,175 @@ export class RadioPlanner {
   ): RadioPlanItem[] {
     const nowPeriod = options.environment?.dayPeriod ?? currentPeriod();
     const windowSize = options.windowSize ?? 10;
-    const feedbackByTrack = buildFeedbackSignals([
+    const contextTags = options.contextTags ?? [];
+    const policyMode = options.policyMode ?? "adaptive";
+    const activeRules = options.rules ?? EMPTY_RULES;
+    const candidateVariants = (options.candidates ?? []).map((candidate) => ({
+      ...candidate,
+      track: {
+        ...candidate.track,
+        tags: [...(candidate.track.tags ?? []), ...candidate.tags]
+      }
+    }));
+    const allVariantTracks = [
+      ...stats.map((entry) => entry.track),
+      ...candidateVariants.map((candidate) => candidate.track)
+    ];
+    const blockedRecordingKeys = new Set(
+      allVariantTracks
+        .filter((track) => isManuallyBlocked(track, activeRules))
+        .map(recordingKeyFor)
+    );
+    const isBlockedRecording = (track: Track): boolean =>
+      blockedRecordingKeys.has(recordingKeyFor(track));
+    const recordingKeyByTrackKey = new Map(
+      allVariantTracks.map((track) => [getTrackKey(track), recordingKeyFor(track)])
+    );
+    const recordingKeyForEvent = (event: PlayEvent): string =>
+      event.recordingKey ??
+      recordingKeyByTrackKey.get(normalizeTrackReference(event.trackId)) ??
+      normalizeTrackReference(event.trackId);
+    const knownTrackKeys = new Set(stats.map((entry) => getTrackKey(entry.track)));
+    const knownRecordings = new Set(stats.map((entry) => recordingKeyFor(entry.track)));
+    const feedbackByRecording = buildFeedbackSignals([
       ...events,
       ...stats.flatMap((entry): PlayEvent[] => entry.localFavoritedAt
-        ? [{ type: "like", trackId: entry.track.id, at: entry.localFavoritedAt }]
+        ? [{
+            type: "like",
+            trackId: getTrackKey(entry.track),
+            recordingKey: recordingKeyFor(entry.track),
+            at: entry.localFavoritedAt
+          }]
         : [])
-    ]);
-    const recentPlayIds = new Set(
-      events.slice(0, 20).map((event) => normalizeTrackReference(event.trackId))
-    );
+    ], recordingKeyForEvent);
+    const recentRecordingKeys = new Set(events
+      .slice(0, 20)
+      .filter((event) => event.type !== "playback_error")
+      .map(recordingKeyForEvent));
+    const recentFailedTrackKeys = new Set(events
+      .slice(0, 20)
+      .filter((event) => event.type === "playback_error")
+      .map((event) => normalizeTrackReference(event.trackId)));
+    const wasRecentlyPlayed = (track: Track): boolean =>
+      recentRecordingKeys.has(recordingKeyFor(track)) || recentFailedTrackKeys.has(getTrackKey(track));
     const maxPlayCount = stats.reduce((max, item) => Math.max(max, item.playCount), 1);
     const periodWeights = this.periodWeightLookup(profile.favoritePeriods);
     const profileTagWeights = new Map(
       profile.preferenceTags.map((tag) => [`${tag.category}:${tag.value.toLowerCase()}`, tag.weight])
     );
-    const contextTags = options.contextTags ?? [];
-
-    const familiar = stats
+    const legacyFamiliar = dedupeScoredRecordings(stats
+      .filter((entry) => satisfiesListeningConstraints(entry.track, options.constraints))
       .filter((entry) => isEligibleRecommendationTrack(entry.track, options.allowAmbient))
-      .filter((entry) => !feedbackByTrack.get(getTrackKey(entry.track))?.hidden)
-      .map((entry) =>
-        this.scoreTrack({
-          track: entry.track,
-          bucket: "familiar",
-          source: "library",
-          profileTagWeights,
-          contextTags,
-          environment: options.environment,
-          desiredMood: options.desiredMood,
-          nowPeriod,
-          periodWeights,
-          familiarScore:
-            (entry.localFavoritedAt ? 1 : 0) * 0.55 +
-            normalize(entry.playCount, maxPlayCount) * 0.45,
-          relevanceScore: 0,
-          feedbackMultiplier: feedbackByTrack.get(getTrackKey(entry.track))?.multiplier ?? 1,
-          recentlyPlayed: recentPlayIds.has(getTrackKey(entry.track))
-        })
-      );
-
-    const knownIds = new Set(stats.map((entry) => getTrackKey(entry.track)));
-    const explore = (options.candidates ?? [])
-      .filter((candidate) => !knownIds.has(getTrackKey(candidate.track)))
-      .filter((candidate) => !feedbackByTrack.get(getTrackKey(candidate.track))?.hidden)
+      .filter((entry) => !isBlockedRecording(entry.track))
+      .filter((entry) => !feedbackByRecording.get(recordingKeyFor(entry.track))?.hidden)
+      .map((entry) => applyManualRuleWeight(this.scoreTrack({
+        track: entry.track,
+        bucket: "familiar",
+        source: "library",
+        profileTagWeights,
+        contextTags,
+        environment: options.environment,
+        desiredMood: options.desiredMood,
+        nowPeriod,
+        periodWeights,
+        familiarScore: (entry.localFavoritedAt ? 1 : 0) * 0.55 + normalize(entry.playCount, maxPlayCount) * 0.45,
+        relevanceScore: 0,
+        feedbackMultiplier: feedbackByRecording.get(recordingKeyFor(entry.track))?.multiplier ?? 1,
+        recentlyPlayed: wasRecentlyPlayed(entry.track)
+      }), activeRules)));
+    const legacyExplore = dedupeScoredRecordings(candidateVariants
+      .filter((entry) => satisfiesListeningConstraints(entry.track, options.constraints))
+      .filter((candidate) => !knownRecordings.has(recordingKeyFor(candidate.track)))
+      .filter((candidate) => !feedbackByRecording.get(recordingKeyFor(candidate.track))?.hidden)
+      .filter((candidate) => !isBlockedRecording(candidate.track))
       .filter((candidate) => candidate.relevanceScore >= 0.6)
       .filter((candidate) => isEligibleRecommendationTrack(candidate.track, options.allowAmbient))
-      .map((candidate) =>
-        this.scoreTrack({
-          track: { ...candidate.track, tags: candidate.tags },
-          bucket: "explore",
-          source: candidate.source,
-          profileTagWeights,
-          contextTags,
-          environment: options.environment,
-          desiredMood: options.desiredMood,
-          nowPeriod,
-          periodWeights,
-          familiarScore: 0,
-          relevanceScore: candidate.relevanceScore,
-          feedbackMultiplier: feedbackByTrack.get(getTrackKey(candidate.track))?.multiplier ?? 1,
-          recentlyPlayed: recentPlayIds.has(getTrackKey(candidate.track))
-        })
-      )
-      .filter((item) => item.source === "ncm_daily" || item.score >= 0.35);
+      .map((candidate) => applyManualRuleWeight(this.scoreTrack({
+        track: candidate.track,
+        bucket: "explore",
+        source: candidate.source,
+        profileTagWeights,
+        contextTags,
+        environment: options.environment,
+        desiredMood: options.desiredMood,
+        nowPeriod,
+        periodWeights,
+        familiarScore: 0,
+        relevanceScore: candidate.relevanceScore,
+        feedbackMultiplier: feedbackByRecording.get(recordingKeyFor(candidate.track))?.multiplier ?? 1,
+        recentlyPlayed: wasRecentlyPlayed(candidate.track)
+      }), activeRules))
+      .filter((item) => item.source === "ncm_daily" || item.score >= 0.35));
+    const qualifiedCandidates = candidateVariants
+      .filter((candidate) => !knownTrackKeys.has(getTrackKey(candidate.track)))
+      .filter((candidate) => !isBlockedRecording(candidate.track))
+      .filter((candidate) => candidate.relevanceScore >= (candidate.source === "ncm_daily" ? 0.6 : 0.65));
+    let effectivePolicyMode = policyMode;
+    let decisions = [] as ReturnType<ListeningPolicy["rank"]>;
+    if (policyMode !== "legacy") {
+      try {
+        decisions = this.listeningPolicy.rank({
+          stats: stats.filter((entry) => !isBlockedRecording(entry.track)),
+          candidates: qualifiedCandidates,
+          profile,
+          rules: activeRules,
+          events,
+          ...(options.allowAmbient !== undefined ? { allowAmbient: options.allowAmbient } : {}),
+          random: this.random,
+          context: {
+            constraints: options.constraints ?? [],
+            period: nowPeriod,
+            ...(options.environment ? { weather: options.environment.weather } : {}),
+            ...(options.desiredMood ? { desiredMood: options.desiredMood } : {}),
+            ...(contextTags.length > 0 ? { contextTags } : {}),
+            ...(options.sessionId ? { sessionId: options.sessionId } : {})
+          }
+        });
+      } catch (error) {
+        effectivePolicyMode = "legacy";
+        options.onPolicyError?.(error);
+      }
+    }
+    if (policyMode === "shadow") {
+      options.onShadowRanking?.(decisions);
+    }
+    const policyScored = decisions.map((decision): ScoredItem => {
+      const bucket = knownRecordings.has(decision.recordingKey) ? "familiar" : "explore";
+      const contextReason = options.environment
+        ? [
+            options.environment.weather === "unknown" ? undefined : weatherLabel(options.environment.weather),
+            periodLabel(nowPeriod)
+          ].filter(Boolean).join(" + ")
+        : periodLabel(nowPeriod);
+      const sourceReason = bucket === "explore"
+        ? `探索新风格 · ${sourceLabel(decision.source)}`
+        : "熟悉偏好";
+      return {
+        track: { ...decision.track, tags: inferTrackTags(decision.track) },
+        score: decision.score,
+        reason: `${contextReason} + ${sourceReason}`,
+        bucket,
+        source: decision.source,
+        decisionId: decision.decisionId,
+        evidence: decision.evidence,
+        policyVersion: decision.policyVersion
+      };
+    });
+    const hasTargetingContext = Boolean(options.environment || options.desiredMood || contextTags.length > 0);
+    const familiar = effectivePolicyMode === "adaptive"
+      ? policyScored.filter((item) => item.bucket === "familiar")
+      : legacyFamiliar;
+    const explore = effectivePolicyMode === "adaptive"
+      ? policyScored.filter((item) =>
+          item.bucket === "explore" && (item.source === "ncm_daily" || hasTargetingContext)
+        )
+      : legacyExplore;
 
     familiar.sort((left, right) => right.score - left.score);
     explore.sort((left, right) => right.score - left.score);
 
     const output: ScoredItem[] = [];
-    const selectedIds = new Set<string>();
+    const selectedRecordingKeys = new Set<string>();
     const normalExploreLimit = Math.floor(windowSize * 0.2);
     const bootstrap = familiar.length < windowSize - normalExploreLimit;
     const dailyExplore = explore.filter((item) => item.source === "ncm_daily");
@@ -121,20 +235,20 @@ export class RadioPlanner {
       : explore.slice(0, normalExploreLimit);
 
     if (bootstrap) {
-      appendDiverse(familiar, output, selectedIds, windowSize);
-      appendDiverse(allowedExplore, output, selectedIds, windowSize);
+      appendDiverse(familiar, output, selectedRecordingKeys, windowSize);
+      appendDiverse(allowedExplore, output, selectedRecordingKeys, windowSize);
     } else {
       for (let index = 0; index < windowSize; index += 1) {
         const scheduledExplore = (index + 1) % 5 === 0;
         const primary = scheduledExplore ? allowedExplore : familiar;
         const fallback = scheduledExplore ? familiar : undefined;
-        const picked = pickDiverse(primary, output, selectedIds) ??
-          (fallback ? pickDiverse(fallback, output, selectedIds) : undefined);
+        const picked = pickDiverse(primary, output, selectedRecordingKeys) ??
+          (fallback ? pickDiverse(fallback, output, selectedRecordingKeys) : undefined);
         if (!picked) {
           break;
         }
         output.push(picked);
-        selectedIds.add(getTrackKey(picked.track));
+        selectedRecordingKeys.add(recordingKeyFor(picked.track));
       }
     }
     return output;
@@ -211,6 +325,51 @@ export class RadioPlanner {
   }
 }
 
+const EMPTY_RULES: TasteManualRules = {
+  artistWeights: {},
+  tagWeights: {},
+  blockedArtists: [],
+  blockedTags: []
+};
+
+function isManuallyBlocked(track: Track, rules: TasteManualRules): boolean {
+  const artists = new Set(rules.blockedArtists.map((artist) => artist.toLowerCase()));
+  if (track.artists.some((artist) => artists.has(artist.toLowerCase()))) return true;
+  const blockedTags = new Set(rules.blockedTags.map((tag) => tag.toLowerCase()));
+  return manualRuleTags(track).some((tag) =>
+    blockedTags.has(tag.value.toLowerCase()) ||
+    blockedTags.has(`${tag.category}:${tag.value}`.toLowerCase())
+  );
+}
+
+function manualRuleTags(track: Track): MusicTag[] {
+  return [
+    ...inferTrackTags(track),
+    ...(track.tagEvidence ?? [])
+      .filter((tag) => tag.confidence >= 0.55)
+      .map(({ category, value }) => ({ category, value }))
+  ];
+}
+
+function applyManualRuleWeight(item: ScoredItem, rules: TasteManualRules): ScoredItem {
+  let multiplier = 1;
+  for (const artist of item.track.artists) {
+    const configured = Object.entries(rules.artistWeights)
+      .find(([key]) => key.toLowerCase() === artist.toLowerCase())?.[1];
+    multiplier *= configured ?? 1;
+  }
+  const uniqueTags = new Map(inferTrackTags(item.track).map((tag) => [
+    `${tag.category}:${tag.value.toLowerCase()}`,
+    tag
+  ]));
+  for (const tag of uniqueTags.values()) {
+    multiplier *= rules.tagWeights[`${tag.category}:${tag.value}`] ??
+      rules.tagWeights[`${tag.category}:${tag.value.toLowerCase()}`] ??
+      rules.tagWeights[tag.value] ?? 1;
+  }
+  return { ...item, score: Number((item.score * multiplier).toFixed(4)) };
+}
+
 function calculateContextScore(
   track: Track,
   tags: MusicTag[],
@@ -246,14 +405,26 @@ function environmentPeriodScore(track: Track, nowPeriod: DayPeriod): number {
 function pickDiverse(
   pool: ScoredItem[],
   output: ScoredItem[],
-  selectedIds: Set<string>
+  selectedRecordingKeys: Set<string>
 ): ScoredItem | undefined {
-  const candidates = pool.filter((item) => !selectedIds.has(getTrackKey(item.track)));
+  const candidates = pool.filter((item) => !selectedRecordingKeys.has(recordingKeyFor(item.track)));
   return (
     candidates.find((item) => respectsArtist(item, output) && respectsStyleWindow(item, output)) ??
     candidates.find((item) => respectsArtist(item, output)) ??
     candidates[0]
   );
+}
+
+function dedupeScoredRecordings(items: ScoredItem[]): ScoredItem[] {
+  const bestByRecording = new Map<string, ScoredItem>();
+  for (const item of items) {
+    const recordingKey = recordingKeyFor(item.track);
+    const current = bestByRecording.get(recordingKey);
+    if (!current || item.score > current.score) {
+      bestByRecording.set(recordingKey, item);
+    }
+  }
+  return [...bestByRecording.values()];
 }
 
 function respectsArtist(item: ScoredItem, output: ScoredItem[]): boolean {
@@ -300,20 +471,27 @@ function sourceLabel(source: RecommendationSource): string {
 function appendDiverse(
   pool: ScoredItem[],
   output: ScoredItem[],
-  selectedIds: Set<string>,
+  selectedRecordingKeys: Set<string>,
   limit: number
 ): void {
   while (output.length < limit) {
-    const picked = pickDiverse(pool, output, selectedIds);
+    const picked = pickDiverse(pool, output, selectedRecordingKeys);
     if (!picked) {
       return;
     }
     output.push(picked);
-    selectedIds.add(getTrackKey(picked.track));
+    selectedRecordingKeys.add(recordingKeyFor(picked.track));
   }
 }
 
-function buildFeedbackSignals(events: PlayEvent[]): Map<string, { hidden: boolean; multiplier: number }> {
+function recordingKeyFor(track: Track): string {
+  return normalizeTrackIdentity(track).recordingKey!;
+}
+
+function buildFeedbackSignals(
+  events: PlayEvent[],
+  recordingKeyForEvent: (event: PlayEvent) => string
+): Map<string, { hidden: boolean; multiplier: number }> {
   const now = Date.now();
   const ninetyDaysAgo = now - 90 * 24 * 60 * 60 * 1000;
   const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
@@ -323,10 +501,10 @@ function buildFeedbackSignals(events: PlayEvent[]): Map<string, { hidden: boolea
     if (!Number.isFinite(at) || at < ninetyDaysAgo) {
       continue;
     }
-    const trackKey = normalizeTrackReference(event.trackId);
-    const trackEvents = grouped.get(trackKey) ?? [];
+    const recordingKey = recordingKeyForEvent(event);
+    const trackEvents = grouped.get(recordingKey) ?? [];
     trackEvents.push(event);
-    grouped.set(trackKey, trackEvents);
+    grouped.set(recordingKey, trackEvents);
   }
 
   const result = new Map<string, { hidden: boolean; multiplier: number }>();

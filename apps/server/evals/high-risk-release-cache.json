@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 2,
+  "evaluatorVersion": "isolated-music-command-v6",
+  "corpusHash": "1cb3be907c737fb52307b76a697180dbdfea6557290e78a4b65e1bb4f3fe6750",
+  "channelSet": [
+    "text",
+    "voice"
+  ],
+  "policyVersion": "listening-policy-v1",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
+  "generatedAt": "2026-09-06T09:36:22.616Z",
+  "source": "live-isolated-text-and-voice-music-command-evaluation",
+  "modelPlanExecutions": 25,
+  "commandChannelExecutions": 50,
+  "results": [
+    {
+      "caseId": "cmd-009",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-012",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-015",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-016",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-021",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-025",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-026",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-029",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-035",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "cmd-040",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-003",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-010",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-013",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-014",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-016",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-019",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ref-030",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "fix-001",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "fix-003",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "fix-006",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "fix-018",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ctx-017",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "ctx-021",
+      "status": "failed",
+      "actionMatches": false,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": false,
+      "voicePassed": false,
+      "channelConsistent": true,
+      "errorCode": "outcome_mismatch",
+      "errorCodes": [
+        "outcome_mismatch"
+      ]
+    },
+    {
+      "caseId": "src-006",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    },
+    {
+      "caseId": "src-017",
+      "status": "passed",
+      "actionMatches": true,
+      "seamMatches": true,
+      "unsafeAction": false,
+      "textPassed": true,
+      "voicePassed": true,
+      "channelConsistent": true
+    }
+  ]
+}

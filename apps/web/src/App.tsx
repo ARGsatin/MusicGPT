@@ -6,10 +6,15 @@ import type {
   ChatStreamEvent,
   DjSettings,
   EnvironmentContext,
+  FeedbackReason,
+  IntelligencePolicyStatus,
+  LearningReceipt,
   NowPlayingState,
+  PlaybackOutcomeRequest,
   RadioPlanItem,
   SystemStatus,
-  TasteProfile,
+  TasteResponse,
+  TasteSignal,
   TrackReference,
   WsPayload
 } from "@musicgpt/shared";
@@ -23,10 +28,13 @@ import {
   fetchChatMemories,
   fetchChatHistory,
   fetchNowPlaying,
+  fetchDailyPlan,
+  fetchMusicSources,
   fetchSystemStatus,
   fetchTaste,
   importRecommendations,
   importFromNcm,
+  mutateTasteSignal,
   playSuggestedTrack,
   playQueuedTrack,
   requestNext,
@@ -36,6 +44,9 @@ import {
   sendChat,
   sendChatStream,
   sendFeedback,
+  submitPlaybackOutcome,
+  submitPlaybackOutcomeBeacon,
+  undoLearning,
   updateDjSettings,
   updateEnvironmentLocation,
   startVoiceTurn
@@ -45,6 +56,13 @@ import { ChatPanel, type PanelTab } from "./components/ChatPanel";
 import { DailyPlanPanel } from "./components/DailyPlanPanel";
 import { SignalTicker, StatusRibbon } from "./components/StatusRibbon";
 import { TurntableStage } from "./components/TurntableStage";
+import {
+  LearningReceiptNotice,
+  MusicTastePanel,
+  ProactiveDjCard,
+  type ProactiveReminder,
+  type TasteSignalAction
+} from "./components/LearningControls";
 import { settleChatStreamFailure, type ChatStreamFeedback } from "./chatStream";
 import { createStreamingTextStore } from "./streamingTextStore";
 import {
@@ -53,6 +71,21 @@ import {
 } from "./realtimeVoice";
 import { useWsStream } from "./useWsStream";
 import { loadAutoSpeak, saveAutoSpeak } from "./speech";
+import { createPlaybackOutcomeReporter } from "./playbackOutcomeReporter";
+import {
+  outcomeFromSnapshot,
+  runAfterPlaybackFinalized,
+  snapshotForNowTransition,
+  type ActivePlaybackSnapshot
+} from "./playbackLifecycle";
+import { announceFullStateRestore, selectFulfilledRestoreState } from "./stateRestore";
+import { canShowProactiveReminder, EARLY_SKIP_REMINDER, registerEarlySkip } from "./proactiveDj";
+import {
+  buildConfirmationRequest,
+  pendingClarificationFromResult,
+  type PendingMusicClarification
+} from "./musicClarification";
+import { buildTeachingFeedback } from "./teachingFeedback";
 
 const DEFAULT_DJ_SETTINGS: DjSettings = {
   tone: "lively",
@@ -130,7 +163,7 @@ type MobileView = "stage" | "panel";
 
 export default function App() {
   const [now, setNow] = useState<NowPlayingState>({ queue: [], paused: false });
-  const [taste, setTaste] = useState<TasteProfile | null>(null);
+  const [taste, setTaste] = useState<TasteResponse | null>(null);
   const [environment, setEnvironment] = useState<EnvironmentContext | null>(null);
   const [djSettings, setDjSettings] = useState<DjSettings>(DEFAULT_DJ_SETTINGS);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
@@ -164,7 +197,14 @@ export default function App() {
   const [v15Error, setV15Error] = useState<string | null>(null);
   const [panelTab, setPanelTab] = useState<PanelTab>("chat");
   const [mobileView, setMobileView] = useState<MobileView>("stage");
+  const [learningReceipt, setLearningReceipt] = useState<LearningReceipt | null>(null);
+  const [learningBusy, setLearningBusy] = useState(false);
+  const [proactiveReminder, setProactiveReminder] = useState<ProactiveReminder | null>(null);
+  const [musicClarification, setMusicClarification] = useState<PendingMusicClarification | null>(null);
+  const [musicClarificationBusy, setMusicClarificationBusy] = useState(false);
+  const [musicClarificationError, setMusicClarificationError] = useState<string | null>(null);
   const currentTrackRef = useRef<NowPlayingState["track"]>(undefined);
+  const nowRef = useRef(now);
   const advanceInFlightRef = useRef(false);
   const speechAudioRef = useRef<HTMLAudioElement>(null);
   const realtimeVoiceRef = useRef<RealtimeVoiceController | null>(null);
@@ -173,7 +213,23 @@ export default function App() {
   const activeChatStreamRef = useRef<ActiveChatStream | null>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const autoSpeakRef = useRef(autoSpeak);
+  const proactiveLastShownAtRef = useRef(0);
+  const previousPeriodRef = useRef<EnvironmentContext["dayPeriod"] | undefined>(undefined);
+  const earlySkipTimesRef = useRef<number[]>([]);
+  const lastReceiptIdRef = useRef<string | undefined>(undefined);
+  const activePlaybackRef = useRef<ActivePlaybackSnapshot | undefined>(undefined);
+  const expectedPlaybackIdRef = useRef<string | undefined>(undefined);
+  const outcomeReporterRef = useRef(createPlaybackOutcomeReporter((request) =>
+    submitPlaybackOutcome(request, { keepalive: true })
+  ));
   const [streamingTextStore] = useState(createStreamingTextStore);
+
+  const applyNowState = useCallback((next: NowPlayingState) => {
+    const snapshot = snapshotForNowTransition(activePlaybackRef.current, next);
+    expectedPlaybackIdRef.current = next.playbackId;
+    activePlaybackRef.current = snapshot;
+    setNow(next);
+  }, []);
 
   const refresh = useCallback(async () => {
     const [
@@ -193,17 +249,160 @@ export default function App() {
       fetchEnvironment().catch(() => null),
       fetchDjSettings().catch(() => DEFAULT_DJ_SETTINGS)
     ]);
-    setNow(nowState);
+    applyNowState(nowState);
     setTaste(tasteProfile);
     setSystemStatus(status);
     setMessages(chatHistory);
     setChatMemories(memories);
     setEnvironment(environmentContext);
     setDjSettings(settings);
-  }, []);
+  }, [applyNowState]);
 
   const refreshTaste = useCallback(async () => {
     setTaste(await fetchTaste());
+  }, []);
+
+  const restoreFullState = useCallback(async () => {
+    const [nextNow, nextTaste, nextStatus, musicSources, dailyPlan] = await Promise.allSettled([
+      fetchNowPlaying(),
+      fetchTaste(),
+      fetchSystemStatus(),
+      fetchMusicSources(),
+      fetchDailyPlan()
+    ]);
+    const restored = selectFulfilledRestoreState({
+      now: nextNow,
+      taste: nextTaste,
+      systemStatus: nextStatus,
+      musicSources,
+      dailyPlan
+    });
+    if ("now" in restored) applyNowState(restored.now!);
+    if ("taste" in restored) setTaste(restored.taste ?? null);
+    if (restored.systemStatus) {
+      setSystemStatus(restored.systemStatus);
+      if (restored.systemStatus.environment) setEnvironment(restored.systemStatus.environment);
+      if (restored.systemStatus.djSettings) setDjSettings(restored.systemStatus.djSettings);
+    }
+    announceFullStateRestore(restored.detail);
+  }, [applyNowState]);
+
+  const pushProactiveReminder = useCallback((
+    message: string,
+    kind: ProactiveReminder["kind"],
+    bypassCooldown = false
+  ) => {
+    const at = Date.now();
+    const controller = realtimeVoiceRef.current;
+    const voiceStatus = controller?.status;
+    const conversationBusy = Boolean(activeChatStreamRef.current) ||
+      voiceStatus === "listening" || voiceStatus === "thinking" || voiceStatus === "speaking";
+    if (conversationBusy && !bypassCooldown) return;
+    if (!canShowProactiveReminder(proactiveLastShownAtRef.current, at, bypassCooldown)) return;
+    if (!bypassCooldown) proactiveLastShownAtRef.current = at;
+    const reminder: ProactiveReminder = {
+      id: `${kind}-${at}`,
+      message,
+      kind,
+      createdAt: new Date(at).toISOString()
+    };
+    setProactiveReminder(reminder);
+
+    if (autoSpeakRef.current && controller?.connected && !conversationBusy) {
+      void controller.speakText(message, `proactive:${reminder.id}`).catch(() => undefined);
+    }
+  }, []);
+
+  const acceptLearningReceipt = useCallback((receipt: LearningReceipt) => {
+    if (lastReceiptIdRef.current === receipt.receiptId) return;
+    lastReceiptIdRef.current = receipt.receiptId;
+    setLearningReceipt(receipt);
+    if (/^已撤销/u.test(receipt.summary.trim())) {
+      pushProactiveReminder(
+        receipt.appliedMode === "shadow_only"
+          ? `新策略画像已恢复：${receipt.summary}${receipt.replacedQueueCount > 0
+              ? `；既有排序同步调整 ${receipt.replacedQueueCount} 首`
+              : ""}`
+          : receipt.appliedMode === "legacy_only"
+            ? `学习记录已恢复：${receipt.summary}${receipt.replacedQueueCount > 0
+                ? `；旧策略同步调整 ${receipt.replacedQueueCount} 首`
+                : ""}`
+          : receipt.summary,
+        "preference",
+        true
+      );
+      return;
+    }
+    if (receipt.appliedMode === "shadow_only") {
+      if (receipt.replacedQueueCount >= 3) {
+        pushProactiveReminder(
+          `这次纠正已进入新策略验证；既有排序已实际替换后续 ${receipt.replacedQueueCount} 首，新策略尚未接管。`,
+          "queue_change",
+          true
+        );
+      } else if (receipt.scope === "long_term" && receipt.changedSignals.length > 0) {
+        pushProactiveReminder("新的长期音乐偏好已记录，正在影子验证，当前播放排序没有切换。", "preference", true);
+      }
+      return;
+    }
+    if (receipt.appliedMode === "legacy_only") {
+      if (receipt.replacedQueueCount >= 3) {
+        pushProactiveReminder(
+          `偏好已保存但新画像尚未参与排序；legacy 旧策略已实际替换后续 ${receipt.replacedQueueCount} 首。`,
+          "queue_change",
+          true
+        );
+      } else if (receipt.scope === "long_term" && receipt.changedSignals.length > 0) {
+        pushProactiveReminder("新的长期音乐偏好已保存；当前是 legacy 模式，新画像尚未参与播放排序。", "preference", true);
+      }
+      return;
+    }
+    if (receipt.replacedQueueCount >= 3) {
+      pushProactiveReminder(
+        `我根据刚学到的偏好调整了后续队列，共替换 ${receipt.replacedQueueCount} 首；当前这首没有动。`,
+        "queue_change",
+        true
+      );
+    } else if (receipt.scope === "long_term" && receipt.changedSignals.length > 0) {
+      pushProactiveReminder(`新的长期音乐偏好已生效：${receipt.summary}`, "preference", true);
+    }
+  }, [pushProactiveReminder]);
+
+  const onPlaybackOutcome = useCallback(async (
+    request: PlaybackOutcomeRequest,
+    options?: { pageLeaving?: boolean }
+  ) => {
+    if (options?.pageLeaving && outcomeReporterRef.current.reportBeacon(request, submitPlaybackOutcomeBeacon)) {
+      return;
+    }
+    const result = await outcomeReporterRef.current.report(request);
+    if (result.learningReceipt) acceptLearningReceipt(result.learningReceipt);
+    if (request.outcome === "skipped") {
+      const nowMs = Date.now();
+      const earlySkip = registerEarlySkip(
+        earlySkipTimesRef.current,
+        nowMs,
+        request.listenedMs,
+        request.durationMs
+      );
+      earlySkipTimesRef.current = earlySkip.times;
+      if (earlySkip.trigger) {
+        pushProactiveReminder(EARLY_SKIP_REMINDER, "early_skips");
+        earlySkipTimesRef.current = [];
+      }
+    }
+    await refreshTaste().catch(() => undefined);
+  }, [acceptLearningReceipt, pushProactiveReminder, refreshTaste]);
+
+  const finalizeActivePlaybackAsSkipped = useCallback(async () => {
+    const snapshot = activePlaybackRef.current;
+    if (!snapshot) return;
+    await onPlaybackOutcome(outcomeFromSnapshot(snapshot, "skipped"));
+  }, [onPlaybackOutcome]);
+
+  const onPlaybackProgress = useCallback((snapshot: ActivePlaybackSnapshot | undefined) => {
+    if (snapshot?.playbackId !== expectedPlaybackIdRef.current) return;
+    activePlaybackRef.current = snapshot;
   }, []);
 
   useEffect(() => {
@@ -212,7 +411,21 @@ export default function App() {
 
   useEffect(() => {
     currentTrackRef.current = now.track;
+    nowRef.current = now;
   }, [now.track]);
+
+  useEffect(() => {
+    nowRef.current = now;
+  }, [now]);
+
+  useEffect(() => {
+    const period = environment?.dayPeriod;
+    const previous = previousPeriodRef.current;
+    previousPeriodRef.current = period;
+    if (period && previous && period !== previous) {
+      pushProactiveReminder(`已经进入${PERIOD_LABELS[period] ?? period}时段，我会按新的时段目标调整后续歌曲。`, "period");
+    }
+  }, [environment?.dayPeriod, pushProactiveReminder]);
 
   useEffect(() => {
     const audio = speechAudioRef.current;
@@ -293,7 +506,8 @@ export default function App() {
           ...(call.confirmationToken ? { confirmationToken: call.confirmationToken } : {}),
           ...(call.selectedTrackId !== undefined ? { selectedTrackId: call.selectedTrackId } : {})
         });
-        setNow(response.now);
+        applyNowState(response.now);
+        if (response.learningReceipt) acceptLearningReceipt(response.learningReceipt);
         await refreshTaste().catch(() => undefined);
         return {
           action: response.action,
@@ -317,7 +531,7 @@ export default function App() {
       onLegacyMusicCommand: async (request) => {
         const response = await sendChat(request);
         setMessages(response.messages);
-        setNow(response.now);
+        applyNowState(response.now);
         return { action: response.action, summary: response.reply, now: response.now };
       }
     });
@@ -327,7 +541,7 @@ export default function App() {
       controller.stop();
       realtimeVoiceRef.current = null;
     };
-  }, [refreshTaste]);
+  }, [acceptLearningReceipt, applyNowState, refreshTaste]);
 
   useEffect(() => {
     autoSpeakRef.current = autoSpeak;
@@ -411,7 +625,7 @@ export default function App() {
   const onWsPayload = useCallback(
     (payload: WsPayload) => {
       if (payload.event === "now_playing_updated") {
-        setNow(payload.data as NowPlayingState);
+        applyNowState(payload.data as NowPlayingState);
       } else if (payload.event === "queue_updated") {
         setNow((current) => ({ ...current, queue: payload.data as NowPlayingState["queue"] }));
       } else if (payload.event === "dj_script_ready") {
@@ -447,12 +661,35 @@ export default function App() {
           if (Array.isArray(data.messages)) setMessages(data.messages);
           void realtimeVoiceRef.current?.refreshContext().catch(() => undefined);
         }
+      } else if (payload.event === "music_sources_updated" || payload.event === "daily_plan_updated") {
+        void restoreFullState().catch(() => undefined);
+      } else if (payload.event === "taste_updated") {
+        const data = payload.data as TasteResponse | null;
+        if (data && typeof data === "object" && "generatedAt" in data) setTaste(data);
+        else void refreshTaste().catch(() => undefined);
+      } else if (payload.event === "learning_receipt") {
+        acceptLearningReceipt(payload.data as LearningReceipt);
+      } else if (payload.event === "session_intent_updated") {
+        const intent = payload.data as { value?: unknown; scope?: unknown };
+        if (typeof intent.value === "string") {
+          pushProactiveReminder(
+            `后续队列已按“${intent.value}”调整${intent.scope === "day" ? "，今天有效" : "，当前会话有效"}。`,
+            "session_intent"
+          );
+        }
+      } else if (payload.event === "policy_status") {
+        const policy = payload.data as IntelligencePolicyStatus;
+        setSystemStatus((current) => current ? { ...current, intelligencePolicy: policy } : current);
       }
     },
-    [playDjScript]
+    [acceptLearningReceipt, applyNowState, playDjScript, pushProactiveReminder, refreshTaste, restoreFullState]
   );
 
-  useWsStream(onWsPayload);
+  const onWsReconnected = useCallback(() => {
+    void restoreFullState().catch(() => undefined);
+  }, [restoreFullState]);
+
+  useWsStream(onWsPayload, onWsReconnected);
 
   const submitChat = async (rawMessage: string) => {
     if (chatLoading) {
@@ -514,7 +751,13 @@ export default function App() {
               activeChatStreamRef.current = null;
             }
             setMessages(event.response.messages);
-            setNow(event.response.now);
+            applyNowState(event.response.now);
+            if (event.response.learningReceipt) acceptLearningReceipt(event.response.learningReceipt);
+            if (event.response.command) {
+              const pending = pendingClarificationFromResult(event.response.command, { turnId, request: message });
+              setMusicClarification(pending);
+              setMusicClarificationError(null);
+            }
             setStreamingMessageAt(null);
             realtimeVoiceRef.current?.setMicrophoneEnabled(true);
             if (autoSpeakRef.current && realtimeVoiceRef.current?.connected) {
@@ -565,8 +808,11 @@ export default function App() {
       setSuggestionLoadingId(suggestion.id);
       setChatError(null);
       try {
-        const response = await playSuggestedTrack(suggestion.track, suggestion.reason);
-        setNow(response.now);
+        const response = await runAfterPlaybackFinalized(
+          finalizeActivePlaybackAsSkipped,
+          () => playSuggestedTrack(suggestion.track, suggestion.reason)
+        );
+        applyNowState(response.now);
         await refreshTaste();
       } catch (error) {
         setChatError(error instanceof Error ? error.message : "这首歌暂时切不过去。");
@@ -574,7 +820,7 @@ export default function App() {
         setSuggestionLoadingId(null);
       }
     },
-    [refreshTaste, suggestionLoadingId]
+    [applyNowState, finalizeActivePlaybackAsSkipped, refreshTaste, suggestionLoadingId]
   );
 
   const onClearChatHistory = async () => {
@@ -659,8 +905,11 @@ export default function App() {
       setQueueError(null);
       try {
         await runWithAdvanceLock(async () => {
-          const response = await playQueuedTrack(trackId);
-          setNow(response.now);
+          const response = await runAfterPlaybackFinalized(
+            finalizeActivePlaybackAsSkipped,
+            () => playQueuedTrack(trackId)
+          );
+          applyNowState(response.now);
           await refreshTaste();
         });
       } catch (error) {
@@ -669,36 +918,75 @@ export default function App() {
         setQueueLoadingTrackId(null);
       }
     },
-    [queueLoadingTrackId, refreshTaste, runWithAdvanceLock]
+    [applyNowState, finalizeActivePlaybackAsSkipped, queueLoadingTrackId, refreshTaste, runWithAdvanceLock]
   );
 
   const onRequestNext = useCallback(
-    async (recordSkip = false) => {
+    async (_recordSkip = false) => {
       await runWithAdvanceLock(async () => {
-        const currentTrack = currentTrackRef.current;
-        if (recordSkip && currentTrack) {
-          await sendFeedback({ type: "skip", trackId: currentTrack.trackKey ?? currentTrack.id });
-        }
         const response = await requestNext();
-        setNow(response.now);
+        applyNowState(response.now);
         await refreshTaste();
       });
     },
-    [refreshTaste, runWithAdvanceLock]
+    [applyNowState, refreshTaste, runWithAdvanceLock]
   );
 
   const onTrackEnded = useCallback(async () => {
     await runWithAdvanceLock(async () => {
-      const currentTrack = currentTrackRef.current;
-      if (!currentTrack) {
-        return;
-      }
-      await sendFeedback({ type: "complete", trackId: currentTrack.trackKey ?? currentTrack.id });
       const response = await requestNext();
-      setNow(response.now);
+      applyNowState(response.now);
       await refreshTaste();
     });
-  }, [refreshTaste, runWithAdvanceLock]);
+  }, [applyNowState, refreshTaste, runWithAdvanceLock]);
+
+  const onExplicitFeedback = useCallback(async (
+    reason: FeedbackReason,
+    listenedMs: number,
+    durationMs?: number
+  ) => {
+    const current = nowRef.current;
+    const track = current.track;
+    if (!track) return;
+    const receipt = await sendFeedback(buildTeachingFeedback({
+      trackId: track.trackKey ?? track.id,
+      reason,
+      listenedMs,
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(current.playbackId ? { playbackId: current.playbackId } : {}),
+      ...(current.decision?.decisionId ? { decisionId: current.decision.decisionId } : {})
+    }));
+    acceptLearningReceipt(receipt);
+    await refreshTaste();
+  }, [acceptLearningReceipt, refreshTaste]);
+
+  const onSelectMusicClarification = useCallback(async (
+    track: PendingMusicClarification["candidates"][number]
+  ) => {
+    const pending = musicClarification;
+    if (!pending || musicClarificationBusy) return;
+    setMusicClarificationBusy(true);
+    setMusicClarificationError(null);
+    try {
+      const result = await runMusicCommand(buildConfirmationRequest(pending, track));
+      applyNowState(result.now);
+      if (result.learningReceipt) acceptLearningReceipt(result.learningReceipt);
+      setMessages((current) => [...current, {
+        role: "assistant",
+        text: result.summary,
+        at: new Date().toISOString(),
+        turnId: pending.turnId,
+        source: "text",
+        status: result.outcome === "failed" ? "failed" : "completed"
+      }]);
+      setMusicClarification(pendingClarificationFromResult(result, pending));
+      await refreshTaste().catch(() => undefined);
+    } catch (error) {
+      setMusicClarificationError(error instanceof Error ? error.message : "确认点歌失败，请重试。");
+    } finally {
+      setMusicClarificationBusy(false);
+    }
+  }, [acceptLearningReceipt, applyNowState, musicClarification, musicClarificationBusy, refreshTaste]);
 
   const onFeedback = useCallback(
     async (type: "skip" | "like" | "replay" | "complete") => {
@@ -706,14 +994,20 @@ export default function App() {
       if (!currentTrack) {
         return;
       }
-      await sendFeedback({ type, trackId: currentTrack.trackKey ?? currentTrack.id });
+      const receipt = await sendFeedback({
+        type,
+        trackId: currentTrack.trackKey ?? currentTrack.id,
+        ...(nowRef.current.playbackId ? { playbackId: nowRef.current.playbackId } : {}),
+        ...(nowRef.current.decision?.decisionId ? { decisionId: nowRef.current.decision.decisionId } : {})
+      });
+      acceptLearningReceipt(receipt);
       if (type === "skip") {
         await onRequestNext();
         return;
       }
       await refreshTaste();
     },
-    [onRequestNext, refreshTaste]
+    [acceptLearningReceipt, onRequestNext, refreshTaste]
   );
 
   const onFavorite = useCallback(async (favorite: boolean) => {
@@ -728,7 +1022,7 @@ export default function App() {
         ? { ...current, isFavorite: result.favorite }
         : current
     );
-    setTaste(result.taste);
+    setTaste((current) => current ? { ...current, ...result.taste } : current);
   }, []);
 
   const onPlaybackStateChange = useCallback((paused: boolean) => {
@@ -824,6 +1118,35 @@ export default function App() {
     }
   };
 
+  const onUndoLearning = async () => {
+    if (!learningReceipt || learningBusy) return;
+    setLearningBusy(true);
+    try {
+      const receipt = await undoLearning({ undoToken: learningReceipt.undoToken });
+      lastReceiptIdRef.current = undefined;
+      acceptLearningReceipt(receipt);
+      await refreshTaste();
+    } catch (error) {
+      setV15Error(error instanceof Error ? error.message : "撤销失败，可能已超过 10 分钟。");
+    } finally {
+      setLearningBusy(false);
+    }
+  };
+
+  const onTasteSignalAction = async (signal: TasteSignal | undefined, action: TasteSignalAction) => {
+    setV15Error(null);
+    try {
+      const receipt = await mutateTasteSignal({
+        action,
+        ...(signal ? { signalId: signal.id } : {})
+      });
+      acceptLearningReceipt(receipt);
+      await refreshTaste();
+    } catch (error) {
+      setV15Error(error instanceof Error ? error.message : "音乐画像修改失败。");
+    }
+  };
+
   const topTasteTags = useMemo(() => taste?.preferenceTags?.slice(0, 6) ?? [], [taste?.preferenceTags]);
 
   const trackTitle = now.track?.title ?? "等待开播";
@@ -898,11 +1221,26 @@ export default function App() {
           <TurntableStage
             now={now}
             onFeedback={onFeedback}
+            onExplicitFeedback={onExplicitFeedback}
             onFavorite={onFavorite}
+            onPlaybackOutcome={onPlaybackOutcome}
+            onPlaybackProgress={onPlaybackProgress}
             onPlaybackStateChange={onPlaybackStateChange}
             onRequestNext={onRequestNext}
             onTrackEnded={onTrackEnded}
             speechActive={speechActive}
+          />
+          {learningReceipt ? (
+            <LearningReceiptNotice
+              busy={learningBusy}
+              receipt={learningReceipt}
+              onDismiss={() => setLearningReceipt(null)}
+              onUndo={() => void onUndoLearning()}
+            />
+          ) : null}
+          <ProactiveDjCard
+            reminder={proactiveReminder}
+            policyStatus={systemStatus?.intelligencePolicy}
           />
         </div>
 
@@ -926,10 +1264,19 @@ export default function App() {
           memoryError={memoryError}
           memoryOpen={memoryOpen}
           messages={visibleMessages}
+          musicClarification={musicClarification}
+          musicClarificationBusy={musicClarificationBusy}
+          musicClarificationError={musicClarificationError}
           nowTitle={trackTitle}
           queue={now.queue}
           queueError={queueError}
           planPanel={<DailyPlanPanel />}
+          profilePanel={
+            <MusicTastePanel
+              taste={taste}
+              onSignalAction={(signal, action) => void onTasteSignalAction(signal, action)}
+            />
+          }
           queueLoadingTrackId={queueLoadingTrackId}
           realtimeStatus={realtimeStatus}
           realtimeStatusLabel={REALTIME_STATUS_LABELS[realtimeStatus]}
@@ -942,6 +1289,10 @@ export default function App() {
           onChangeTone={(tone) => void onChangeDjTone(tone)}
           onClearHistory={() => void onClearChatHistory()}
           onClearMemories={() => void onClearMemories()}
+          onCancelMusicClarification={() => {
+            setMusicClarification(null);
+            setMusicClarificationError(null);
+          }}
           onFeedbackContinue={() => {
             setChatStreamFeedback(null);
             chatInputRef.current?.focus();
@@ -956,6 +1307,7 @@ export default function App() {
           onForgetMemory={(memory) => void onForgetMemory(memory)}
           onPlaySuggestion={(suggestion) => void onPlaySuggestion(suggestion)}
           onPlayQueueTrack={(trackId) => void onPlayQueueTrack(trackId)}
+          onSelectMusicClarification={(track) => void onSelectMusicClarification(track)}
           onQuickPrompt={(prompt) => void submitChat(prompt)}
           onReplayDj={() => {
             if (now.djScript) {

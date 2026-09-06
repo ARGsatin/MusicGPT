@@ -4,10 +4,17 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { ChatMessage, Track, TrackStat } from "@musicgpt/shared";
+import type {
+  ChatMessage,
+  IntelligencePolicyMode,
+  NowPlayingState,
+  Track,
+  TrackStat
+} from "@musicgpt/shared";
 import { NcmConnector } from "../src/ncmConnector.js";
 import { createServer } from "../src/server.js";
 import { StateRepository } from "../src/stateRepository.js";
+import { ListeningPolicy, type ListeningRankRequest } from "../src/listeningPolicy.js";
 import {
   OpenAiDjAssistant,
   type AiDjAssistant,
@@ -28,6 +35,64 @@ afterEach(async () => {
 });
 
 describe("AI DJ assistant chat", () => {
+  it("replays the requested history track instead of restarting the current one", async () => {
+    const fixture = await createFixture({ assistant: new OpenAiDjAssistant({ model: "test-model" }) });
+    for (const id of [8851, 8852, 8853]) {
+      await fixture.app.inject({ method: "POST", url: "/api/play-track", payload: { track: { id, title: `History ${id}`, artists: ["Artist"] } } });
+    }
+    const response = await postMusicCommand(fixture.base, "重播刚才第二首", "history-replay");
+    expect(response.now.track?.id).toBe(8852);
+  });
+  it("executes the streamed command's original plan exactly once", async () => {
+    const assistant = new FakeAssistant({ intent: { type: "chat" } });
+    let calls = 0;
+    Object.assign(assistant, { plan: async () => {
+      calls++;
+      return { actions: [{ action: calls === 1 ? "pause" : "resume" }], constraints: [], references: [], confidence: 1 };
+    } });
+    const fixture = await createFixture({ assistant });
+    const response = await fixture.app.inject({ method: "POST", url: "/api/chat/stream", payload: { message: "先停一下音乐", turnId: "one-plan" } });
+    const final = JSON.parse(response.body.trim().split("\n").at(-1)!).response;
+    expect(final.action).toBe("pause");
+    expect(final.now.paused).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  it.each(["legacy", "shadow", "adaptive"] as const)("enforces hard constraints on description candidates in %s mode", async (policyMode) => {
+    const assistant = new FakeAssistant({ intent: { type: "play_by_description", description: "轻柔女声" } });
+    Object.assign(assistant, { plan: async () => ({
+      actions: [{ action: "play_by_description", description: "轻柔女声" }],
+      constraints: [{ kind: "include", value: "女声", hard: true }], references: [], confidence: 1
+    }) });
+    const fixture = await createFixture({ assistant, policyMode, searchTracks: [
+      { id: 8821, title: "Gentle Work Piano", artists: ["Pianist"], tags: [{ category: "style", value: "器乐" }] },
+      { id: 8822, title: "Gentle Song", artists: ["Singer"], album: "女声作品", tags: [{ category: "style", value: "女声" }] }
+    ] });
+    const response = await fixture.app.inject({ method: "POST", url: "/api/chat/stream", payload: { message: "放一首轻柔的，只要女声", turnId: `hard-${policyMode}` } });
+    const final = JSON.parse(response.body.trim().split("\n").at(-1)!).response;
+    expect(final.now.track?.id).toBe(8822);
+    expect(assistant.lastCandidates.map((track) => track.id)).toEqual([8822]);
+  });
+
+  it.each([
+    ["这首只是现在不合适", "recording"],
+    ["是播放出错，不是我不喜欢", "source_version"]
+  ])("learns %s at the correct scope through the chat stream", async (message, dimension) => {
+    const fixture = await createFixture({ assistant: new OpenAiDjAssistant({ model: "test-model" }) });
+    const track = { id: 8810, title: "Current Learning Target", artists: ["Test Artist"], durationMs: 180000 };
+    await fixture.app.inject({ method: "POST", url: "/api/play-track", payload: { track } });
+    const response = await fixture.app.inject({
+      method: "POST", url: "/api/chat/stream", payload: { message, turnId: `scope-${dimension}` }
+    });
+    const final = response.body.trim().split("\n").map((line: string) => JSON.parse(line)).find((event: { type: string }) => event.type === "result").response;
+    expect(final.now.track.id).toBe(8810);
+    expect(final.learningReceipt.scope).toBe("session");
+    expect(final.learningReceipt.changedSignals).toEqual(expect.arrayContaining([
+      expect.objectContaining({ dimension, weight: expect.any(Number) })
+    ]));
+    expect(final.learningReceipt.changedSignals.some((signal: { dimension: string }) => signal.dimension === "tag" || signal.dimension === "artist")).toBe(false);
+  });
+
   it("never exposes a local canned review for a direct request when AI is unavailable", async () => {
     const fixture = await createFixture({
       assistant: new OpenAiDjAssistant({ model: "test-model" }),
@@ -67,9 +132,11 @@ describe("AI DJ assistant chat", () => {
       });
 
     expect(events.filter((event) => event.type === "text_delta").map((event) => event.delta)).toEqual([
-      "好呀，今天听点轻快的。再来一首！"
+      "好呀，",
+      "今天听点轻快的。",
+      "再来一首！"
     ]);
-    expect(events.map((event) => event.type)).toEqual(["text_delta", "result"]);
+    expect(events.map((event) => event.type)).toEqual(["text_delta", "text_delta", "text_delta", "result"]);
     const result = events.find((event) => event.type === "result")?.response;
     expect(result?.reply).toBe("好呀，今天听点轻快的。再来一首！");
     expect(result?.messages.at(-1)).toMatchObject({
@@ -79,10 +146,101 @@ describe("AI DJ assistant chat", () => {
     });
   });
 
+  it("returns a favorite learning receipt at the public chat stream seam", async () => {
+    const fixture = await createFixture({
+      assistant: new OpenAiDjAssistant({ model: "test-model" })
+    });
+    const activated = await fetch(`${fixture.base}/api/play-track`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        track: {
+          id: 8801,
+          trackKey: "ncm:8801",
+          source: "ncm",
+          sourceId: "8801",
+          title: "可教的当前歌曲",
+          artists: ["测试歌手"],
+          songUrl: "https://example.com/teachable-current.mp3"
+        }
+      })
+    });
+    expect(activated.ok).toBe(true);
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "收藏这首", turnId: "favorite-visible-seam" })
+    });
+    const events = (await response.text())
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as {
+        type: string;
+        response?: {
+          now: { track?: Track };
+          learningReceipt?: { changedSignals: unknown[]; undoToken: string };
+          command?: { learningReceipt?: { receiptId: string } };
+        };
+      });
+    const result = events.find((event) => event.type === "result")?.response;
+
+    expect(result?.now.track?.trackKey).toBe("ncm:8801");
+    expect(result?.learningReceipt?.changedSignals).toHaveLength(1);
+    expect(result?.learningReceipt?.undoToken).toBeTruthy();
+    expect(result?.command?.learningReceipt?.receiptId).toBeTruthy();
+  });
+
+  it("finalizes the previous playback as a real skip when chat changes the track", async () => {
+    const fixture = await createFixture({
+      assistant: new OpenAiDjAssistant({ model: "test-model" })
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 8803, title: "下一首", artists: ["测试歌手"], playCount: 5 })
+    ]);
+    const activated = await fetch(`${fixture.base}/api/play-track`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        track: {
+          id: 8802,
+          trackKey: "ncm:8802",
+          source: "ncm",
+          sourceId: "8802",
+          title: "会被切走的歌曲",
+          artists: ["测试歌手"],
+          durationMs: 180_000,
+          songUrl: "https://example.com/8802.mp3"
+        }
+      })
+    });
+    const playbackId = ((await activated.json()) as { now: { playbackId?: string } }).now.playbackId;
+    expect(playbackId).toBeTruthy();
+
+    const response = await fetch(`${fixture.base}/api/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "下一首", turnId: "skip-visible-fact" })
+    });
+    expect(response.ok).toBe(true);
+    await response.text();
+
+    expect(fixture.repo.loadListeningPolicyState().observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          observationId: `outcome:${playbackId}`,
+          kind: "playback_outcome",
+          outcome: "skipped"
+        })
+      ])
+    );
+  });
+
   it("shows an honest provider failure without exposing the upstream error", async () => {
     const fixture = await createFixture({
       assistant: new FakeAssistant({
         intent: { type: "chat" },
+        chatDeltas: ["未完成的草稿"],
         streamError: new Error("upstream stream broke")
       })
     });
@@ -96,6 +254,9 @@ describe("AI DJ assistant chat", () => {
 
     expect(body).toContain("DeepSeek 暂时没能生成可信的回复，请重试。");
     expect(body).not.toContain("upstream stream broke");
+    const history = fixture.repo.getRecentMessages(10);
+    expect(history.some((message) => message.text === "未完成的草稿")).toBe(false);
+    expect(history.at(-1)?.text).toBe("DeepSeek 暂时没能生成可信的回复，请重试。");
   });
 
   it("does not invent a local chat reply when no AI provider is configured", async () => {
@@ -138,6 +299,94 @@ describe("AI DJ assistant chat", () => {
     expect(response.messages.at(-1)?.trackSuggestion).toBeUndefined();
     expect(fixture.assistant.lastCandidates.map((candidate) => candidate.id)).toContain(102);
     expect(fixture.ncmSearches).toHaveLength(0);
+  });
+
+  it("uses the adaptive policy and keeps its decision through voice description playback", async () => {
+    const policy = new CapturingListeningPolicy();
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_by_description", description: "安静工作", searchQuery: "安静 工作" },
+        selection: { trackId: 701 }
+      }),
+      policyMode: "adaptive",
+      listeningPolicy: policy
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 701, title: "Blocked Focus", artists: ["Blocked Artist"], moodTag: "focus", playCount: 100 }),
+      stat({ id: 702, title: "Allowed Focus", artists: ["Allowed Artist"], moodTag: "focus", playCount: 5 })
+    ]);
+    writeTasteRules(fixture.repo, { blockedArtists: ["Blocked Artist"] });
+    policy.requests.length = 0;
+
+    const result = await postMusicCommand(fixture.base, "来点安静工作的歌", "voice-policy-description");
+
+    expect(result.action).toBe("play_by_description");
+    expect(result.now.track?.id).toBe(702);
+    expect(result.now.decision).toMatchObject({
+      decisionId: expect.any(String),
+      policyVersion: expect.any(String),
+      evidence: expect.any(Array)
+    });
+    const contextualRank = policy.requests.find((request) => request.context?.desiredMood === "安静工作");
+    expect(contextualRank?.rules.blockedArtists).toContain("Blocked Artist");
+    expect(contextualRank?.context?.sessionId).toEqual(expect.any(String));
+  });
+
+  it("keeps shadow evidence internal for atmosphere playback and records the public audit", async () => {
+    const policy = new CapturingListeningPolicy();
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_atmosphere" },
+        selection: { trackId: 703 }
+      }),
+      policyMode: "shadow",
+      listeningPolicy: policy
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 703, title: "Blocked Shadow", artists: ["Blocked Atmosphere"], moodTag: "focus", playCount: 100 }),
+      stat({ id: 705, title: "Shadow Morning", artists: ["Daylight"], moodTag: "focus", playCount: 20 })
+    ]);
+    writeTasteRules(fixture.repo, { blockedArtists: ["Blocked Atmosphere"] });
+    policy.requests.length = 0;
+    const before = await getSystemStatus(fixture.base);
+
+    const response = await postChat(fixture.base, "根据现在的天气和时间点歌");
+
+    expect(response.now.track?.id).toBe(705);
+    expect(response.now.decision).toMatchObject({
+      policyVersion: "legacy",
+      evidence: [expect.objectContaining({ label: expect.any(String) })]
+    });
+    const after = await getSystemStatus(fixture.base);
+    expect(after.intelligencePolicy.shadowSampleCount).toBe(
+      before.intelligencePolicy.shadowSampleCount + 1
+    );
+    const contextualRank = policy.requests.find((request) => Boolean(request.context?.sessionId));
+    expect(contextualRank?.rules.blockedArtists).toContain("Blocked Atmosphere");
+    expect(contextualRank?.context?.sessionId).toEqual(expect.any(String));
+  });
+
+  it("reports contextual ranking failures while keeping description playback available", async () => {
+    const fixture = await createFixture({
+      assistant: new FakeAssistant({
+        intent: { type: "play_by_description", description: "通勤", searchQuery: "通勤" },
+        selection: { trackId: 704 }
+      }),
+      policyMode: "shadow",
+      listeningPolicy: new FailingListeningPolicy()
+    });
+    fixture.repo.upsertTrackStats([
+      stat({ id: 704, title: "Fallback Commute", artists: ["Transit"], moodTag: "energy", playCount: 8 })
+    ]);
+
+    const result = await postMusicCommand(fixture.base, "来点通勤的歌", "voice-policy-failure");
+
+    expect(result.now.track?.id).toBe(704);
+    expect(result.now.decision).toMatchObject({
+      policyVersion: "legacy",
+      evidence: [expect.objectContaining({ label: expect.any(String) })]
+    });
+    expect((await getSystemStatus(fixture.base)).intelligencePolicy.fallbackReason).toBe("ranking_failure");
   });
 
   it("resolves the playback URL without requiring a suggestion click", async () => {
@@ -639,14 +888,53 @@ class FakeAssistant implements AiDjAssistant {
     }
     return this.options.chatDeltas?.join("") ?? this.options.chatReply ?? "我在，继续说你的听感。";
   }
+
+  async streamChat(
+    _message: string,
+    context: AiDjContext,
+    onDelta: (delta: string) => void
+  ): Promise<string> {
+    this.lastContext = context;
+    const deltas = this.options.chatDeltas ?? [this.options.chatReply ?? "我在，继续说你的听感。"];
+    for (const delta of deltas) onDelta(delta);
+    if (this.options.streamError) throw this.options.streamError;
+    return deltas.join("");
+  }
+}
+
+class CapturingListeningPolicy extends ListeningPolicy {
+  readonly requests: ListeningRankRequest[] = [];
+
+  override rank(request: ListeningRankRequest) {
+    this.requests.push(request);
+    return super.rank(request);
+  }
+}
+
+class FailingListeningPolicy extends ListeningPolicy {
+  override rank(request: ListeningRankRequest) {
+    if (request.context?.desiredMood === "通勤") {
+      throw new Error("contextual policy failure");
+    }
+    return super.rank(request);
+  }
 }
 
 async function createFixture(options: {
   assistant: AiDjAssistant;
   searchTracks?: Track[];
+  policyMode?: IntelligencePolicyMode;
+  listeningPolicy?: ListeningPolicy;
 }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "musicgpt-aidj-"));
   const repo = new StateRepository(path.join(tmp, "state.db"));
+  if (options.policyMode) {
+    repo.saveIntelligencePolicyState({
+      mode: options.policyMode,
+      shadowStartedAt: "2026-08-25T00:00:00.000Z",
+      shadowSampleCount: 0
+    });
+  }
   const ncmSearches: string[] = [];
   const ncm = new NcmConnector("http://mock-ncm", "cookie=abc", async (input) => {
     const url = input.toString();
@@ -687,6 +975,7 @@ async function createFixture(options: {
     repo,
     ncm,
     aiDjAssistant: options.assistant,
+    ...(options.listeningPolicy ? { listeningPolicy: options.listeningPolicy } : {}),
     djBroadcastInterval: 4,
     importRetryIntervalMs: 50
   });
@@ -705,9 +994,52 @@ async function postChat(base: string, message: string) {
   return (await response.json()) as {
     action: string;
     reply: string;
-    now: { track?: Track; queue: unknown[]; paused: boolean };
+    now: NowPlayingState;
     messages: Array<ChatMessage & { trackSuggestion?: { track: Track; reason: string } }>;
   };
+}
+
+async function postMusicCommand(base: string, request: string, id: string) {
+  const response = await fetch(`${base}/api/music/commands`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      turnId: `turn-${id}`,
+      commandId: `command-${id}`,
+      request,
+      mode: "voice_direct"
+    })
+  });
+  expect(response.ok).toBe(true);
+  return (await response.json()) as { action: string; now: NowPlayingState };
+}
+
+async function getSystemStatus(base: string) {
+  const response = await fetch(`${base}/api/system/status`);
+  expect(response.ok).toBe(true);
+  return (await response.json()) as {
+    intelligencePolicy: {
+      shadowSampleCount: number;
+      fallbackReason?: string;
+    };
+  };
+}
+
+function writeTasteRules(
+  repo: StateRepository,
+  rules: { blockedArtists?: string[] }
+): void {
+  const tastePath = path.join(path.dirname(repo.dbPath), "taste.md");
+  const current = fs.readFileSync(tastePath, "utf8");
+  const frontmatter = [
+    "---",
+    "artistWeights: {}",
+    "tagWeights: {}",
+    `blockedArtists: ${JSON.stringify(rules.blockedArtists ?? [])}`,
+    "blockedTags: []",
+    "---"
+  ].join("\n");
+  fs.writeFileSync(tastePath, current.replace(/^---[\s\S]*?---/u, frontmatter));
 }
 
 async function requestNext(base: string) {

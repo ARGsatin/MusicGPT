@@ -5,6 +5,12 @@ import type {
   ChatMemoryCategory,
   ChatMessage,
   EnvironmentContext,
+  FeedbackReason,
+  LearningScope,
+  ListeningConstraint,
+  MusicAction,
+  MusicActionPlan,
+  MusicActionStep,
   MusicTag,
   PlayEvent,
   RadioPlanItem,
@@ -48,10 +54,16 @@ export interface AiDjContext {
 export interface AiDjAssistant {
   status(): { configured: boolean; provider: string; model?: string; baseUrlConfigured?: boolean; lastError?: string };
   classify(message: string, context: AiDjContext): Promise<AiDjIntent>;
+  plan?(message: string, context: AiDjContext): Promise<MusicActionPlan>;
   selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection>;
   commentTrack(track: Track, context: AiDjContext, purpose: string): Promise<string>;
   commentCurrent(context: AiDjContext): Promise<string>;
   chat(message: string, context: AiDjContext): Promise<string>;
+  streamChat?(
+    message: string,
+    context: AiDjContext,
+    onDelta: (delta: string) => void
+  ): Promise<string>;
   extractMemories?(
     userMessage: string,
     assistantReply: string,
@@ -84,11 +96,14 @@ export interface ChatMemoryUpdate {
 }
 
 const REMOTE_INTENT_HINT =
-  /点歌|推荐|来一首|来点|想听|播放|暂停|继续|下一首|切歌|换歌|点评|评论|当前这首|风格|适合|歌曲|歌手|专辑|\b(play|pause|resume|skip|next|song|track|recommend|calm|focus|warm|night|energy|nostalgia|mood)\b/iu;
+  /点歌|推荐|来一首|来点|想听|(?:能不能|能|可以)(?:给我)?听(?:一首|点|些)|听一首|播放|暂停|继续|下一首|切歌|换歌|换首|收藏|取消收藏|喜欢这首|不喜欢这首|重播|再放一遍|队列|接下来|后面|少放|不要再|现在不合适|听腻|点评|评论|当前这首|风格|适合|歌曲|歌手|专辑|\b(play|pause|resume|skip|next|song|track|recommend|calm|focus|warm|night|energy|nostalgia|mood)\b/iu;
 
 export function canFastPathChat(message: string): boolean {
   const trimmed = message.trim();
   if (!trimmed) {
+    return false;
+  }
+  if (fallbackNegativePreference(trimmed)) {
     return false;
   }
   if (blocksPlayback(trimmed)) {
@@ -219,6 +234,49 @@ export class OpenAiDjAssistant implements AiDjAssistant {
     return normalizeIntent(result, message);
   }
 
+  async plan(message: string, context: AiDjContext): Promise<MusicActionPlan> {
+    if (!this.client || blocksPlayback(message) || isClearlyNonCommand(message)) {
+      return fallbackActionPlan(message);
+    }
+
+    const result = await this.askJson<unknown>([
+      {
+        role: "system",
+        content:
+          `你是 MusicGPT 的音乐命令规划器。只返回 JSON，不要 Markdown。
+格式：{"actions":[{"action":"play_specific","query":"歌名或艺人","confidence":0.95}],"constraints":[],"references":[],"confidence":0.95}。
+actions 必须按顺序包含全部操作，字段 action 只能为 skip,pause,resume,play_specific,play_by_description,play_atmosphere,comment_current,replay,like,unlike,query_current,query_queue,update_session_intent,update_long_term_preference,noop。
+明确歌名或艺人点歌用 play_specific + query；一个艺人的任一首歌不需要用户选歌。系统会搜索并对多个同名可信版本自动澄清，不要猜造候选。
+区别泛指与特指：“听一首陈奕迅”是任意选择；“陈奕迅那首”是特指，若上下文无法唯一确定歌曲，必须 clarification，不得擅自降级为艺人随机点歌。
+按情绪、场景点一首用 play_by_description + description + searchQuery；根据当前天气时间选歌用 play_atmosphere。
+改变后续整体音乐方向用 update_session_intent + desiredMood + scope(session或day)。换成/切到/来点默认 immediate=true；接下来/后面或保持当前歌必须 immediate=false。今天/今晚为 day；以后/不要再为 update_long_term_preference + scope=long_term。
+每个需要歌曲的步骤把 reference 放在步骤内，格式 {kind:"current"}、{kind:"recent",index:2}、{kind:"queue",index:3} 或 {kind:"track",trackId:"qq:字符串ID"}。index 从1开始。引用播放使用 play_specific + reference，不需要编造 query。recent 表示过去实际播放的歌曲，系统负责解析；不要因为没有展示完整历史就拒绝明确序号。
+“刚才那首/上一首”用 play_specific + reference:{kind:"recent",index:1}；不要变成当前歌曲 replay。replay 仅表示明确要求重播，仍须保留历史引用。
+“下一首必须是某种类型”是单次 skip，限制写入 constraints 且 hard=true，不额外保存长期或会话偏好。“接下来整体多放”才修改会话意图。
+复合命令尾部的失败处理说明不是取消前面的操作：“播放某歌后再收藏，收藏失败也别重复播放”仍是 play_specific 然后 like(reference:current)，不是只有播放，也不是 noop。
+纠正用 feedbackReason: dislike_track,less_this_artist,wrong_for_now,overplayed,bad_version,playback_problem。不喜欢这首用 unlike/long_term；少放艺人、听腻用 update_long_term_preference；现在不合适用 update_session_intent/wrong_for_now/session；版本或播放失败用 update_session_intent/bad_version或playback_problem/session，绝不能变成口味负向。都附对应 reference。
+constraints 为 {kind:include|avoid|mood|scene|artist|tag|source,value:string,scope:session|day|long_term,hard:boolean} 数组，必须保留用户限制。喜欢/多放为 include，少放/不要为 avoid。不要将仅仅更少等同完全屏蔽。
+单次受限切歌的完整示例：{"actions":[{"action":"skip","confidence":0.98}],"constraints":[{"kind":"tag","value":"男声","scope":"session","hard":true}],"references":[],"confidence":0.98}。动作和约束必须同时给出，不能仅给出其中一个。
+澄清的完整示例：{"actions":[{"action":"noop"}],"constraints":[],"references":[],"confidence":0.6,"clarification":{"question":"你指的是哪首歌？"}}。clarification 不属于 action 枚举。
+confidence 为0到1；无法确定操作或缺少必要目标时 clarification:{question:string}，不执行任何步骤。普通聊天、单独的条件说明、没有调整方向的提示为 noop。例如“如果你不确定是哪首就先问我”只有条件说明，没有发出点歌请求，用 noop，不添加 clarification。明确不要播放/只聊天必须 noop。不要因出现音乐关键词就编造动作。`
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          message,
+          nowTrack: context.nowTrack,
+          queue: context.queue.slice(0, 5).map((item) => item.track),
+          recentMessages: context.messages.slice(-12),
+          tasteSummary: context.taste?.summary,
+          environment: context.environment,
+          contextTags: context.contextTags
+        })
+      }
+    ]);
+
+    return normalizeActionPlan(result, message);
+  }
+
   async selectTrack(description: string, candidates: Track[], context: AiDjContext): Promise<TrackSelection> {
     if (candidates.length === 0) {
       return {};
@@ -231,7 +289,7 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       {
         role: "system",
         content:
-          '你是私人电台选歌顾问。只能从 candidates 中选择一首最匹配用户描述的歌。只返回 JSON: {"trackId": number}，不要生成推荐文案或选择理由。'
+          '你是私人电台选歌顾问。只能从 candidates 中选择一首最匹配用户描述的歌。只返回 JSON: {"trackId": number|string}，必须原样保留候选 ID，不要生成推荐文案或选择理由。'
       },
       {
         role: "user",
@@ -306,6 +364,42 @@ export class OpenAiDjAssistant implements AiDjAssistant {
       );
       this.lastError = undefined;
       return reply;
+    } catch (error) {
+      this.lastError = summarizeOpenAiError(error);
+      throw error;
+    }
+  }
+
+  async streamChat(
+    message: string,
+    context: AiDjContext,
+    onDelta: (delta: string) => void
+  ): Promise<string> {
+    if (!this.client) {
+      throw new Error("AI provider is not configured");
+    }
+    try {
+      const request = withAiProviderCompatibility(this.provider, {
+        model: this.model,
+        temperature: 0.92,
+        max_tokens: this.chatMaxTokens,
+        messages: buildChatMessages(message, context),
+        stream: true as const
+      });
+      const stream = await this.client.chat.completions.create(
+        request as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming
+      );
+      let reply = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (!delta) continue;
+        reply += delta;
+        onDelta(delta);
+      }
+      const normalized = reply.trim();
+      if (!normalized) throw new Error("AI provider returned empty streaming content");
+      this.lastError = undefined;
+      return normalized;
     } catch (error) {
       this.lastError = summarizeOpenAiError(error);
       throw error;
@@ -502,11 +596,12 @@ export function fallbackClassify(message: string): AiDjIntent {
 
 export function normalizeIntent(value: Partial<AiDjIntent>, originalMessage: string): AiDjIntent {
   const fallback = fallbackClassify(originalMessage);
-  if (value.type && value.type !== "chat" && fallback.type === "chat") {
+  if (value.type && value.type !== "chat" && blocksPlayback(originalMessage)) {
     return { type: "chat" };
   }
-  if (blocksPlayback(originalMessage) && (value.type === "play_specific" || value.type === "play_by_description")) {
-    return fallback.type === "play_specific" || fallback.type === "play_by_description" ? { type: "chat" } : fallback;
+
+  if (value.type && value.type !== "chat" && isClearlyNonCommand(originalMessage)) {
+    return { type: "chat" };
   }
   switch (value.type) {
     case "skip":
@@ -543,7 +638,610 @@ function fallbackSelection(_description: string, candidates: Track[]): TrackSele
 }
 
 function blocksPlayback(text: string): boolean {
-  return /别点歌|不要点歌|不点歌|先别点|先别播|别播|不要播|别放|不播放|随便聊|聊聊|只聊天|先聊天/.test(text);
+  if (/随便聊|聊聊|只聊天|先聊天/u.test(text)) return true;
+  if (fallbackNegativePreference(text)) return false;
+  return /别点歌|不要点歌|不点歌|先别点|先别播|别播|不要播|别放|不播放/u.test(text);
+}
+
+const MUSIC_ACTIONS = new Set<MusicAction>([
+  "skip",
+  "pause",
+  "resume",
+  "replan",
+  "play_specific",
+  "play_by_description",
+  "play_atmosphere",
+  "comment_current",
+  "noop",
+  "replay",
+  "like",
+  "unlike",
+  "query_current",
+  "query_queue",
+  "update_session_intent",
+  "update_long_term_preference"
+]);
+
+const CONSTRAINT_KINDS = new Set<ListeningConstraint["kind"]>([
+  "include",
+  "avoid",
+  "mood",
+  "scene",
+  "artist",
+  "tag",
+  "source"
+]);
+
+const LEARNING_SCOPES = new Set<LearningScope>(["session", "day", "long_term"]);
+const FEEDBACK_REASONS = new Set<FeedbackReason>([
+  "dislike_track",
+  "less_this_artist",
+  "wrong_for_now",
+  "overplayed",
+  "bad_version",
+  "playback_problem"
+]);
+
+export function normalizeActionPlan(value: unknown, originalMessage: string): MusicActionPlan {
+  if (blocksPlayback(originalMessage) || isClearlyNonCommand(originalMessage)) {
+    return {
+      actions: [{ action: "noop", confidence: 1 }],
+      constraints: [],
+      references: [],
+      confidence: 1
+    };
+  }
+  const record = asRecord(value);
+  const constraints = Array.isArray(record?.constraints)
+    ? record.constraints.flatMap((item) => {
+        const constraint = normalizeConstraint(item);
+        return constraint ? [constraint] : [];
+      })
+    : [];
+  const parsedActions = Array.isArray(record?.actions)
+    ? record.actions.flatMap((item) => {
+        const step = normalizeActionStep(item, originalMessage);
+        return step ? [step] : [];
+      })
+    : [];
+  const recordConfidence = clampConfidence(record?.confidence);
+  const clarificationRecord = asRecord(record?.clarification);
+  const clarificationStep = Array.isArray(record?.actions)
+    ? record.actions.map(asRecord).find((step) => step?.action === "clarification")
+    : undefined;
+  const question = typeof clarificationRecord?.question === "string"
+    ? clarificationRecord.question.trim()
+    : typeof clarificationStep?.query === "string" ? clarificationStep.query.trim() : "";
+  if (parsedActions.length === 0) {
+    if (question || (recordConfidence !== undefined && recordConfidence < 0.75)) {
+      const confidence = recordConfidence ?? 0.5;
+      return {
+        actions: [{ action: "noop", confidence }],
+        constraints,
+        references: [],
+        confidence,
+        ...(question ? { clarification: { question } } : {})
+      };
+    }
+    const fallback = fallbackActionPlan(originalMessage);
+    return { ...fallback, constraints: [...fallback.constraints, ...constraints] };
+  }
+
+  const topLevelReferences = Array.isArray(record?.references)
+    ? record.references.flatMap((item) => {
+        const reference = normalizeReference(item);
+        return reference ? [reference] : [];
+      })
+    : [];
+  let referenceIndex = 0;
+  const actions = parsedActions.map((action): MusicActionStep => {
+    if (action.reference || !actionNeedsTrackReference(action.action)) return action;
+    const reference = topLevelReferences[referenceIndex];
+    if (!reference) return action;
+    referenceIndex += 1;
+    return { ...action, reference };
+  });
+
+  const references = uniqueReferences([
+    ...topLevelReferences,
+    ...actions.flatMap((action) => action.reference ? [action.reference] : [])
+  ]);
+  const confidence = recordConfidence ??
+    Math.min(...actions.map((action) => action.confidence ?? 0.8));
+  const normalizedPlan: MusicActionPlan = {
+    actions,
+    constraints,
+    references,
+    confidence,
+    ...(question ? { clarification: { question } } : {})
+  };
+  const localPlan = fallbackActionPlan(originalMessage);
+  return shouldPreferDeterministicPlan(normalizedPlan, localPlan)
+    ? { ...localPlan, constraints: [...localPlan.constraints, ...constraints] }
+    : normalizedPlan;
+}
+
+function shouldPreferDeterministicPlan(
+  modelPlan: MusicActionPlan,
+  localPlan: MusicActionPlan
+): boolean {
+  if (
+    modelPlan.clarification ||
+    modelPlan.confidence < 0.75 ||
+    modelPlan.actions.some((action) => action.confidence !== undefined && action.confidence < 0.75)
+  ) {
+    return false;
+  }
+  if (
+    localPlan.clarification ||
+    localPlan.confidence < 0.75 ||
+    localPlan.actions.length === 0 ||
+    localPlan.actions.some((action) => action.action === "noop" || action.confidence !== 1)
+  ) {
+    return false;
+  }
+  return !modelSatisfiesDeterministicPlan(modelPlan, localPlan);
+}
+
+function modelSatisfiesDeterministicPlan(
+  modelPlan: MusicActionPlan,
+  localPlan: MusicActionPlan
+): boolean {
+  if (modelPlan.actions.length !== localPlan.actions.length) return false;
+  const semanticKeys = ["reference", "feedbackReason", "scope", "immediate"] as const;
+  const actionsMatch = localPlan.actions.every((localAction, index) => {
+    const modelAction = modelPlan.actions[index];
+    if (!modelAction || modelAction.action !== localAction.action) return false;
+    return semanticKeys.every((key) =>
+      localAction[key] === undefined ||
+      JSON.stringify(modelAction[key]) === JSON.stringify(localAction[key])
+    );
+  });
+  if (!actionsMatch) return false;
+  return localPlan.constraints.every((localConstraint) =>
+    modelPlan.constraints.some((modelConstraint) =>
+      JSON.stringify(modelConstraint) === JSON.stringify(localConstraint)
+    )
+  );
+}
+
+function actionNeedsTrackReference(action: MusicAction): boolean {
+  return action === "like" ||
+    action === "unlike" ||
+    action === "replay" ||
+    action === "update_long_term_preference";
+}
+
+function uniqueReferences(
+  references: NonNullable<MusicActionStep["reference"]>[]
+): NonNullable<MusicActionStep["reference"]>[] {
+  const seen = new Set<string>();
+  return references.filter((reference) => {
+    const key = JSON.stringify(reference);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function normalizeActionStep(value: unknown, originalMessage: string): MusicActionStep | undefined {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const action = typeof record.action === "string" && MUSIC_ACTIONS.has(record.action as MusicAction)
+    ? record.action as MusicAction
+    : undefined;
+  if (!action) return undefined;
+  const reference = normalizeReference(record.reference);
+  const confidence = clampConfidence(record.confidence);
+  const scope = typeof record.scope === "string" && LEARNING_SCOPES.has(record.scope as LearningScope)
+    ? record.scope as LearningScope
+    : undefined;
+  const feedbackReason = typeof record.feedbackReason === "string" &&
+    FEEDBACK_REASONS.has(record.feedbackReason as FeedbackReason)
+    ? record.feedbackReason as FeedbackReason
+    : undefined;
+  const step: MusicActionStep = {
+    action,
+    ...(reference ? { reference } : {}),
+    ...(confidence !== undefined ? { confidence } : {}),
+    ...(typeof record.immediate === "boolean" ? { immediate: record.immediate } : {}),
+    ...(scope ? { scope } : {}),
+    ...(feedbackReason ? { feedbackReason } : {})
+  };
+  for (const key of ["query", "searchQuery", "description", "desiredMood"] as const) {
+    const field = record[key];
+    if (typeof field === "string" && field.trim()) {
+      step[key] = field.trim();
+    }
+  }
+  if (action === "play_specific" && !step.query && !step.searchQuery && !step.reference) return undefined;
+  if (action === "play_by_description" && !step.description) step.description = originalMessage.trim();
+  if (action === "replan" && !step.desiredMood) return undefined;
+  return step;
+}
+
+function normalizeConstraint(value: unknown): ListeningConstraint | undefined {
+  const record = asRecord(value);
+  const constraintValue = typeof record?.value === "string" ? record.value.trim() : "";
+  if (
+    typeof record?.kind !== "string" ||
+    !CONSTRAINT_KINDS.has(record.kind as ListeningConstraint["kind"]) ||
+    !constraintValue ||
+    containsSensitiveConstraintValue(constraintValue)
+  ) {
+    return undefined;
+  }
+  return {
+    kind: record.kind as ListeningConstraint["kind"],
+    value: constraintValue,
+    ...(typeof record.scope === "string" && LEARNING_SCOPES.has(record.scope as LearningScope)
+      ? { scope: record.scope as LearningScope }
+      : {}),
+    ...(typeof record.hard === "boolean" ? { hard: record.hard } : {})
+  };
+}
+
+function containsSensitiveConstraintValue(value: string): boolean {
+  if (
+    /api[\s_-]*key|access[\s_-]*token|session[\s_-]*token|auth(?:orization)?[\s_-]*token|bearer|private[\s_-]*key|client[\s_-]*secret|cookie|password|passcode|token|密码|密钥|秘钥|验证码|登录凭证/iu.test(value)
+  ) {
+    return true;
+  }
+  return /(?:^|[^A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{24,}(?:$|[^A-Za-z0-9+/=_-])/u.test(value);
+}
+
+function normalizeReference(value: unknown): MusicActionStep["reference"] | undefined {
+  const record = asRecord(value);
+  if (
+    typeof record?.kind !== "string" ||
+    !["current", "recent", "queue", "track"].includes(record.kind)
+  ) {
+    return undefined;
+  }
+  const index = typeof record.index === "number" && Number.isInteger(record.index) && record.index > 0
+    ? record.index
+    : undefined;
+  const trackId = typeof record.trackId === "number" || typeof record.trackId === "string"
+    ? record.trackId
+    : undefined;
+  return {
+    kind: record.kind as NonNullable<MusicActionStep["reference"]>["kind"],
+    ...(index ? { index } : {}),
+    ...(trackId !== undefined ? { trackId } : {}),
+    ...(typeof record.title === "string" && record.title.trim() ? { title: record.title.trim() } : {}),
+    ...(typeof record.artist === "string" && record.artist.trim() ? { artist: record.artist.trim() } : {})
+  };
+}
+
+function clampConfidence(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.min(1, Math.max(0, value))
+    : undefined;
+}
+
+function fallbackActionPlan(message: string): MusicActionPlan {
+  const negativePreference = fallbackNegativePreference(message);
+  if (negativePreference) {
+    return {
+      actions: [negativePreference.action],
+      constraints: [negativePreference.constraint],
+      references: negativePreference.action.reference ? [negativePreference.action.reference] : [],
+      confidence: 1
+    };
+  }
+  if (blocksPlayback(message) || isClearlyNonCommand(message)) {
+    return {
+      actions: [{ action: "noop", confidence: 1 }],
+      constraints: [],
+      references: [],
+      confidence: 1
+    };
+  }
+  const clauses = splitFallbackActionClauses(message);
+  if (clauses.length > 1) {
+    const actions = clauses.map((clause) =>
+      fallbackDeterministicActionStep(clause) ?? intentToActionStep(fallbackClassify(clause))
+    );
+    const uncertainClauseIndex = actions.findIndex((action) => action.action === "noop");
+    const uncertainClause = uncertainClauseIndex >= 0 ? clauses[uncertainClauseIndex] : undefined;
+    return {
+      actions,
+      constraints: [],
+      references: actions.flatMap((action) => action.reference ? [action.reference] : []),
+      confidence: uncertainClause ? 0.5 : 0.9,
+      ...(uncertainClause
+        ? { clarification: { question: `“${uncertainClause}”这一步我还不确定，能再说具体一点吗？` } }
+        : {})
+    };
+  }
+  const deterministic = fallbackDeterministicActionStep(message);
+  const intent = fallbackClassify(message);
+  const action = deterministic ?? intentToActionStep(intent);
+  const constraints = deterministicFeedbackConstraints(action);
+  return {
+    actions: [action],
+    constraints,
+    references: action.reference ? [action.reference] : [],
+    confidence: deterministic ? 1 : intent.type === "chat" ? 1 : 0.9
+  };
+}
+
+function deterministicFeedbackConstraints(action: MusicActionStep): ListeningConstraint[] {
+  if (action.feedbackReason !== "wrong_for_now") return [];
+  return [{
+    kind: "avoid",
+    value: "当前这首",
+    scope: "session",
+    hard: true
+  }];
+}
+
+function fallbackNegativePreference(message: string): {
+  action: MusicActionStep;
+  constraint: ListeningConstraint;
+} | undefined {
+  const text = message.trim();
+  if (/随便聊|聊聊|只聊天|先聊天/u.test(text)) return undefined;
+  const match = text.match(
+    /^(?:(现在|接下来|今天|今晚|以后|今后|长期)\s*)?(?:请\s*)?(不要|别|少)(再)?\s*(?:放|播)\s*([^，。！？!?]+)[，。！？!?]*$/u
+  );
+  const target = match?.[4]?.trim();
+  if (
+    !target ||
+    /^(?:了|歌|音乐|东西|任何东西)$/u.test(target) ||
+    containsSensitiveConstraintValue(target)
+  ) {
+    return undefined;
+  }
+  const longTerm = /^(?:以后|今后|长期)$/u.test(match?.[1] ?? "") || Boolean(match?.[3]);
+  const scope: LearningScope = longTerm
+    ? "long_term"
+    : /^(?:今天|今晚)$/u.test(match?.[1] ?? "")
+      ? "day"
+      : "session";
+  const currentReference = /^(?:这首|当前这首|现在这首)$/u.test(target)
+    ? { kind: "current" as const }
+    : undefined;
+  return {
+    action: {
+      action: longTerm ? "update_long_term_preference" : "update_session_intent",
+      description: `避免${target}`,
+      scope,
+      immediate: false,
+      confidence: 1,
+      ...(currentReference ? { reference: currentReference } : {})
+    },
+    constraint: {
+      kind: "avoid",
+      value: target,
+      scope,
+      hard: true
+    }
+  };
+}
+
+function fallbackDeterministicActionStep(message: string): MusicActionStep | undefined {
+  const text = message.trim();
+  const current = { kind: "current" as const };
+  if (/^(?:请\s*)?暂停(?:一下|播放)?[。！!]?$/u.test(text)) {
+    return { action: "pause", confidence: 1 };
+  }
+  if (/^(?:请\s*)?(?:继续播放|恢复播放|接着播|继续听)[。！!]?$/u.test(text)) {
+    return { action: "resume", confidence: 1 };
+  }
+  if (/^(?:请\s*)?(?:下一首|切歌|跳过(?:这首)?)[。！!]?$/u.test(text)) {
+    return { action: "skip", confidence: 1 };
+  }
+  const recentTrackIndex = extractOneBasedTrackIndex(text);
+  if (
+    recentTrackIndex &&
+    /^(?:就|播放|放|播)?\s*刚才第\s*(?:\d+|[一二三四五六七八九十两]+)\s*首[。！!]?$/u.test(text)
+  ) {
+    return {
+      action: "play_specific",
+      reference: { kind: "recent", index: recentTrackIndex },
+      immediate: true,
+      confidence: 1
+    };
+  }
+  if (
+    recentTrackIndex &&
+    /^(?:把)?(?:后面|队列(?:里)?)(?:的)?第\s*(?:\d+|[一二三四五六七八九十两]+)\s*首(?:换到现在|切到现在|现在播放|放到现在)[。！!]?$/u.test(text)
+  ) {
+    return {
+      action: "play_specific",
+      reference: { kind: "queue", index: recentTrackIndex },
+      immediate: true,
+      confidence: 1
+    };
+  }
+  const describedTrackRequest = text.match(
+    /^(?:换|切)(?:一首|首)\s*((?:适合|用来|可以)[^，。！？!?]*(?:歌|音乐))[。！!]?$/u
+  );
+  const description = describedTrackRequest?.[1]?.trim();
+  if (description) {
+    return {
+      action: "play_by_description",
+      description,
+      searchQuery: buildSearchQuery(description),
+      immediate: true,
+      confidence: 1
+    };
+  }
+  const politeArtistRequest = text.match(
+    /^(?:(?:请|麻烦)(?:给我)?\s*)?(?:能不能|能|可以)(?:给我)?(?:听|放|播)(?:一首|点|些)?\s*([^，。！？!?]+?)(?:的歌)?(?:吗|么|嘛)?[？?]?$/u
+  );
+  const requestedArtist = politeArtistRequest?.[1]?.trim();
+  if (
+    requestedArtist &&
+    !/^(?:歌|音乐|点|一些|一首|随便什么)$/u.test(requestedArtist) &&
+    !/适合|安静|轻快|不那么|氛围|工作|学习|睡觉/u.test(requestedArtist)
+  ) {
+    return {
+      action: "play_specific",
+      query: requestedArtist,
+      searchQuery: requestedArtist,
+      immediate: true,
+      confidence: 1
+    };
+  }
+  if (
+    /撤销|取消刚才.*学习|误触.*(?:跳过|反馈).*(?:不要学习|别学)|刚才.*(?:不要|别).*学|undo/iu.test(text) ||
+    (/画像|自动|信号|学到|学习记录|偏好/iu.test(text) && /重置|删除|移除|屏蔽|降低|减弱|确认|固定/iu.test(text))
+  ) {
+    return { action: "update_long_term_preference", scope: "long_term", confidence: 1 };
+  }
+  if (/队列|接下来|后面.*(?:歌|曲)/u.test(text) && /什么|哪些|看看|告诉/u.test(text)) {
+    return { action: "query_queue", confidence: 1 };
+  }
+  if (/当前|这首|现在/u.test(text) && /什么歌|哪首|歌名|谁唱/u.test(text)) {
+    return { action: "query_current", confidence: 1 };
+  }
+  if (/不喜欢(?:当前|现在)?这首|这首.*不喜欢/u.test(text)) {
+    return {
+      action: "unlike",
+      reference: current,
+      feedbackReason: "dislike_track",
+      scope: "long_term",
+      confidence: 1
+    };
+  }
+  if (/现在不合适|只是现在.*不合适|当前.*不合适/u.test(text)) {
+    return {
+      action: "update_session_intent",
+      reference: current,
+      feedbackReason: "wrong_for_now",
+      scope: "session",
+      description: "当前这首只在现在不合适",
+      immediate: false,
+      confidence: 1
+    };
+  }
+  if (/听腻|腻了|放太多|听太多/u.test(text)) {
+    return {
+      action: "unlike",
+      reference: current,
+      feedbackReason: "overplayed",
+      scope: "long_term",
+      confidence: 1
+    };
+  }
+  if (
+    /(?:播放|加载|音频).*(?:出错|错误|失败|故障|播不了|打不开)|(?:出错|错误|失败|故障).*(?:不是|不代表).*(?:不喜欢|口味)/u.test(text)
+  ) {
+    return {
+      action: "update_session_intent",
+      reference: current,
+      feedbackReason: "playback_problem",
+      scope: "session",
+      description: "当前播放故障不代表口味",
+      immediate: false,
+      confidence: 1
+    };
+  }
+  if (/版本.*(?:问题|不对|不好)|版权.*(?:问题|失败)/u.test(text)) {
+    return {
+      action: "update_long_term_preference",
+      reference: current,
+      feedbackReason: "bad_version",
+      scope: "session",
+      description: "当前曲源版本有问题",
+      confidence: 1
+    };
+  }
+  if (/少放(?:这个|当前|这位)?(?:歌手|艺人)|以后.*少放.*(?:歌手|艺人)/u.test(text)) {
+    return {
+      action: "update_long_term_preference",
+      reference: current,
+      scope: "long_term",
+      confidence: 1
+    };
+  }
+  if (/取消收藏|别收藏/u.test(text)) {
+    return { action: "unlike", reference: current, confidence: 1 };
+  }
+  if (/收藏(?:当前|现在)?这首|喜欢这首|标记喜欢/u.test(text)) {
+    return { action: "like", reference: current, confidence: 1 };
+  }
+  if (/重播|再放一遍|从头/u.test(text)) {
+    const recentReference = /刚才|前一首|不是当前/u.test(text)
+      ? { kind: "recent" as const, index: extractOneBasedTrackIndex(text) ?? 1 }
+      : undefined;
+    return {
+      action: "replay",
+      reference: recentReference ?? current,
+      confidence: 1
+    };
+  }
+  return undefined;
+}
+
+function extractOneBasedTrackIndex(text: string): number | undefined {
+  const match = text.match(/第\s*(\d+|[一二三四五六七八九十两]+)\s*首/u);
+  const raw = match?.[1];
+  if (!raw) return undefined;
+  if (/^\d+$/u.test(raw)) {
+    const parsed = Number(raw);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+  }
+  const digits: Record<string, number> = {
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9
+  };
+  if (raw === "十") return 10;
+  if (raw.includes("十")) {
+    const [tens, units] = raw.split("十");
+    const tensValue = tens ? digits[tens] : 1;
+    const unitsValue = units ? digits[units] : 0;
+    return tensValue !== undefined && unitsValue !== undefined
+      ? tensValue * 10 + unitsValue
+      : undefined;
+  }
+  return digits[raw];
+}
+
+function splitFallbackActionClauses(message: string): string[] {
+  return message
+    .split(/\s*(?:然后|并且|接着)\s*|\s*[，,]\s*再\s*|\s*后(?=(?:再|换|切|播|放|收藏|暂停|继续))\s*/u)
+    .map((part) => part.replace(/^[，,]\s*/u, "").trim())
+    .filter(Boolean);
+}
+
+function intentToActionStep(intent: AiDjIntent): MusicActionStep {
+  switch (intent.type) {
+    case "replan":
+      return { action: "replan", desiredMood: intent.desiredMood };
+    case "play_specific":
+      return {
+        action: "play_specific",
+        query: intent.query,
+        ...(intent.searchQuery ? { searchQuery: intent.searchQuery } : {})
+      };
+    case "play_by_description":
+      return {
+        action: "play_by_description",
+        description: intent.description,
+        ...(intent.searchQuery ? { searchQuery: intent.searchQuery } : {})
+      };
+    case "chat":
+      return { action: "noop" };
+    default:
+      return { action: intent.type };
+  }
+}
+
+function isClearlyNonCommand(text: string): boolean {
+  return /(?:我|他|她|他们|她们)(?:刚|刚才|已经|正在)?(?:播放|播了|放了|听了)|(?:这个|那个).*(?:推荐算法|播放记录|视频)/u.test(
+    text
+  );
 }
 
 export function summarizeOpenAiError(error: unknown): string {

@@ -62,6 +62,20 @@ describe("voice protocol normalization", () => {
     expect(dedicated[0]).toEqual(final[0]);
   });
 
+  it("keeps source-qualified string track ids from Qwen confirmations", () => {
+    expect(parseVoiceProtocolEvents({
+      type: "response.function_call_arguments.done",
+      name: "run_music_command",
+      call_id: "call-qq",
+      arguments: JSON.stringify({ request: "就这首", selectedTrackId: "qq:003abc" })
+    })).toEqual([{
+      type: "music_command",
+      callId: "call-qq",
+      request: "就这首",
+      selectedTrackId: "qq:003abc"
+    }]);
+  });
+
   it("does not synthesize a completed assistant turn for wait_for_user", () => {
     expect(parseVoiceProtocolEvents({
       type: "response.done",

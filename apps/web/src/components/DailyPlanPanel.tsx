@@ -20,6 +20,7 @@ import {
   regenerateDailyPlan,
   syncMusicSource
 } from "../api";
+import { FULL_STATE_RESTORED_EVENT, type FullStateRestoredDetail } from "../stateRestore";
 
 const PERIOD_LABELS: Record<DayPeriod, string> = {
   morning: "晨间探索",
@@ -50,6 +51,21 @@ export function DailyPlanPanel() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const restore = (event: Event) => {
+      const detail = (event as CustomEvent<FullStateRestoredDetail>).detail;
+      if (!detail) {
+        void refresh();
+        return;
+      }
+      if ("dailyPlan" in detail) setPlan(detail.dailyPlan ?? null);
+      if (detail.musicSources) setSources(detail.musicSources);
+      if (detail.systemStatus) setSystemStatus(detail.systemStatus);
+    };
+    window.addEventListener(FULL_STATE_RESTORED_EVENT, restore);
+    return () => window.removeEventListener(FULL_STATE_RESTORED_EVENT, restore);
   }, [refresh]);
 
   useEffect(() => {

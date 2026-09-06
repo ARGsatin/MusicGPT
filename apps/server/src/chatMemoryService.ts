@@ -6,6 +6,7 @@ import { StateRepository } from "./stateRepository.js";
 const MAX_MEMORIES = 100;
 const MAX_CONTEXT_MEMORIES = 20;
 const MAX_CONTEXT_CHARACTERS = 2_000;
+const MIN_RELEVANCE_SCORE = 2;
 
 type MemoryExtractor = NonNullable<AiDjAssistant["extractMemories"]>;
 
@@ -29,9 +30,11 @@ export class ChatMemoryService {
     const ranked = memories
       .map((memory, index) => ({
         memory,
-        score: relevanceScore(queryTokens, tokenize(memory.content)) * 100 - index
+        relevance: relevanceScore(queryTokens, tokenize(memory.content)),
+        index
       }))
-      .sort((left, right) => right.score - left.score);
+      .filter((entry) => entry.relevance >= MIN_RELEVANCE_SCORE)
+      .sort((left, right) => right.relevance - left.relevance || left.index - right.index);
     const selected: ChatMemory[] = [];
     let characters = 0;
     for (const entry of ranked) {

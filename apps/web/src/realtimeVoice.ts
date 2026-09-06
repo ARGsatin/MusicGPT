@@ -1,4 +1,4 @@
-import type { ConversationTurnStatus, VoiceTurnStartRequest } from "@musicgpt/shared";
+import type { ConversationTurnStatus, TrackReference, VoiceTurnStartRequest } from "@musicgpt/shared";
 import { API_ROUTES } from "@musicgpt/shared";
 
 import { parseVoiceProtocolEvents, type VoiceProtocolEvent } from "./voiceProtocol";
@@ -7,7 +7,7 @@ export interface RealtimeMusicFunctionCall {
   callId: string;
   request: string;
   confirmationToken?: string;
-  selectedTrackId?: number;
+  selectedTrackId?: TrackReference;
 }
 
 export type RealtimeVoiceStatus =
@@ -173,7 +173,7 @@ function parseMusicFunctionCall(event: unknown): RealtimeMusicFunctionCall | und
           ...(typeof args.confirmationToken === "string"
             ? { confirmationToken: args.confirmationToken }
             : {}),
-          ...(typeof args.selectedTrackId === "number"
+          ...(typeof args.selectedTrackId === "number" || (typeof args.selectedTrackId === "string" && args.selectedTrackId.trim())
             ? { selectedTrackId: args.selectedTrackId }
             : {})
         }

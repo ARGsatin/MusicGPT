@@ -38,6 +38,7 @@ export interface RealtimeContextInput {
 export class ConversationKernel {
   private readonly memories: ChatMemoryService;
   private readonly activeTurnIds = new Set<string>();
+  private readonly inFlightTextTurns = new Map<string, Promise<ChatResponse>>();
 
   constructor(
     private readonly repo: StateRepository,
@@ -58,6 +59,25 @@ export class ConversationKernel {
     execute: () => Promise<ConversationOutcome>
   ): Promise<ChatResponse> {
     const turnId = input.turnId?.trim() || `text_${crypto.randomUUID()}`;
+    const pending = this.inFlightTextTurns.get(turnId);
+    if (pending) return pending;
+
+    const execution = this.respondTextOnce(input, execute, turnId);
+    this.inFlightTextTurns.set(turnId, execution);
+    try {
+      return await execution;
+    } finally {
+      if (this.inFlightTextTurns.get(turnId) === execution) {
+        this.inFlightTextTurns.delete(turnId);
+      }
+    }
+  }
+
+  private async respondTextOnce(
+    input: TextTurnInput,
+    execute: () => Promise<ConversationOutcome>,
+    turnId: string
+  ): Promise<ChatResponse> {
     const existingAssistant = this.repo.getChatMessageForTurn(turnId, "assistant");
     if (existingAssistant) {
       return {
@@ -221,8 +241,9 @@ export class ConversationKernel {
       ))
       .slice(-12);
     const compactMessages = trimJson(messages.map(({ role, text, source }) => ({ role, text, source })), 4_000);
+    const memoryQuery = messages.slice(-6).map((message) => message.text).join(" ");
     const compactMemories = trimJson(
-      this.memories.list().slice(0, 20).map(({ category, content }) => ({ category, content })),
+      this.memories.relevantTo(memoryQuery).map(({ category, content }) => ({ category, content })),
       2_000
     );
     const state = trimJson({

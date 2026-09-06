@@ -1,8 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 
-import type { NowPlayingState, TrackLyrics } from "@musicgpt/shared";
+import type { FeedbackReason, NowPlayingState, PlaybackOutcome, PlaybackOutcomeRequest, TrackLyrics } from "@musicgpt/shared";
 import { findActiveLyricIndex } from "../lyrics";
+import {
+  outcomeFromSnapshot,
+  playbackSnapshotFromNow,
+  type ActivePlaybackSnapshot
+} from "../playbackLifecycle";
 import { LyricsOverlay } from "./LyricsOverlay";
+import { ExplicitFeedbackControls, WhyThisTrack } from "./LearningControls";
 import {
   applyPlayerVolume,
   DEFAULT_PLAYER_VOLUME,
@@ -16,7 +22,13 @@ import { getDuckedPlayerVolume, SPEECH_DUCKING_FADE_MS } from "../speech";
 interface TurntableStageProps {
   now: NowPlayingState;
   onFeedback: (type: "skip" | "like" | "replay" | "complete") => Promise<void>;
+  onExplicitFeedback?: (reason: FeedbackReason, listenedMs: number, durationMs?: number) => Promise<void>;
   onFavorite: (favorite: boolean) => Promise<void>;
+  onPlaybackOutcome?: (
+    request: PlaybackOutcomeRequest,
+    options?: { pageLeaving?: boolean }
+  ) => Promise<void>;
+  onPlaybackProgress?: (snapshot: ActivePlaybackSnapshot | undefined) => void;
   onPlaybackStateChange: (paused: boolean) => void;
   onRequestNext: (recordSkip?: boolean) => Promise<void>;
   onTrackEnded: () => Promise<void>;
@@ -122,7 +134,10 @@ const LyricRibbon = memo(function LyricRibbon({
 export const TurntableStage = memo(function TurntableStage({
   now,
   onFeedback,
+  onExplicitFeedback,
   onFavorite,
+  onPlaybackOutcome,
+  onPlaybackProgress,
   onPlaybackStateChange,
   onRequestNext,
   onTrackEnded,
@@ -134,31 +149,79 @@ export const TurntableStage = memo(function TurntableStage({
   const [favorite, setFavorite] = useState(Boolean(now.isFavorite));
   const [favoritePending, setFavoritePending] = useState(false);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [correctionPending, setCorrectionPending] = useState<FeedbackReason | null>(null);
+  const [correctionError, setCorrectionError] = useState<string | null>(null);
   const [heartBurst, setHeartBurst] = useState(0);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [playerVolume, setPlayerVolume] = useState(() => loadPlayerVolume(getBrowserStorage()));
   const audioRef = useRef<HTMLAudioElement>(null);
+  const audioTimeRef = useRef(0);
+  const audioDurationRef = useRef(0);
   const lastAudibleVolumeRef = useRef(
     playerVolume.level > 0 ? playerVolume.level : DEFAULT_PLAYER_VOLUME.level
   );
   const previousSpeechActiveRef = useRef(speechActive);
   const lyricLines = now.lyrics?.lines ?? EMPTY_LYRIC_LINES;
+  const playbackTrackReference = now.track?.trackKey ?? now.track?.id;
+  const playbackIdentity = useMemo(
+    () => playbackSnapshotFromNow(now, 0, now.track?.durationMs),
+    [now.decision?.decisionId, now.playbackId, now.track?.durationMs, playbackTrackReference]
+  );
   const activeLyricIndex = useMemo(
     () => findActiveLyricIndex(lyricLines, audioTime * 1000),
     [audioTime, lyricLines]
   );
 
   useEffect(() => {
+    audioTimeRef.current = 0;
+    audioDurationRef.current = 0;
     setAudioTime(0);
     setAudioDuration(0);
     setFavorite(Boolean(now.isFavorite));
     setFavoriteError(null);
+    setCorrectionError(null);
     setLyricsOpen(false);
-  }, [now.track]);
+  }, [now.playbackId, playbackTrackReference]);
+
+  useEffect(() => {
+    if (!playbackIdentity) {
+      onPlaybackProgress?.(undefined);
+      return;
+    }
+    const durationMs = playbackDurationMs(audioDurationRef.current, playbackIdentity.durationMs);
+    onPlaybackProgress?.({
+      ...playbackIdentity,
+      listenedMs: Math.max(0, Math.round(audioTimeRef.current * 1_000)),
+      ...(durationMs !== undefined ? { durationMs } : {})
+    });
+  }, [onPlaybackProgress, playbackIdentity]);
 
   useEffect(() => {
     setFavorite(Boolean(now.isFavorite));
   }, [now.isFavorite]);
+
+  useEffect(() => {
+    audioTimeRef.current = audioTime;
+  }, [audioTime]);
+
+  useEffect(() => {
+    audioDurationRef.current = audioDuration;
+  }, [audioDuration]);
+
+  useEffect(() => {
+    const reportAbandoned = () => {
+      if (!playbackIdentity) return;
+      const durationMs = playbackDurationMs(audioDurationRef.current, playbackIdentity.durationMs);
+      const request = outcomeFromSnapshot({
+        ...playbackIdentity,
+        listenedMs: Math.max(0, Math.round(audioTimeRef.current * 1_000)),
+        ...(durationMs !== undefined ? { durationMs } : {})
+      }, "abandoned");
+      void onPlaybackOutcome?.(request, { pageLeaving: true }).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", reportAbandoned);
+    return () => window.removeEventListener("pagehide", reportAbandoned);
+  }, [onPlaybackOutcome, playbackIdentity]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -201,7 +264,9 @@ export const TurntableStage = memo(function TurntableStage({
       return;
     }
     audioRef.current.currentTime = value;
+    audioTimeRef.current = value;
     setAudioTime(value);
+    publishPlaybackProgress(value, audioRef.current.duration);
   };
 
   const onReplay = async () => {
@@ -211,6 +276,64 @@ export const TurntableStage = memo(function TurntableStage({
     }
     audioRef.current.currentTime = 0;
     await audioRef.current.play().catch(() => undefined);
+  };
+
+  const reportOutcome = async (outcome: PlaybackOutcome) => {
+    if (!playbackIdentity) return;
+    const durationMs = playbackDurationMs(
+      audioRef.current?.duration ?? audioDurationRef.current,
+      playbackIdentity.durationMs
+    );
+    await onPlaybackOutcome?.(outcomeFromSnapshot({
+      ...playbackIdentity,
+      listenedMs: Math.max(0, Math.round((audioRef.current?.currentTime ?? audioTimeRef.current) * 1_000)),
+      ...(durationMs !== undefined ? { durationMs } : {})
+    }, outcome));
+  };
+
+  const publishPlaybackProgress = (currentTime: number, duration: number) => {
+    if (!playbackIdentity) {
+      onPlaybackProgress?.(undefined);
+      return;
+    }
+    const durationMs = playbackDurationMs(duration, playbackIdentity.durationMs);
+    onPlaybackProgress?.({
+      ...playbackIdentity,
+      listenedMs: Math.max(0, Math.round(currentTime * 1_000)),
+      ...(durationMs !== undefined ? { durationMs } : {})
+    });
+  };
+
+  const onSkip = async () => {
+    await reportOutcome("skipped").catch(() => undefined);
+    await onRequestNext(false);
+  };
+
+  const onAudioEnded = async () => {
+    await reportOutcome("completed").catch(() => undefined);
+    await onTrackEnded();
+  };
+
+  const onAudioError = async () => {
+    await reportOutcome("playback_error").catch(() => undefined);
+    await onRequestNext(false);
+  };
+
+  const onCorrection = async (reason: FeedbackReason) => {
+    if (!onExplicitFeedback || correctionPending) return;
+    setCorrectionPending(reason);
+    setCorrectionError(null);
+    try {
+      await onExplicitFeedback(
+        reason,
+        Math.max(0, Math.round((audioRef.current?.currentTime ?? audioTimeRef.current) * 1_000)),
+        playbackDurationMs(audioRef.current?.duration ?? audioDurationRef.current, now.track?.durationMs)
+      );
+    } catch {
+      setCorrectionError("这次纠正没有保存，请稍后重试。");
+    } finally {
+      setCorrectionPending(null);
+    }
   };
 
   const onToggleFavorite = async () => {
@@ -349,7 +472,7 @@ export const TurntableStage = memo(function TurntableStage({
         >
           <span aria-hidden="true">{playbackPaused ? "▶" : "❚❚"}</span>
         </button>
-        <button className="transport-btn" type="button" aria-label="Next" onClick={() => void onRequestNext(true)}>
+        <button className="transport-btn" type="button" aria-label="Next" onClick={() => void onSkip()}>
           <span aria-hidden="true">⇥</span>
         </button>
         <button
@@ -370,6 +493,13 @@ export const TurntableStage = memo(function TurntableStage({
           {favoriteError}
         </p>
       ) : null}
+
+      <WhyThisTrack decision={now.decision} />
+      <ExplicitFeedbackControls
+        disabled={!now.track || correctionPending !== null}
+        onFeedback={(reason) => void onCorrection(reason)}
+      />
+      {correctionError ? <p className="favorite-error" role="alert">{correctionError}</p> : null}
 
       <div className="seek-row">
         <span className="timecode">{formatDuration(audioTime)}</span>
@@ -409,16 +539,35 @@ export const TurntableStage = memo(function TurntableStage({
       </div>
 
       <audio
+        key={now.playbackId ?? String(now.track?.trackKey ?? now.track?.id ?? "idle")}
         ref={audioRef}
         autoPlay
         src={now.track ? `/api/tracks/${encodeURIComponent(String(now.track.trackKey ?? now.track.id))}/audio` : undefined}
-        onEnded={() => void onTrackEnded()}
+        onEnded={() => void onAudioEnded()}
+        onError={() => void onAudioError()}
         onPlay={() => setPlaybackPaused(false)}
         onPause={() => setPlaybackPaused(true)}
-        onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
-        onLoadedMetadata={(event) => setAudioDuration(event.currentTarget.duration)}
+        onTimeUpdate={(event) => {
+          const currentTime = event.currentTarget.currentTime;
+          audioTimeRef.current = currentTime;
+          setAudioTime(currentTime);
+          publishPlaybackProgress(currentTime, event.currentTarget.duration);
+        }}
+        onLoadedMetadata={(event) => {
+          const duration = event.currentTarget.duration;
+          audioDurationRef.current = duration;
+          setAudioDuration(duration);
+          publishPlaybackProgress(event.currentTarget.currentTime, duration);
+        }}
         className="audio"
       />
     </section>
   );
 });
+
+function playbackDurationMs(audioDurationSeconds: number, trackDurationMs: number | undefined): number | undefined {
+  if (Number.isFinite(audioDurationSeconds) && audioDurationSeconds > 0) {
+    return Math.round(audioDurationSeconds * 1_000);
+  }
+  return trackDurationMs && trackDurationMs > 0 ? trackDurationMs : undefined;
+}

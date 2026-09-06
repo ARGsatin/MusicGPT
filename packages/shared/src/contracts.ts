@@ -4,8 +4,11 @@ import type {
   EnvironmentLocationRequest,
   FavoriteRequest,
   FeedbackRequest,
+  LearningUndoRequest,
   NextRequest,
+  PlaybackOutcomeRequest,
   PlayTrackRequest,
+  TasteSignalMutationRequest,
   TrackReference,
   WsPayload
 } from "./types.js";
@@ -26,7 +29,10 @@ export const API_ROUTES = {
   next: "/api/next",
   playTrack: "/api/play-track",
   taste: "/api/taste",
+  tasteSignals: "/api/taste/signals",
   feedback: "/api/feedback",
+  listeningOutcomes: "/api/listening/outcomes",
+  learningUndo: "/api/learning/undo",
   favorite: (trackId: TrackReference) => `/api/favorites/${encodeURIComponent(String(trackId))}`,
   systemStatus: "/api/system/status",
   importNcm: "/api/import/ncm",
@@ -67,10 +73,71 @@ export function isFeedbackRequest(value: unknown): value is FeedbackRequest {
     return false;
   }
   const maybe = value as FeedbackRequest;
+  const validReason =
+    maybe.reason === undefined ||
+    [
+      "dislike_track",
+      "less_this_artist",
+      "wrong_for_now",
+      "overplayed",
+      "bad_version",
+      "playback_problem"
+    ].includes(maybe.reason);
+  const validScope = maybe.scope === undefined || ["session", "day", "long_term"].includes(maybe.scope);
+  const validOptionalId = (id: string | undefined) => id === undefined || (typeof id === "string" && id.length > 0);
+  const validDuration = (duration: number | undefined) =>
+    duration === undefined || (typeof duration === "number" && Number.isFinite(duration) && duration >= 0);
   return (
     (typeof maybe.trackId === "number" || typeof maybe.trackId === "string") &&
-    ["skip", "like", "unlike", "replay", "complete"].includes(maybe.type)
+    ["skip", "like", "unlike", "replay", "complete", "teach"].includes(maybe.type) &&
+    validReason &&
+    validScope &&
+    validOptionalId(maybe.playbackId) &&
+    validOptionalId(maybe.decisionId) &&
+    validDuration(maybe.listenedMs) &&
+    validDuration(maybe.durationMs)
   );
+}
+
+export function isPlaybackOutcomeRequest(value: unknown): value is PlaybackOutcomeRequest {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const maybe = value as PlaybackOutcomeRequest;
+  return (
+    typeof maybe.playbackId === "string" &&
+    maybe.playbackId.length > 0 &&
+    (typeof maybe.trackId === "number" || typeof maybe.trackId === "string") &&
+    ["completed", "skipped", "abandoned", "playback_error"].includes(maybe.outcome) &&
+    typeof maybe.listenedMs === "number" &&
+    Number.isFinite(maybe.listenedMs) &&
+    maybe.listenedMs >= 0 &&
+    (maybe.durationMs === undefined ||
+      (typeof maybe.durationMs === "number" && Number.isFinite(maybe.durationMs) && maybe.durationMs >= 0)) &&
+    (maybe.decisionId === undefined || (typeof maybe.decisionId === "string" && maybe.decisionId.length > 0)) &&
+    (maybe.at === undefined || (typeof maybe.at === "string" && !Number.isNaN(Date.parse(maybe.at))))
+  );
+}
+
+export function isLearningUndoRequest(value: unknown): value is LearningUndoRequest {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof (value as LearningUndoRequest).undoToken === "string" &&
+      (value as LearningUndoRequest).undoToken.length > 0
+  );
+}
+
+export function isTasteSignalMutationRequest(value: unknown): value is TasteSignalMutationRequest {
+  if (!value || typeof value !== "object") return false;
+  const maybe = value as TasteSignalMutationRequest;
+  if (!["confirm", "decrease", "block", "delete", "reset_automatic"].includes(maybe.action)) {
+    return false;
+  }
+  if (maybe.action === "reset_automatic") {
+    return maybe.signalId === undefined;
+  }
+  return typeof maybe.signalId === "string" && maybe.signalId.length > 0;
 }
 
 export function isFavoriteRequest(value: unknown): value is FavoriteRequest {

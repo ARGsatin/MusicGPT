@@ -58,7 +58,6 @@ export class TasteEngine {
       ["unknown", 0]
     ]);
 
-    const statByTrackId = new Map(stats.map((stat) => [getTrackKey(stat.track), stat]));
     const latestFavoriteEvent = new Map<string, PlayEvent>();
     for (const event of recentEvents) {
       if (event.type !== "like" && event.type !== "unlike") {
@@ -106,28 +105,6 @@ export class TasteEngine {
       }
     }
 
-    for (const event of recentEvents) {
-      const stat = statByTrackId.get(normalizeTrackReference(event.trackId));
-      const eventWeight =
-        event.type === "replay"
-          ? 2
-          : event.type === "complete"
-            ? 1
-            : event.type === "skip"
-              ? -3
-              : 0;
-      if (stat && eventWeight !== 0) {
-        for (const tag of inferTrackTags(stat.track)) {
-          addTagWeight(tagWeights, tag, eventWeight * recency(event.at), 1);
-        }
-      }
-      if (event.type === "skip") {
-        const hour = new Date(event.at).getHours();
-        const period = periodFromHour(hour);
-        periodWeights.set(period, Math.max(0, (periodWeights.get(period) ?? 0) - 0.3));
-      }
-    }
-
     const topArtists: TopArtist[] = normalizeWeights(artistWeights)
       .sort((a, b) => b.value - a.value)
       .slice(0, 8)
@@ -161,13 +138,9 @@ export class TasteEngine {
         playCount: item.playCount
       }));
 
-    const skipRate =
-      recentEvents.length === 0
-        ? 0
-        : recentEvents.filter((event) => event.type === "skip").length / recentEvents.length;
-
-    const pacingPreference: TasteProfile["pacingPreference"] =
-      skipRate < 0.15 ? "gentle" : skipRate < 0.3 ? "balanced" : "dynamic";
+    // Playback outcomes are raw facts. Outcome learning, including pacing
+    // adaptation, belongs to ListeningPolicy where it is auditable and undoable.
+    const pacingPreference: TasteProfile["pacingPreference"] = "gentle";
 
     const firstPeriod = favoritePeriods[0]?.period ?? "evening";
     const firstArtist = topArtists[0]?.name ?? "你常听的艺人";

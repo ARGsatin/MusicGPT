@@ -29,16 +29,48 @@ describe("TasteEngine", () => {
     expect(profile.moodWeights.focus).toBeGreaterThan(profile.moodWeights.night);
   });
 
-  it("downgrades period weight when skip events accumulate", () => {
+  it("does not learn tags, periods, or pacing from raw playback outcomes", () => {
     const engine = new TasteEngine();
-    const events: PlayEvent[] = [
-      { type: "skip", trackId: 1, at: new Date("2026-04-23T09:00:00.000Z").toISOString() },
-      { type: "skip", trackId: 3, at: new Date("2026-04-23T09:30:00.000Z").toISOString() }
+    const stats: TrackStat[] = [
+      {
+        track: {
+          id: 101,
+          title: "Morning Rock",
+          artists: ["Artist A"],
+          tags: [{ category: "style", value: "摇滚" }]
+        },
+        playCount: 10,
+        lastPlayedHour: 9
+      },
+      {
+        track: {
+          id: 102,
+          title: "Night Jazz",
+          artists: ["Artist B"],
+          tags: [{ category: "style", value: "爵士" }]
+        },
+        playCount: 10,
+        lastPlayedHour: 23
+      }
     ];
-    const profile = engine.generate(baseStats, events);
-    const morning = profile.favoritePeriods.find((period) => period.period === "morning");
+    const startedAt = new Date(2026, 7, 25, 9).toISOString();
+    const factualEvents: PlayEvent[] = [
+      { type: "play_start", trackId: 101, at: startedAt }
+    ];
+    const rawOutcomes: PlayEvent[] = [
+      { type: "replay", trackId: 102, at: startedAt },
+      { type: "complete", trackId: 102, at: startedAt },
+      { type: "skip", trackId: 101, at: startedAt },
+      { type: "abandoned", trackId: 101, at: startedAt },
+      { type: "playback_error", trackId: 102, at: startedAt }
+    ];
 
-    expect(morning?.weight).toBeLessThan(0.95);
+    const factualProfile = engine.generate(stats, factualEvents);
+    const profileWithRawOutcomes = engine.generate(stats, [...factualEvents, ...rawOutcomes]);
+
+    expect(profileWithRawOutcomes.preferenceTags).toEqual(factualProfile.preferenceTags);
+    expect(profileWithRawOutcomes.favoritePeriods).toEqual(factualProfile.favoritePeriods);
+    expect(profileWithRawOutcomes.pacingPreference).toBe(factualProfile.pacingPreference);
   });
 
   it("builds weighted artist, style, period, weather, and scene tags from a local favorite", () => {

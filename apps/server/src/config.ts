@@ -43,6 +43,10 @@ const schema = z.object({
   AI_DJ_MEMORY_TURNS: z.coerce.number().int().min(1).max(30).default(20),
   AI_DJ_CHAT_MAX_TOKENS: z.coerce.number().int().min(200).max(2_000).default(800),
   REALTIME_CONVERSATION_MODE: z.enum(["unified", "legacy"]).default("unified"),
+  INTELLIGENCE_POLICY_MODE: z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    z.enum(["legacy", "shadow", "adaptive"]).optional()
+  ),
   NCM_COOKIE: optionalString(),
   NCM_BASE_URL: z.string().url().default("http://127.0.0.1:3001"),
   DB_PATH: z.string().default("./state/musicgpt.db"),
@@ -111,6 +115,7 @@ export const config = {
   aiDjMemoryTurns: parsed.AI_DJ_MEMORY_TURNS,
   aiDjChatMaxTokens: parsed.AI_DJ_CHAT_MAX_TOKENS,
   realtimeConversationMode: parsed.REALTIME_CONVERSATION_MODE,
+  intelligencePolicyMode: parsed.INTELLIGENCE_POLICY_MODE,
   ncmCookie: parsed.NCM_COOKIE,
   ncmBaseUrl: parsed.NCM_BASE_URL,
   dbPath: resolvedDbPath,

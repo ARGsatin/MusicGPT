@@ -5,10 +5,15 @@ import type {
   DailyPlanSegment,
   DayPeriod,
   EnvironmentContext,
+  IntelligencePolicyMode,
   MusicTag,
   PlayEvent,
   RadioPlanItem,
+  RecommendationCandidate,
+  RecommendationEvidence,
+  RecommendationSource,
   RoutineBlock,
+  SessionIntent,
   TasteManualRules,
   TasteProfile,
   Track,
@@ -19,14 +24,16 @@ import type {
 import { getTrackKey, normalizeTrackIdentity, normalizeTrackReference } from "./musicCatalog.js";
 import { isEligibleRecommendationTrack } from "./recommendationQuality.js";
 import { inferTrackTags } from "./trackTags.js";
+import {
+  DEFAULT_DAILY_PLAN_QUOTAS,
+  ListeningPolicy,
+  satisfiesListeningConstraints,
+  type RankedDecision
+} from "./listeningPolicy.js";
 
 const DEFAULT_DURATION_MS = 3.5 * 60 * 1000;
 const MAX_TRACKS_PER_PERIOD = 10;
-const DAILY_PLAN_VERSION = 3;
-const MORNING_EXPLORE_TARGET = 4;
-const AFTERNOON_SOFT_TARGET = 7;
-const AFTERNOON_CLASSICAL_TARGET = 2;
-const EVENING_MEMORY_TARGET = 8;
+const DAILY_PLAN_VERSION = 4;
 type PlanPeriod = Exclude<DayPeriod, "late_night">;
 const PERIODS: Array<{ period: PlanPeriod; start: string; end: string }> = [
   { period: "morning", start: "06:00", end: "12:00" },
@@ -56,6 +63,10 @@ interface PlanCandidate {
   classical: boolean;
   longTerm: boolean;
   memoryScore: number;
+  decisionId?: string;
+  evidence?: RecommendationEvidence[];
+  policyVersion?: string;
+  recommendationSource?: RecommendationSource;
 }
 
 interface RankedCandidate extends PlanCandidate {
@@ -76,21 +87,50 @@ export interface DailyPlanGenerateInput {
   consumedTrackKeys?: string[];
   currentTrackKey?: string;
   feedback?: PlayEvent[];
+  candidates?: RecommendationCandidate[];
+  desiredMood?: string;
+  sessionIntent?: SessionIntent;
+  sessionId?: string;
+  policyMode?: IntelligencePolicyMode;
+  onPolicyError?: (error: unknown) => void;
+  onShadowRanking?: (period: PlanPeriod, decisions: RankedDecision[]) => void;
 }
 
 export class DailyPlanEngine {
+  constructor(private readonly listeningPolicy = new ListeningPolicy()) {}
+
   generate(input: DailyPlanGenerateInput): DailyPlan {
     const generatedAt = new Date().toISOString();
+    const policyMode = input.policyMode ?? "adaptive";
+    const policyProfile = this.listeningPolicy.profile();
+    const quotas = policyMode === "adaptive"
+      ? policyProfile.quotas
+      : { ...DEFAULT_DAILY_PLAN_QUOTAS };
     const contextHash = hash(JSON.stringify({
       plannerVersion: DAILY_PLAN_VERSION,
+      policyMode,
+      quotas,
       date: input.date,
       timezone: input.timezone,
       weather: input.weather,
       weatherByPeriod: input.weatherByPeriod,
       routine: input.routine,
       rules: input.rules,
+      desiredMood: input.desiredMood,
+      sessionIntent: input.sessionIntent,
+      policySignals: policyMode === "adaptive"
+        ? policyProfile.signals.map((signal) =>
+            `${signal.signalId}:${signal.updatedAt}:${signal.reversedAt ?? ""}:${signal.value ?? signal.strength}`
+          )
+        : [],
       library: input.stats.map((stat) => `${getTrackKey(stat.track)}:${stat.playCount}`),
-      feedback: (input.feedback ?? []).slice(0, 200).map((event) => `${event.trackId}:${event.type}:${event.at}`)
+      candidates: (input.candidates ?? []).map((candidate) =>
+        `${getTrackKey(candidate.track)}:${candidate.source}:${candidate.relevanceScore}`
+      ),
+      feedback: (input.feedback ?? [])
+        .filter((event) => !["impression", "play_start", "play"].includes(event.type))
+        .slice(0, 200)
+        .map((event) => `${event.trackId}:${event.type}:${event.at}`)
     }));
     const previousIsSameDay = input.previous?.date === input.date;
     const consumed = new Set(
@@ -102,12 +142,43 @@ export class DailyPlanEngine {
     if (input.currentTrackKey) lockedTrackKeys.add(input.currentTrackKey);
     const usedRecordings = new Set<string>();
     const recentArtists: string[] = [];
-    const allNormalizedStats = input.stats
+    const libraryStats = input.stats
       .map((stat) => ({ ...stat, track: normalizeTrackIdentity(stat.track) }));
+    const libraryTrackKeys = new Set(libraryStats.map((stat) => getTrackKey(stat.track)));
+    const recommendationSourceByTrackKey = new Map<string, RecommendationSource>();
+    const normalizedCandidates = (input.candidates ?? [])
+      .map((candidate): RecommendationCandidate => ({
+        ...candidate,
+        track: normalizeTrackIdentity({
+          ...candidate.track,
+          tags: [...(candidate.track.tags ?? []), ...candidate.tags]
+        }),
+        tags: [...(candidate.track.tags ?? []), ...candidate.tags]
+      }));
+    const candidateStats = normalizedCandidates
+      .filter((candidate) => !libraryTrackKeys.has(getTrackKey(candidate.track)))
+      .map((candidate): TrackStat => {
+        recommendationSourceByTrackKey.set(getTrackKey(candidate.track), candidate.source);
+        return { track: candidate.track, playCount: 0 };
+      });
+    const allNormalizedStats = [...libraryStats, ...candidateStats];
+    const blockedRecordingKeys = new Set(
+      allNormalizedStats
+        .filter((stat) => isBlocked(stat.track, input.rules))
+        .map((stat) => stat.track.recordingKey!)
+    );
+    const policyStats = allNormalizedStats
+      .filter((stat) => !blockedRecordingKeys.has(stat.track.recordingKey!));
+    const policyCandidates = normalizedCandidates
+      .filter((candidate) => !blockedRecordingKeys.has(candidate.track.recordingKey!));
     const recordingReferences = buildRecordingReferenceIndex(allNormalizedStats);
+    // Legacy/shadow keep their historical comparator. Adaptive ranking learns
+    // from reversible ListeningPolicy observations; raw feedback must not add
+    // a second, non-undoable preference penalty or reward.
+    const legacyFeedback = policyMode === "adaptive" ? [] : (input.feedback ?? []);
     const familiarityByRecording = aggregateRecordingFamiliarity(
       allNormalizedStats,
-      input.feedback ?? [],
+      legacyFeedback,
       recordingReferences
     );
     const lockedRecordings = new Set([...lockedTrackKeys].flatMap((trackKey) => {
@@ -116,11 +187,11 @@ export class DailyPlanEngine {
     }));
     const feedbackMultiplierByRecording = new Map([...familiarityByRecording.keys()].map((recordingKey) => [
       recordingKey,
-      recordingFeedbackMultiplier(recordingKey, input.feedback ?? [], recordingReferences)
+      recordingFeedbackMultiplier(recordingKey, legacyFeedback, recordingReferences)
     ]));
     const normalizedStats = allNormalizedStats
       .filter((stat) => isEligibleRecommendationTrack(stat.track))
-      .filter((stat) => !isBlocked(stat.track, input.rules))
+      .filter((stat) => !blockedRecordingKeys.has(stat.track.recordingKey!))
       .filter((stat) => (feedbackMultiplierByRecording.get(stat.track.recordingKey!) ?? 1) > 0);
     const topRecordingKeys = new Set(input.profile.topTracks.flatMap((item) => {
       const recordingKey = resolveRecordingReference(item.id, recordingReferences);
@@ -150,6 +221,8 @@ export class DailyPlanEngine {
         memoryScore: recordingMemoryScore(familiarity, topRecordingKeys, recordingKey)
       };
     });
+    const legacyCandidates = candidates.filter((candidate) => libraryTrackKeys.has(getTrackKey(candidate.stat.track)))
+      .filter((candidate) => satisfiesListeningConstraints(candidate.stat.track, input.sessionIntent?.constraints));
     const candidateByRecording = new Map<string, PlanCandidate>();
     for (const candidate of candidates) {
       const current = candidateByRecording.get(candidate.recordingKey);
@@ -166,51 +239,146 @@ export class DailyPlanEngine {
         availableDurationMs: availableDuration(period.start, period.end, routine)
       }] as const;
     }));
+    const rankedCache = new Map<PlanPeriod, RankedCandidate[]>();
+    let policyFallbackOccurred = false;
     const rankedFor = (period: PlanPeriod): RankedCandidate[] => {
+      const cached = rankedCache.get(period);
+      if (cached) return cached;
       const context = contexts.get(period)!;
-      return candidates
-        .map((candidate) => ({
-          ...candidate,
-          score: scoreTrack(
-            candidate.stat,
-            input.profile,
-            input.rules,
-            period,
-            context.weather.weather,
-            context.routine
-          ) * (feedbackMultiplierByRecording.get(candidate.recordingKey) ?? 1) +
-            periodThemeBonus(candidate, period),
-          tie: hash(`${input.date}|${period}|${getTrackKey(candidate.stat.track)}`)
-        }))
+      let effectivePolicyMode = policyMode;
+      let decisions = [] as ReturnType<ListeningPolicy["rank"]>;
+      if (policyMode !== "legacy") {
+        try {
+          decisions = this.listeningPolicy.rank({
+            stats: policyStats,
+            ...(policyCandidates.length > 0 ? { candidates: policyCandidates } : {}),
+            profile: input.profile,
+            rules: input.rules,
+            ...(input.feedback ? { events: input.feedback } : {}),
+            context: {
+              constraints: input.sessionIntent?.constraints ?? [],
+              period,
+              weather: context.weather.weather,
+              routine: context.routine,
+              ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+              ...((input.sessionIntent?.direction !== "avoid" && input.sessionIntent?.value) || input.desiredMood
+                ? { desiredMood: input.sessionIntent?.direction !== "avoid" ? input.sessionIntent?.value ?? input.desiredMood : input.desiredMood }
+                : {})
+            }
+          });
+        } catch (error) {
+          effectivePolicyMode = "legacy";
+          policyFallbackOccurred = true;
+          input.onPolicyError?.(error);
+        }
+      }
+      if (policyMode === "shadow") {
+        input.onShadowRanking?.(period, decisions);
+      }
+      const policyRanked = decisions
+        .flatMap((decision): RankedCandidate[] => {
+          const stat = allNormalizedStats.find((entry) => getTrackKey(entry.track) === getTrackKey(decision.track));
+          const familiarity = familiarityByRecording.get(decision.recordingKey);
+          if (!stat || !familiarity) return [];
+          const effectiveStat: TrackStat = {
+            ...stat,
+            playCount: familiarity.playCount,
+            ...(familiarity.likedAt ? { likedAt: familiarity.likedAt } : {}),
+            ...(familiarity.localFavoritedAt ? { localFavoritedAt: familiarity.localFavoritedAt } : {})
+          };
+          const candidate: PlanCandidate = {
+            stat: effectiveStat,
+            recordingKey: decision.recordingKey,
+            explore: familiarity.playCount === 0 &&
+              !familiarity.likedAt &&
+              !familiarity.localFavoritedAt &&
+              !familiarity.lastPlayedAt &&
+              !familiarity.positiveFeedback,
+            soft: isSoftTrack(decision.track),
+            classical: isClassicalTrack(decision.track),
+            longTerm: recordingIsLongTerm(familiarity),
+            memoryScore: recordingMemoryScore(familiarity, topRecordingKeys, decision.recordingKey),
+            decisionId: decision.decisionId,
+            evidence: decision.evidence,
+            policyVersion: decision.policyVersion,
+            recommendationSource: decision.source
+          };
+          return [{
+            ...candidate,
+            score: decision.score + periodThemeBonus(candidate, period),
+            tie: hash(`${input.date}|${period}|${getTrackKey(candidate.stat.track)}`)
+          }];
+        })
         .sort((left, right) => right.score - left.score || left.tie.localeCompare(right.tie));
+      if (effectivePolicyMode === "adaptive") {
+        rankedCache.set(period, policyRanked);
+        return policyRanked;
+      }
+      const legacyRanked = legacyCandidates
+        .map((candidate): RankedCandidate => {
+          return {
+            ...candidate,
+            score: scoreTrack(
+              candidate.stat,
+              input.profile,
+              input.rules,
+              period,
+              context.weather.weather,
+              context.routine
+            ) * (feedbackMultiplierByRecording.get(candidate.recordingKey) ?? 1) +
+              periodThemeBonus(candidate, period),
+            tie: hash(`${input.date}|${period}|${getTrackKey(candidate.stat.track)}`)
+          };
+        })
+        .sort((left, right) => right.score - left.score || left.tie.localeCompare(right.tie));
+      rankedCache.set(period, legacyRanked);
+      return legacyRanked;
     };
     const afternoonRanked = rankedFor("afternoon");
     const afternoonClassical = reserveRecordingKeys(
       afternoonRanked,
       (candidate) => candidate.classical,
-      AFTERNOON_CLASSICAL_TARGET
+      quotas.afternoonClassical
     );
     const eveningRanked = [...rankedFor("evening")]
       .sort((left, right) => right.memoryScore - left.memoryScore || right.score - left.score || left.tie.localeCompare(right.tie));
     const eveningMemory = reserveRecordingKeys(
       eveningRanked,
       (candidate) => candidate.longTerm,
-      EVENING_MEMORY_TARGET,
+      quotas.eveningMemory,
       afternoonClassical
     );
     const afternoonReserved = reserveRecordingKeys(
       afternoonRanked,
       (candidate) => candidate.soft,
-      AFTERNOON_SOFT_TARGET,
+      quotas.afternoonSoft,
       eveningMemory,
       afternoonClassical
     );
     const morningExplore = reserveRecordingKeys(
       rankedFor("morning"),
       (candidate) => candidate.explore,
-      MORNING_EXPLORE_TARGET,
+      quotas.morningExplore,
       mergeSets(afternoonReserved, eveningMemory)
     );
+    if (policyMode === "adaptive" && policyFallbackOccurred) {
+      const {
+        onPolicyError: _onPolicyError,
+        onShadowRanking: _onShadowRanking,
+        ...fallbackInput
+      } = input;
+      const fallback = this.generate({ ...fallbackInput, policyMode: "legacy" });
+      return {
+        ...fallback,
+        contextHash: hash(JSON.stringify({
+          plannerVersion: DAILY_PLAN_VERSION,
+          requestedPolicyMode: "adaptive",
+          effectivePolicyMode: "legacy",
+          policyFallback: true,
+          legacyContextHash: fallback.contextHash
+        }))
+      };
+    }
     const segments: DailyPlanSegment[] = [];
 
     for (const period of PERIODS) {
@@ -241,7 +409,11 @@ export class DailyPlanEngine {
           score: Number(score.toFixed(4)),
           reason: `${theme}${context ? ` · ${context}` : ""}`,
           bucket: selected.explore ? "explore" : "familiar",
-          source: "library"
+          source: selected.recommendationSource ??
+            recommendationSourceByTrackKey.get(getTrackKey(stat.track)) ?? "library",
+          ...(selected.decisionId ? { decisionId: selected.decisionId } : {}),
+          ...(selected.evidence ? { evidence: selected.evidence } : {}),
+          ...(selected.policyVersion ? { policyVersion: selected.policyVersion } : {})
         });
         selectedCandidates.push(selected);
         return true;
@@ -315,7 +487,7 @@ export class DailyPlanEngine {
           const explorePositions = new Set([0, 3, 6, 9]);
           while (items.length < MAX_TRACKS_PER_PERIOD) {
             const exploreCount = countSelected((candidate) => candidate.explore);
-            const exploreNeeded = Math.max(0, MORNING_EXPLORE_TARGET - exploreCount);
+            const exploreNeeded = Math.max(0, quotas.morningExplore - exploreCount);
             const remainingSlots = MAX_TRACKS_PER_PERIOD - items.length;
             const remainingExplorePositions = [...explorePositions]
               .filter((position) => position >= items.length).length;
@@ -357,14 +529,14 @@ export class DailyPlanEngine {
             scored,
             (candidate) => afternoonClassical.has(candidate.recordingKey) && candidate.classical,
             (candidate) => candidate.classical,
-            AFTERNOON_CLASSICAL_TARGET,
+            quotas.afternoonClassical,
             "午后柔和"
           );
           selectUntil(
             scored,
             (candidate) => candidate.classical,
             (candidate) => candidate.classical,
-            AFTERNOON_CLASSICAL_TARGET,
+            quotas.afternoonClassical,
             "午后柔和",
             eveningMemory
           );
@@ -372,14 +544,14 @@ export class DailyPlanEngine {
             scored,
             (candidate) => afternoonReserved.has(candidate.recordingKey) && candidate.soft,
             (candidate) => candidate.soft,
-            AFTERNOON_SOFT_TARGET,
+            quotas.afternoonSoft,
             "午后柔和"
           );
           selectUntil(
             scored,
             (candidate) => candidate.soft,
             (candidate) => candidate.soft,
-            AFTERNOON_SOFT_TARGET,
+            quotas.afternoonSoft,
             "午后柔和",
             eveningMemory
           );
@@ -388,14 +560,14 @@ export class DailyPlanEngine {
             scored,
             (candidate) => eveningMemory.has(candidate.recordingKey) && candidate.longTerm,
             (candidate) => candidate.longTerm,
-            EVENING_MEMORY_TARGET,
+            quotas.eveningMemory,
             "晚间回忆"
           );
           selectUntil(
             scored,
             (candidate) => candidate.longTerm,
             (candidate) => candidate.longTerm,
-            EVENING_MEMORY_TARGET,
+            quotas.eveningMemory,
             "晚间回忆"
           );
         }

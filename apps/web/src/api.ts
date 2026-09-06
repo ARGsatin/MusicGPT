@@ -8,12 +8,15 @@ import type {
   EnvironmentLocationRequest,
   FavoriteResponse,
   FeedbackRequest,
+  LearningReceipt,
+  LearningUndoRequest,
   ImportNcmResponse,
   NextResponse,
   NowPlayingState,
   MusicCommandRequest,
   MusicCommandResult,
   PlayTrackResponse,
+  PlaybackOutcomeRequest,
   PlayDailyPlanResponse,
   RealtimeContextResponse,
   RecommendationImportResponse,
@@ -26,6 +29,7 @@ import type {
   SystemStatus,
   TasteProfile,
   TasteResponse,
+  TasteSignalMutationRequest,
   Track,
   TrackReference,
   VoiceTurnCompleteRequest,
@@ -307,7 +311,7 @@ export async function playQueuedTrack(trackId: TrackReference): Promise<PlayTrac
   return (await response.json()) as PlayTrackResponse;
 }
 
-export async function sendFeedback(payload: FeedbackRequest): Promise<void> {
+export async function sendFeedback(payload: FeedbackRequest): Promise<LearningReceipt> {
   const response = await fetch("/api/feedback", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -316,6 +320,53 @@ export async function sendFeedback(payload: FeedbackRequest): Promise<void> {
   if (!response.ok) {
     throw new Error("Feedback failed");
   }
+  const result = await response.json() as { learningReceipt: LearningReceipt };
+  return result.learningReceipt;
+}
+
+export async function mutateTasteSignal(payload: TasteSignalMutationRequest): Promise<LearningReceipt> {
+  const response = await fetch(API_ROUTES.tasteSignals, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    if (response.status === 404) throw new Error("这条画像信号已不存在，或被 taste.md 固定，不能在页面修改。");
+    throw new Error("音乐画像修改失败");
+  }
+  const result = await response.json() as { learningReceipt: LearningReceipt };
+  return result.learningReceipt;
+}
+
+export async function submitPlaybackOutcome(
+  payload: PlaybackOutcomeRequest,
+  options: { keepalive?: boolean } = {}
+): Promise<{ duplicate: boolean; learningReceipt?: LearningReceipt }> {
+  const response = await fetch(API_ROUTES.listeningOutcomes, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    keepalive: options.keepalive ?? false
+  });
+  if (!response.ok) throw new Error("Playback outcome could not be saved");
+  return response.json() as Promise<{ duplicate: boolean; learningReceipt?: LearningReceipt }>;
+}
+
+export function submitPlaybackOutcomeBeacon(payload: PlaybackOutcomeRequest): boolean {
+  if (typeof navigator === "undefined" || typeof navigator.sendBeacon !== "function") return false;
+  const body = new Blob([JSON.stringify(payload)], { type: "application/json" });
+  return navigator.sendBeacon(API_ROUTES.listeningOutcomes, body);
+}
+
+export async function undoLearning(payload: LearningUndoRequest): Promise<LearningReceipt> {
+  const response = await fetch(API_ROUTES.learningUndo, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error("Learning change could not be undone");
+  const result = await response.json() as { learningReceipt: LearningReceipt };
+  return result.learningReceipt;
 }
 
 export async function setFavorite(trackId: TrackReference, favorite: boolean): Promise<FavoriteResponse> {

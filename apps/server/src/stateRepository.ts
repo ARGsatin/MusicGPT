@@ -13,13 +13,15 @@ import type {
   LibraryEvidence,
   DailyPlan,
   NowPlayingState,
+  PlaybackOutcomeRequest,
   PlayEvent,
   RecommendationCandidate,
   RecommendationSource,
   TasteProfile,
   Track,
   TrackReference,
-  TrackStat
+  TrackStat,
+  SessionIntent
 } from "@musicgpt/shared";
 
 import {
@@ -27,6 +29,14 @@ import {
   normalizeTrackIdentity,
   normalizeTrackReference
 } from "./musicCatalog.js";
+import type { IntelligencePolicyState } from "./intelligencePolicy.js";
+import type {
+  LearningReceipt as PolicyLearningReceipt,
+  ListeningObservation,
+  ListeningPolicyState,
+  PreferenceSignal,
+  RankedDecision
+} from "./listeningPolicy.js";
 
 function parseJson<T>(raw: string | null, fallback: T): T {
   if (!raw) {
@@ -40,17 +50,33 @@ function parseJson<T>(raw: string | null, fallback: T): T {
 }
 
 export class StateRepository {
-  private readonly db: DatabaseSync;
+  private db: DatabaseSync;
   private migratedToV2 = false;
 
-  constructor(readonly dbPath: string) {
+  constructor(
+    readonly dbPath: string,
+    private readonly options: { beforeIntelligenceMigration?: () => void } = {}
+  ) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    this.backupLegacyDatabase(dbPath);
-    this.bootstrap();
+    const legacyBackup = this.backupLegacyDatabase(dbPath);
+    const intelligenceBackup = this.backupIntelligenceDatabase(dbPath);
+    try {
+      this.bootstrap();
+    } catch (error) {
+      this.db.close();
+      const restoreFrom = intelligenceBackup ?? legacyBackup;
+      if (restoreFrom && dbPath !== ":memory:") {
+        for (const sidecar of [`${dbPath}-wal`, `${dbPath}-shm`]) {
+          if (fs.existsSync(sidecar)) fs.rmSync(sidecar);
+        }
+        fs.copyFileSync(restoreFrom, dbPath);
+      }
+      throw error;
+    }
   }
 
-  private backupLegacyDatabase(dbPath: string): void {
+  private backupLegacyDatabase(dbPath: string): string | undefined {
     if (dbPath === ":memory:" || !fs.existsSync(dbPath) || !this.hasLegacyTrackIdentitySchema()) {
       return;
     }
@@ -59,6 +85,7 @@ export class StateRepository {
     // VACUUM INTO uses SQLite's own snapshot machinery, so the backup stays
     // consistent even when the source database uses a journal or WAL file.
     this.db.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
+    return backupPath;
   }
 
   private hasLegacyTrackIdentitySchema(): boolean {
@@ -70,6 +97,28 @@ export class StateRepository {
       const columns = this.tableColumns(table);
       return columns.includes("track_id") && !columns.includes("track_key");
     });
+  }
+
+  private backupIntelligenceDatabase(dbPath: string): string | undefined {
+    if (dbPath === ":memory:" || !fs.existsSync(dbPath) || !this.needsIntelligenceMigration()) {
+      return undefined;
+    }
+    const stamp = new Date().toISOString().replaceAll(":", "-");
+    const backupPath = `${dbPath}.intelligence-backup-${stamp}`;
+    this.db.exec(`VACUUM INTO '${backupPath.replaceAll("'", "''")}'`);
+    return backupPath;
+  }
+
+  private needsIntelligenceMigration(): boolean {
+    const playEvents = this.db
+      .prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'play_events'")
+      .get() as { found: number } | undefined;
+    if (!playEvents) return false;
+    const eventColumns = this.tableColumns("play_events");
+    const signals = this.db
+      .prepare("SELECT 1 AS found FROM sqlite_master WHERE type = 'table' AND name = 'preference_signals'")
+      .get() as { found: number } | undefined;
+    return !eventColumns.includes("playback_id") || !signals;
   }
 
   private bootstrap(): void {
@@ -91,7 +140,19 @@ export class StateRepository {
         track_key TEXT NOT NULL,
         event_type TEXT NOT NULL,
         at TEXT NOT NULL,
-        metadata_json TEXT
+        metadata_json TEXT,
+        event_id TEXT,
+        recording_key TEXT,
+        source TEXT,
+        reason TEXT,
+        scope TEXT,
+        playback_id TEXT,
+        decision_id TEXT,
+        listened_ms INTEGER,
+        duration_ms INTEGER,
+        turn_id TEXT,
+        session_id TEXT,
+        context_json TEXT
       );
       CREATE TABLE IF NOT EXISTS taste_profile (
         id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -184,6 +245,8 @@ export class StateRepository {
       );
     `);
     this.migrateSourceIdentityTables();
+    this.options.beforeIntelligenceMigration?.();
+    this.ensureIntelligenceSchema();
     this.ensureChatMetadataColumn();
     this.ensureConversationColumns();
     this.ensureConversationRevision();
@@ -785,60 +848,349 @@ export class StateRepository {
     return this.getAppState<string>(`recommendation_refresh:${source}`);
   }
 
+  getIntelligencePolicyState(): IntelligencePolicyState | undefined {
+    return this.getAppState<IntelligencePolicyState>("intelligence_policy");
+  }
+
+  saveIntelligencePolicyState(state: IntelligencePolicyState): void {
+    this.saveAppState("intelligence_policy", state);
+  }
+
+  loadListeningPolicyState(): ListeningPolicyState {
+    const observations = this.db
+      .prepare("SELECT observation_json FROM listening_observations ORDER BY observed_at")
+      .all()
+      .map((row) => parseJson<ListeningObservation>((row as { observation_json: string }).observation_json, {} as ListeningObservation));
+    const signals = this.db
+      .prepare("SELECT signal_json FROM preference_signals ORDER BY updated_at")
+      .all()
+      .map((row) => parseJson<PreferenceSignal>((row as { signal_json: string }).signal_json, {} as PreferenceSignal));
+    const receipts = this.db
+      .prepare("SELECT receipt_json FROM learning_receipts ORDER BY created_at")
+      .all()
+      .map((row) => parseJson<PolicyLearningReceipt>((row as { receipt_json: string }).receipt_json, {} as PolicyLearningReceipt));
+    return { observations, signals, receipts };
+  }
+
+  appendListeningObservation(observation: ListeningObservation): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO listening_observations(observation_id, observation_json, observed_at) VALUES (?, ?, ?)"
+      )
+      .run(observation.observationId, JSON.stringify(observation), observation.at);
+  }
+
+  replacePreferenceSignals(signals: PreferenceSignal[]): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM preference_signals").run();
+      const insert = this.db.prepare(
+        "INSERT INTO preference_signals(signal_id, signal_json, updated_at) VALUES (?, ?, ?)"
+      );
+      for (const signal of signals) insert.run(signal.signalId, JSON.stringify(signal), signal.updatedAt);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  commitLearningMutation(
+    observation: ListeningObservation,
+    signals: PreferenceSignal[],
+    receipt: PolicyLearningReceipt
+  ): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(
+        "INSERT OR IGNORE INTO listening_observations(observation_id, observation_json, observed_at) VALUES (?, ?, ?)"
+      ).run(observation.observationId, JSON.stringify(observation), observation.at);
+      this.db.prepare("DELETE FROM preference_signals").run();
+      const insertSignal = this.db.prepare(
+        "INSERT INTO preference_signals(signal_id, signal_json, updated_at) VALUES (?, ?, ?)"
+      );
+      for (const signal of signals) {
+        insertSignal.run(signal.signalId, JSON.stringify(signal), signal.updatedAt);
+      }
+      this.db.prepare(
+        `INSERT INTO learning_receipts(
+          receipt_id, undo_token, receipt_json, created_at, undo_expires_at, undone_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(receipt_id) DO UPDATE SET
+          receipt_json=excluded.receipt_json,
+          undone_at=excluded.undone_at`
+      ).run(
+        receipt.receiptId,
+        receipt.undoToken,
+        JSON.stringify(receipt),
+        new Date().toISOString(),
+        receipt.undoExpiresAt,
+        receipt.undoneAt ?? null
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  saveRecommendationDecisions(decisions: RankedDecision[]): void {
+    const insert = this.db.prepare(
+      `INSERT INTO recommendation_decisions(decision_id, decision_json, created_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(decision_id) DO UPDATE SET decision_json=excluded.decision_json`
+    );
+    const createdAt = new Date().toISOString();
+    for (const decision of decisions) insert.run(decision.decisionId, JSON.stringify(decision), createdAt);
+  }
+
+  getRecommendationDecision(decisionId: string): RankedDecision | undefined {
+    const row = this.db
+      .prepare("SELECT decision_json FROM recommendation_decisions WHERE decision_id = ?")
+      .get(decisionId) as { decision_json: string } | undefined;
+    return row ? parseJson<RankedDecision | undefined>(row.decision_json, undefined) : undefined;
+  }
+
+  saveLearningReceipt(receipt: PolicyLearningReceipt): void {
+    this.db
+      .prepare(
+        `INSERT INTO learning_receipts(
+          receipt_id, undo_token, receipt_json, created_at, undo_expires_at, undone_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(receipt_id) DO UPDATE SET
+          receipt_json=excluded.receipt_json,
+          undone_at=excluded.undone_at`
+      )
+      .run(
+        receipt.receiptId,
+        receipt.undoToken,
+        JSON.stringify(receipt),
+        new Date().toISOString(),
+        receipt.undoExpiresAt,
+        receipt.undoneAt ?? null
+      );
+  }
+
+  getLearningReceipt(undoToken: string): PolicyLearningReceipt | undefined {
+    const row = this.db
+      .prepare("SELECT receipt_json FROM learning_receipts WHERE undo_token = ?")
+      .get(undoToken) as { receipt_json: string } | undefined;
+    return row ? parseJson<PolicyLearningReceipt | undefined>(row.receipt_json, undefined) : undefined;
+  }
+
+  markLearningReceiptUndone(undoToken: string, undoneAt: string): void {
+    this.db.prepare("UPDATE learning_receipts SET undone_at = ? WHERE undo_token = ?").run(undoneAt, undoToken);
+  }
+
+  recordPlaybackOutcome(request: PlaybackOutcomeRequest): boolean {
+    const inserted = this.db
+      .prepare(
+        "INSERT OR IGNORE INTO playback_outcomes(playback_id, outcome_json, observed_at) VALUES (?, ?, ?)"
+      )
+      .run(request.playbackId, JSON.stringify(request), request.at ?? new Date().toISOString());
+    return inserted.changes > 0;
+  }
+
+  releasePlaybackOutcome(playbackId: string): void {
+    this.db.prepare("DELETE FROM playback_outcomes WHERE playback_id = ?").run(playbackId);
+  }
+
+  upsertSessionIntent(intent: SessionIntent): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_intents(intent_id, intent_json, expires_at, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(intent_id) DO UPDATE SET
+           intent_json=excluded.intent_json,
+           expires_at=excluded.expires_at,
+           updated_at=excluded.updated_at`
+      )
+      .run(intent.intentId, JSON.stringify(intent), intent.expiresAt, intent.updatedAt);
+  }
+
+  getActiveSessionIntents(at: string): SessionIntent[] {
+    return this.db
+      .prepare("SELECT intent_json FROM session_intents WHERE expires_at > ? ORDER BY updated_at DESC")
+      .all(at)
+      .map((row) => parseJson<SessionIntent>((row as { intent_json: string }).intent_json, {} as SessionIntent));
+  }
+
+  expireSessionIntents(at: string): number {
+    return Number(this.db.prepare("DELETE FROM session_intents WHERE expires_at <= ?").run(at).changes);
+  }
+
+  clearSessionIntents(): void {
+    this.db.prepare("DELETE FROM session_intents").run();
+  }
+
+  getListeningSessionState(): { sessionId: string; lastInteractionAt: string } | undefined {
+    const state = this.getAppState<{ sessionId?: unknown; lastInteractionAt?: unknown }>("listening_session");
+    if (
+      !state ||
+      typeof state.sessionId !== "string" ||
+      !state.sessionId ||
+      typeof state.lastInteractionAt !== "string" ||
+      !Number.isFinite(Date.parse(state.lastInteractionAt))
+    ) return undefined;
+    return { sessionId: state.sessionId, lastInteractionAt: state.lastInteractionAt };
+  }
+
+  saveListeningSessionState(state: { sessionId: string; lastInteractionAt: string }): void {
+    this.saveAppState("listening_session", state);
+  }
+
+  pruneIntelligenceHistory(before: string): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare("DELETE FROM recommendation_decisions WHERE created_at < ?").run(before);
+      this.db.prepare("DELETE FROM listening_observations WHERE observed_at < ?").run(before);
+      this.db.prepare("DELETE FROM playback_outcomes WHERE observed_at < ?").run(before);
+      this.db.prepare("DELETE FROM play_events WHERE at < ?").run(before);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   addPlayEvent(event: PlayEvent): void {
     const trackKey = normalizeTrackReference(event.trackId);
-    this.db
+    const inserted = this.db
       .prepare(
-        "INSERT INTO play_events(track_key, event_type, at, metadata_json) VALUES (?, ?, ?, ?)"
+        `INSERT OR IGNORE INTO play_events(
+          track_key, event_type, at, metadata_json, event_id, recording_key, source,
+          reason, scope, playback_id, decision_id, listened_ms, duration_ms,
+          turn_id, session_id, context_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(trackKey, event.type, event.at, JSON.stringify(event.metadata ?? {}));
+      .run(
+        trackKey,
+        event.type,
+        event.at,
+        JSON.stringify(event.metadata ?? {}),
+        event.eventId ?? null,
+        event.recordingKey ?? null,
+        event.source ?? null,
+        event.reason ?? null,
+        event.scope ?? null,
+        event.playbackId ?? null,
+        event.decisionId ?? null,
+        event.listenedMs ?? null,
+        event.durationMs ?? null,
+        event.turnId ?? null,
+        event.sessionId ?? null,
+        event.context ? JSON.stringify(event.context) : null
+      );
+    if (inserted.changes === 0) return;
 
-    const hour = new Date(event.at).getHours();
-    this.db
-      .prepare(
-        "UPDATE track_stats SET last_played_at = ?, last_played_hour = ?, play_count = play_count + ? WHERE track_key = ?"
-      )
-      .run(event.at, hour, event.type === "complete" || event.type === "replay" ? 1 : 0, trackKey);
+    if (
+      event.type === "play" ||
+      event.type === "play_start" ||
+      event.type === "replay" ||
+      event.type === "complete"
+    ) {
+      const hour = new Date(event.at).getHours();
+      this.db
+        .prepare(
+          "UPDATE track_stats SET last_played_at = ?, last_played_hour = ?, play_count = play_count + ? WHERE track_key = ?"
+        )
+        .run(event.at, hour, event.type === "complete" ? 1 : 0, trackKey);
+    }
+  }
+
+  private ensureIntelligenceSchema(): void {
+    const columns = this.tableColumns("play_events");
+    const additions: Array<[string, string]> = [
+      ["event_id", "TEXT"],
+      ["recording_key", "TEXT"],
+      ["source", "TEXT"],
+      ["reason", "TEXT"],
+      ["scope", "TEXT"],
+      ["playback_id", "TEXT"],
+      ["decision_id", "TEXT"],
+      ["listened_ms", "INTEGER"],
+      ["duration_ms", "INTEGER"],
+      ["turn_id", "TEXT"],
+      ["session_id", "TEXT"],
+      ["context_json", "TEXT"]
+    ];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [name, sqlType] of additions) {
+        if (!columns.includes(name)) this.db.exec(`ALTER TABLE play_events ADD COLUMN ${name} ${sqlType}`);
+      }
+      this.db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_play_events_event_id
+          ON play_events(event_id) WHERE event_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_play_events_playback_id ON play_events(playback_id);
+        CREATE INDEX IF NOT EXISTS idx_play_events_decision_id ON play_events(decision_id);
+        CREATE TABLE IF NOT EXISTS listening_observations (
+          observation_id TEXT PRIMARY KEY,
+          observation_json TEXT NOT NULL,
+          observed_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS preference_signals (
+          signal_id TEXT PRIMARY KEY,
+          signal_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS recommendation_decisions (
+          decision_id TEXT PRIMARY KEY,
+          decision_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS session_intents (
+          intent_id TEXT PRIMARY KEY,
+          intent_json TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS learning_receipts (
+          receipt_id TEXT PRIMARY KEY,
+          undo_token TEXT NOT NULL UNIQUE,
+          receipt_json TEXT NOT NULL,
+          inverse_observation_json TEXT,
+          created_at TEXT NOT NULL,
+          undo_expires_at TEXT NOT NULL,
+          undone_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS playback_outcomes (
+          playback_id TEXT PRIMARY KEY,
+          outcome_json TEXT NOT NULL,
+          observed_at TEXT NOT NULL
+        );
+      `);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   getRecentPlayEvents(limit = 120): PlayEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT track_key, event_type, at, metadata_json FROM play_events ORDER BY id DESC LIMIT ?"
+        `SELECT track_key, event_type, at, metadata_json, event_id, recording_key, source,
+          reason, scope, playback_id, decision_id, listened_ms, duration_ms,
+          turn_id, session_id, context_json
+         FROM play_events ORDER BY id DESC LIMIT ?`
       )
-      .all(limit) as Array<{
-      track_key: string;
-      event_type: PlayEvent["type"];
-      at: string;
-      metadata_json: string | null;
-    }>;
+      .all(limit) as unknown as PlayEventRow[];
 
-    return rows.map((row) => ({
-      trackId: row.track_key,
-      type: row.event_type,
-      at: row.at,
-      metadata: parseJson(row.metadata_json, {})
-    }));
+    return rows.map(toPlayEvent);
   }
 
   getPlayEventsSince(since: string): PlayEvent[] {
     const rows = this.db
       .prepare(
-        "SELECT track_key, event_type, at, metadata_json FROM play_events WHERE at >= ? ORDER BY id DESC"
+        `SELECT track_key, event_type, at, metadata_json, event_id, recording_key, source,
+          reason, scope, playback_id, decision_id, listened_ms, duration_ms,
+          turn_id, session_id, context_json
+         FROM play_events WHERE at >= ? ORDER BY id DESC`
       )
-      .all(since) as Array<{
-      track_key: string;
-      event_type: PlayEvent["type"];
-      at: string;
-      metadata_json: string | null;
-    }>;
+      .all(since) as unknown as PlayEventRow[];
 
-    return rows.map((row) => ({
-      trackId: row.track_key,
-      type: row.event_type,
-      at: row.at,
-      metadata: parseJson(row.metadata_json, {})
-    }));
+    return rows.map(toPlayEvent);
   }
 
   saveTasteProfile(profile: TasteProfile): void {
@@ -1207,6 +1559,50 @@ interface ChatMemoryRow {
   content: string;
   created_at: string;
   updated_at: string;
+}
+
+interface PlayEventRow {
+  track_key: string;
+  event_type: PlayEvent["type"];
+  at: string;
+  metadata_json: string | null;
+  event_id: string | null;
+  recording_key: string | null;
+  source: string | null;
+  reason: string | null;
+  scope: string | null;
+  playback_id: string | null;
+  decision_id: string | null;
+  listened_ms: number | null;
+  duration_ms: number | null;
+  turn_id: string | null;
+  session_id: string | null;
+  context_json: string | null;
+}
+
+function toPlayEvent(row: PlayEventRow): PlayEvent {
+  return {
+    trackId: row.track_key,
+    type: row.event_type,
+    at: row.at,
+    metadata: parseJson(row.metadata_json, {}),
+    ...(row.event_id ? { eventId: row.event_id } : {}),
+    ...(row.recording_key ? { recordingKey: row.recording_key } : {}),
+    ...(row.source === "ncm" || row.source === "qq" ? { source: row.source } : {}),
+    ...(row.reason ? { reason: row.reason } : {}),
+    ...(row.scope === "session" || row.scope === "day" || row.scope === "long_term"
+      ? { scope: row.scope }
+      : {}),
+    ...(row.playback_id ? { playbackId: row.playback_id } : {}),
+    ...(row.decision_id ? { decisionId: row.decision_id } : {}),
+    ...(row.listened_ms !== null ? { listenedMs: row.listened_ms } : {}),
+    ...(row.duration_ms !== null ? { durationMs: row.duration_ms } : {}),
+    ...(row.turn_id ? { turnId: row.turn_id } : {}),
+    ...(row.session_id ? { sessionId: row.session_id } : {}),
+    ...(row.context_json
+      ? { context: parseJson<Record<string, string | number | boolean>>(row.context_json, {}) }
+      : {})
+  };
 }
 
 function mapChatMemory(row: ChatMemoryRow): ChatMemory {

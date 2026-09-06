@@ -4,7 +4,7 @@ export type VoiceProtocolEvent =
   | { type: "user_failed"; itemId: string }
   | { type: "assistant_delta"; responseId: string; text: string }
   | { type: "assistant_done"; responseId: string; transcript: string }
-  | { type: "music_command"; callId: string; request: string; confirmationToken?: string; selectedTrackId?: number }
+  | { type: "music_command"; callId: string; request: string; confirmationToken?: string; selectedTrackId?: number | string }
   | { type: "wait"; callId: string }
   | { type: "response_done"; responseId: string; status: string; transcript?: string }
   | { type: "error"; message: string };
@@ -74,7 +74,7 @@ function parseFunctionCall(event: Record<string, unknown> | undefined): VoicePro
   const request = stringValue(args?.request)?.trim();
   if (!request) return [];
   const confirmationToken = stringValue(args?.confirmationToken);
-  const selectedTrackId = numberValue(args?.selectedTrackId);
+  const selectedTrackId = trackReferenceValue(args?.selectedTrackId);
   return [{
     type: "music_command",
     callId,
@@ -125,6 +125,10 @@ function stringValue(value: unknown): string | undefined {
 
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function trackReferenceValue(value: unknown): number | string | undefined {
+  return numberValue(value) ?? (typeof value === "string" && value.trim() ? value.trim() : undefined);
 }
 
 function errorMessage(event: Record<string, unknown>): string {

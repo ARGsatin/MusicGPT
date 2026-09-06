@@ -92,6 +92,18 @@ describe("Realtime speech session", () => {
       .toContain("recent shared turn");
   });
 
+  it("allows either numeric NCM ids or string QQ track keys in music confirmations", () => {
+    const config = buildRealtimeSessionConfig("recent shared turn");
+    const musicTool = config.tools.find(
+      (tool) => tool.type === "function" && tool.function.name === "run_music_command"
+    );
+
+    expect(musicTool?.function.parameters.properties.selectedTrackId).toEqual({
+      anyOf: [{ type: "number" }, { type: "string" }],
+      description: "The selected numeric track ID or source-aware string track key when confirming an ambiguous search."
+    });
+  });
+
   it("rejects an unsafe workspace ID before constructing a hostname", () => {
     expect(() => resolveRealtimeSessionUrl(undefined, "bad.example.com/path"))
       .toThrow("invalid_dashscope_workspace_id");

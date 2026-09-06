@@ -97,8 +97,9 @@ export function buildRealtimeSessionConfig(
                 description: "A confirmation token returned by an earlier ambiguous music search."
               },
               selectedTrackId: {
-                type: "number",
-                description: "The selected track ID when confirming an earlier ambiguous search."
+                anyOf: [{ type: "number" }, { type: "string" }],
+                description:
+                  "The selected numeric track ID or source-aware string track key when confirming an ambiguous search."
               }
             },
             required: ["request"]

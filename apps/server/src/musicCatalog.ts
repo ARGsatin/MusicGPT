@@ -102,11 +102,15 @@ export class MusicCatalog {
     return tracks.map((track) => this.register(track, inferSource(track)));
   }
 
-  async resolvePlayback(track: Track): Promise<ResolvedPlayback | undefined> {
+  async resolvePlayback(track: Track, avoidTrackKey?: TrackKey): Promise<ResolvedPlayback | undefined> {
     const normalized = this.register(track, inferSource(track));
+    if (avoidTrackKey) {
+      this.playbackCooldownUntil.set(avoidTrackKey, Date.now() + 24 * 60 * 60_000);
+    }
     const variants = this.orderedVariants(normalized);
     for (const variant of variants) {
       const variantKey = getTrackKey(variant);
+      if (variantKey === avoidTrackKey) continue;
       if ((this.playbackCooldownUntil.get(variantKey) ?? 0) > Date.now()) continue;
       const adapter = this.adapters.get(variant.source!);
       if (!adapter) {
@@ -132,6 +136,7 @@ export class MusicCatalog {
         for (const variant of this.orderedVariants(normalized)) {
           if (variant.source !== "ncm") continue;
           const variantKey = getTrackKey(variant);
+          if (variantKey === avoidTrackKey) continue;
           if ((this.playbackCooldownUntil.get(variantKey) ?? 0) > Date.now()) continue;
           const url = await fallback.resolvePlayback(variant).catch(() => undefined);
           if (url) {
@@ -178,20 +183,23 @@ export class MusicCatalog {
     const baseKey = recordingBaseKey(normalized);
     const existingGroups = [...this.variantsByRecording.entries()]
       .filter(([key]) => key === baseKey || key.startsWith(`${baseKey}:`));
-    const match = existingGroups.find(([, variants]) =>
-      variants.some((variant) => isSameRecording(variant, normalized))
-    );
-    const recordingKey = match?.[0] ??
-      (existingGroups.length === 0 ? baseKey : `${baseKey}:${durationDiscriminator(normalized)}`);
-    const completed = { ...normalized, recordingKey };
-    const variants = this.variantsByRecording.get(recordingKey) ?? [];
-    const index = variants.findIndex((variant) => variant.trackKey === completed.trackKey);
-    if (index >= 0) {
-      variants[index] = { ...variants[index], ...completed };
+    const variants = existingGroups.flatMap(([, group]) => group);
+    const existing = variants.find((variant) => variant.trackKey === normalized.trackKey);
+    let completed: Track;
+    if (existing) {
+      Object.assign(existing, normalized);
+      completed = existing;
     } else {
+      completed = { ...normalized };
       variants.push(completed);
     }
-    this.variantsByRecording.set(recordingKey, variants);
+    const groups = groupRecordingVariants(variants);
+    for (const [key] of existingGroups) this.variantsByRecording.delete(key);
+    groups.forEach((group, groupIndex) => {
+      const recordingKey = recordingGroupKey(baseKey, group, groupIndex === 0);
+      for (const variant of group) variant.recordingKey = recordingKey;
+      this.variantsByRecording.set(recordingKey, group);
+    });
     return completed;
   }
 
@@ -262,6 +270,33 @@ function normalizeName(value: string): string {
 
 function durationDiscriminator(track: Track): string {
   return typeof track.durationMs === "number" ? String(Math.round(track.durationMs / 1_000)) : track.trackKey!;
+}
+
+function recordingGroupKey(baseKey: string, variants: Track[], primary: boolean): string {
+  return primary ? baseKey : `${baseKey}:${durationDiscriminator(canonicalRecordingVariant(variants))}`;
+}
+
+function groupRecordingVariants(variants: Track[]): Track[][] {
+  const groups: Track[][] = [];
+  for (const variant of [...variants].sort(compareRecordingVariants)) {
+    const match = groups.find((group) => group.every((existing) => isSameRecording(existing, variant)));
+    if (match) match.push(variant);
+    else groups.push([variant]);
+  }
+  return groups;
+}
+
+function compareRecordingVariants(left: Track, right: Track): number {
+  if (typeof left.durationMs === "number" && typeof right.durationMs === "number") {
+    return left.durationMs - right.durationMs || left.trackKey!.localeCompare(right.trackKey!);
+  }
+  if (typeof left.durationMs === "number") return -1;
+  if (typeof right.durationMs === "number") return 1;
+  return left.trackKey!.localeCompare(right.trackKey!);
+}
+
+function canonicalRecordingVariant(variants: Track[]): Track {
+  return [...variants].sort(compareRecordingVariants)[0]!;
 }
 
 function isSameRecording(left: Track, right: Track): boolean {

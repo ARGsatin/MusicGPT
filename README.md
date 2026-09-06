@@ -137,6 +137,8 @@ npm run dev
 
 `npm run dev` 默认走完整的受监督启动链。只有在明确不需要网易云能力的前后端开发场景中，才使用 `npm run dev:app`。
 
+受监督入口会解析 Git 当前注册的 `main` 工作树并从该目录启动，避免合并后仍误用旧的 `musicgpt-v2` 工作树。部署、就绪检查、私有 `.env`/`state` 保留方式和回滚步骤见 [从 `main` 启动与回滚](docs/deployment-main.md)。
+
 ## API 概览
 
 - `POST /api/chat`（兼容的非流式聊天接口）
@@ -155,7 +157,10 @@ npm run dev
 - `POST /api/next`
 - `POST /api/play-track`
 - `GET /api/taste`
+- `POST /api/taste/signals`（确认、降低、屏蔽、删除或重置自动音乐画像信号）
 - `POST /api/feedback`
+- `POST /api/listening/outcomes`（幂等提交完成、跳过、放弃或播放错误及有效听播时长）
+- `POST /api/learning/undo`（在学习回执有效期内反向撤销本次学习）
 - `PUT /api/favorites/:trackId`（本地收藏/取消收藏，不写回网易云）
 - `GET /api/system/status`
 - `POST /api/import/ncm`
@@ -175,6 +180,20 @@ npm run dev
 - `POST /api/dj/settings`
 - `GET /api/providers`（查看 `weather / calendar / upnp` 预留 provider 的启用状态）
 - `GET /ws/stream`
+
+## 可教的 DJ 与智能策略
+
+文字聊天与 Qwen Realtime 语音共用同一个 `MusicCommand` 规划和执行接口。低置信度或多版本歧义会先返回澄清，不产生播放、收藏或画像副作用；复合命令按步骤返回执行结果。推荐统一由 `ListeningPolicy` 排序，并在当前播放、日计划与音乐画像中暴露真实决策证据和学习回执。
+
+首次升级默认以 `shadow` 模式运行：用户仍听到原排序，新策略只记录排名、理由和护栏结果。满足样本与安全门槛后才会进入 `adaptive`；异常时自动退回 `shadow`。可用 `INTELLIGENCE_POLICY_MODE=legacy|shadow|adaptive` 强制覆盖，留空则读取 SQLite 中的持久模式。`GET /api/system/status` 的 `intelligencePolicy` 字段会显示当前模式、版本、影子样本量与回退原因。
+
+离线智能评测固定覆盖 150 条轨迹，不会调用付费模型：
+
+```bash
+npm run eval:intelligence
+```
+
+发布前如明确允许产生 DeepSeek 调用成本，再运行 `node scripts/evaluate-intelligence.mjs --live --write-cache --require-pass`。它固定发起 25 次规划任务；供应商返回无效 JSON 时，单个任务可能按既有兼容策略发生有限重试，因此不要把“25 条样例”当成严格的计费请求上限。每个最终规划随后分别进入全新的文字/语音 `MusicCommand` 固定运行时，不连接或污染正在使用的服务与 SQLite。门槛为高风险样例成功率至少 92%、错误动作率为 0，且两个通道必须一致。缓存绑定 provider、model、语料哈希、评测器版本与通道集合，只保存样例 ID 和脱敏判定，不保存输入、模型回复、聊天、密钥或错误原文。
 
 ## 开发校验
 

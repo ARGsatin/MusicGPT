@@ -84,7 +84,9 @@ select:focus-visible {
 
 .stage-column {
   display: flex;
+  flex-direction: column;
   min-width: 0;
+  overflow-y: auto;
 }
 
 /* 桌面端：页面钉死在视口高度，对话在面板内部滚动，不撑长页面 */
@@ -2316,10 +2318,118 @@ input[type="range"]::-moz-range-track {
 .queue-source { margin-left: auto; }
 .now-source-badge { margin-bottom: 7px; }
 
+/* Teachable DJ learning loop */
+.recommendation-explanation,
+.learning-receipt,
+.proactive-dj-card {
+  width: min(100%, 680px);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(7, 10, 20, .62);
+  color: var(--muted);
+}
+.recommendation-explanation { padding: 9px 12px; }
+.recommendation-explanation summary { cursor: pointer; color: var(--text); font-size: 12px; font-weight: 700; }
+.recommendation-explanation ul { list-style: none; margin: 9px 0 0; padding: 0; display: grid; gap: 6px; }
+.recommendation-explanation li { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+.recommendation-explanation li small { color: var(--aurora-1); white-space: nowrap; }
+.recommendation-explanation p { margin: 8px 0 0; font-size: 11px; line-height: 1.5; }
+.teaching-controls { width: min(100%, 680px); display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.teaching-controls button,
+.learning-receipt button,
+.music-profile-panel button {
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: rgba(7, 10, 20, .65);
+  color: var(--muted);
+  padding: 6px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.teaching-controls button:hover:not(:disabled),
+.learning-receipt button:hover:not(:disabled),
+.music-profile-panel button:hover:not(:disabled) { border-color: var(--aurora-1); color: var(--text); }
+.teaching-controls button:disabled,
+.learning-receipt button:disabled { opacity: .5; cursor: wait; }
+.music-clarification-card {
+  margin: 10px 16px 0;
+  padding: 12px;
+  border: 1px solid rgba(34, 211, 238, .35);
+  border-radius: 15px;
+  background: rgba(8, 18, 31, .9);
+}
+.music-clarification-card > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.music-clarification-card > header div { display: grid; gap: 3px; }
+.music-clarification-card > header span { color: var(--aurora-1); font-size: 10px; letter-spacing: .12em; }
+.music-clarification-card > header strong { font-size: 13px; line-height: 1.45; }
+.music-clarification-card > header button { border: none; background: none; color: var(--dim); cursor: pointer; }
+.clarification-candidates { margin-top: 10px; display: grid; gap: 7px; }
+.clarification-candidates > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: rgba(255,255,255,.035);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.clarification-candidates > button:hover:not(:disabled) { border-color: var(--aurora-1); }
+.clarification-candidates > button:disabled { opacity: .6; cursor: wait; }
+.clarification-cover { width: 38px; height: 38px; display: grid; place-items: center; overflow: hidden; border-radius: 9px; background: linear-gradient(140deg, var(--aurora-2), var(--aurora-3)); }
+.clarification-cover img { width: 100%; height: 100%; object-fit: cover; }
+.clarification-candidates > button > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+.clarification-candidates strong,
+.clarification-candidates small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clarification-candidates small { color: var(--muted); }
+.clarification-candidates em { color: var(--aurora-1); font-size: 10px; font-style: normal; white-space: nowrap; }
+.music-clarification-card > p { margin: 8px 0 0; color: var(--danger); font-size: 11px; }
+.learning-receipt,
+.proactive-dj-card { flex: none; align-self: center; margin-top: 8px; padding: 11px 13px; }
+.learning-receipt { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-color: rgba(52, 211, 153, .35); background: rgba(16, 185, 129, .08); }
+.learning-receipt p,
+.proactive-dj-card p { margin: 4px 0; font-size: 12px; line-height: 1.5; }
+.learning-receipt small,
+.proactive-dj-card small { font-size: 10px; color: var(--dim); }
+.learning-receipt-actions { display: flex; gap: 6px; flex: none; }
+.proactive-dj-card > div { display: flex; align-items: center; gap: 7px; }
+.proactive-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+.proactive-dj-card.has-reminder { border-color: rgba(34, 211, 238, .35); }
+.proactive-dj-card.has-reminder .proactive-dot { background: var(--aurora-1); box-shadow: 0 0 12px rgba(34, 211, 238, .7); }
+
+.music-profile-panel { min-height: 0; overflow-y: auto; padding: 16px; display: grid; gap: 12px; }
+.music-profile-panel > header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.music-profile-panel > header div { display: grid; gap: 4px; }
+.music-profile-panel > header span { color: var(--aurora-1); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+.music-profile-panel > header strong { font-size: 13px; line-height: 1.5; }
+.manual-rule-card,
+.profile-signal-group { border: 1px solid var(--line); border-radius: 15px; background: rgba(7, 10, 20, .45); padding: 12px; }
+.manual-rule-card > div { display: grid; gap: 3px; }
+.manual-rule-card small { color: var(--dim); font-size: 10px; overflow-wrap: anywhere; }
+.manual-rule-card ul { margin: 9px 0 0; padding-left: 18px; color: var(--muted); font-size: 11px; }
+.manual-rule-card p,
+.profile-empty { margin: 8px 0 0; color: var(--dim); font-size: 11px; }
+.profile-signal-group h3 { margin: 0 0 9px; font-size: 12px; }
+.profile-signal-group > ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.profile-signal-group > ul > li { display: grid; gap: 8px; padding: 9px; border-radius: 12px; background: rgba(255,255,255,.03); }
+.profile-signal-group li > div:first-child { min-width: 0; display: grid; gap: 3px; }
+.profile-signal-group li strong { font-size: 12px; overflow-wrap: anywhere; }
+.profile-signal-group li small { color: var(--dim); font-size: 10px; line-height: 1.45; }
+.signal-actions { display: flex; flex-wrap: wrap; gap: 5px; }
+.signal-actions button { padding: 4px 8px; font-size: 10px; }
+.signal-locked { color: var(--aurora-3); font-size: 10px; }
+
 @media (max-width: 760px) {
   .source-grid { grid-template-columns: 1fr; }
   .qq-qr-card { grid-template-columns: 96px 1fr; }
   .qq-qr-card img { width: 96px; height: 96px; }
   .plan-playback { align-items: stretch; flex-direction: column; }
   .plan-playback button { width: 100%; }
+  .panel-tabs { max-width: 100%; overflow-x: auto; }
+  .panel-tab { padding-inline: 12px; white-space: nowrap; }
+  .learning-receipt { flex-direction: column; }
 }

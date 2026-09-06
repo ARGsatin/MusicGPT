@@ -63,7 +63,7 @@ if not exist "node_modules\NeteaseCloudMusicApi\app.js" (
   echo.
 )
 
-powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$ProgressPreference = 'SilentlyContinue'; try { $web = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:5173'; $server = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8787/health'; if ($web.StatusCode -lt 500 -and $server.StatusCode -lt 500) { exit 0 } } catch {}; exit 1" >nul 2>&1
+powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$ProgressPreference = 'SilentlyContinue'; try { $web = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:5173'; $health = Invoke-RestMethod -TimeoutSec 2 'http://127.0.0.1:8787/health'; if ($web.StatusCode -lt 500 -and $health.ok -eq $true -and $health.checkout -eq 'main') { exit 0 } } catch {}; exit 1" >nul 2>&1
 if not errorlevel 1 (
   call node scripts\wait-for-ncm.mjs --once
   if errorlevel 1 (
@@ -106,7 +106,7 @@ echo.
 
 start "" /b powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -Command "$ProgressPreference = 'SilentlyContinue'; $deadline = (Get-Date).AddMinutes(2); do { try { $response = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:5173'; if ($response.StatusCode -lt 500) { Start-Process 'http://127.0.0.1:5173'; exit 0 } } catch {}; Start-Sleep -Seconds 1 } while ((Get-Date) -lt $deadline)" >nul 2>&1
 
-call npm run dev:full
+call npm run dev
 set "MUSICGPT_EXIT_CODE=%ERRORLEVEL%"
 
 echo.

@@ -11,6 +11,7 @@ MusicGPT is a local-first AI radio that combines NetEase Cloud Music playback, t
 - `npm install` installs all workspaces.
 - `npm run dev` starts the supervised NCM, server, and web stack on ports 3001, 8787, and 5173.
 - Before handing off code, run `npm test`, `npm run typecheck`, and `npm run build`.
+- On Windows sandbox, `vite build` may abort while clearing `apps/web/dist` (safe-delete trash error). Fix: delete `apps/web/dist` first, then rebuild.
 
 ## Stack
 
@@ -32,5 +33,7 @@ MusicGPT is a local-first AI radio that combines NetEase Cloud Music playback, t
 
 ## Current state
 
-- As of 2026-08-04, main uses Alibaba Cloud `qwen3.5-omni-plus-realtime` WebRTC instead of the retired Edge TTS/OpenAI Realtime pipelines and includes DeepSeek V4 non-thinking compatibility plus JSON-response retry diagnostics.
-- Local tests, typecheck, and production build pass. Realtime and DeepSeek remain pending live verification with real provider credentials before publishing.
+- As of 2026-08-25, `main` includes the Aurora UI, recommendation-quality repair, and MusicGPT v2 (multi-source catalog, QQ adapter/playback fallback, structured taste/routine projections, and the compact three-period daily plan).
+- `main` is the integration and editing lane. The clean `aurora-ui` and `codex/musicgpt-v2` branches/worktrees are fully contained in `main`; treat them as cleanup candidates, not as sources of newer code.
+- Main uses Alibaba Cloud `qwen3.5-omni-plus-realtime` WebRTC instead of the retired Edge TTS/OpenAI Realtime pipelines, with DeepSeek V4 non-thinking compatibility and JSON-response retry diagnostics.
+- Local merge state does not prove deployment. Before claiming a feature is live, verify the running process root and the visible API/UI seam; no MusicGPT service was listening on ports 3001, 8787, or 5173 during the 2026-08-25 knowledge closeout.

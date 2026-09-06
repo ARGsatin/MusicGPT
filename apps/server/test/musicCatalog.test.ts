@@ -72,6 +72,29 @@ describe("MusicCatalog", () => {
     });
   });
 
+  it("skips the reported bad version and resolves a strict same-recording alternative", async () => {
+    const ncm = new FakeSource(
+      "ncm",
+      [{ id: 111, title: "Versioned Song", artists: ["Version Artist"], durationMs: 200_000 }],
+      new Map([["111", "https://example.test/ncm-111.mp3"]])
+    );
+    const qq = new FakeSource(
+      "qq",
+      [{ id: "qq-111", title: "Versioned Song", artists: ["Version Artist"], durationMs: 202_000 }],
+      new Map([["qq-111", "https://example.test/qq-111.mp3"]])
+    );
+    const catalog = new MusicCatalog([ncm, qq]);
+    const [ncmTrack] = await catalog.search("Versioned Song");
+
+    const resolved = await catalog.resolvePlayback(ncmTrack!, "ncm:111");
+
+    expect(resolved).toMatchObject({
+      url: "https://example.test/qq-111.mp3",
+      track: { trackKey: "qq:qq-111", recordingKey: ncmTrack?.recordingKey }
+    });
+    expect(ncm.playbackCalls).toBe(0);
+  });
+
   it("keeps ambiguous recordings separate when their durations differ by more than five seconds", async () => {
     const catalog = new MusicCatalog([
       new FakeSource("ncm", [
@@ -83,6 +106,58 @@ describe("MusicCatalog", () => {
     ]);
 
     expect(await catalog.search("Same Song")).toHaveLength(2);
+  });
+
+  it("keeps duration-separated recording keys stable across adapter registration order", async () => {
+    const ncmTrack = { id: 201, title: "Order Song", artists: ["Order Artist"], durationMs: 200_000 };
+    const qqTrack = { id: "long-version", title: "Order Song", artists: ["Order Artist"], durationMs: 208_000 };
+    const forward = await new MusicCatalog([
+      new FakeSource("ncm", [ncmTrack]),
+      new FakeSource("qq", [qqTrack])
+    ]).search("Order Song");
+    const reversed = await new MusicCatalog([
+      new FakeSource("qq", [qqTrack]),
+      new FakeSource("ncm", [ncmTrack])
+    ]).search("Order Song");
+    const keysByTrack = (tracks: Track[]) => new Map(
+      tracks.map((track) => [track.trackKey, track.recordingKey])
+    );
+    const forwardKeys = keysByTrack(forward);
+    const reversedKeys = keysByTrack(reversed);
+
+    expect(forwardKeys.get("ncm:201")).toBe(reversedKeys.get("ncm:201"));
+    expect(forwardKeys.get("qq:long-version")).toBe(reversedKeys.get("qq:long-version"));
+    expect(forwardKeys.get("ncm:201")).not.toBe(forwardKeys.get("qq:long-version"));
+  });
+
+  it("shares one stable recording key for cross-source versions regardless of registration order", () => {
+    const ncmTrack: Track = {
+      id: 301,
+      source: "ncm",
+      sourceId: "301",
+      title: "Shared Order Song",
+      artists: ["Shared Artist"],
+      durationMs: 200_000
+    };
+    const qqTrack: Track = {
+      id: "shared-version",
+      source: "qq",
+      sourceId: "shared-version",
+      title: "Shared Order Song",
+      artists: ["Shared Artist"],
+      durationMs: 202_000
+    };
+    const forward = new MusicCatalog([]).registerTracks([ncmTrack, qqTrack]);
+    const reversed = new MusicCatalog([]).registerTracks([qqTrack, ncmTrack]);
+    const keysByTrack = (tracks: Track[]) => new Map(
+      tracks.map((track) => [track.trackKey, track.recordingKey])
+    );
+    const forwardKeys = keysByTrack(forward);
+    const reversedKeys = keysByTrack(reversed);
+
+    expect(forwardKeys.get("ncm:301")).toBe(forwardKeys.get("qq:shared-version"));
+    expect(reversedKeys.get("ncm:301")).toBe(reversedKeys.get("qq:shared-version"));
+    expect(forwardKeys.get("ncm:301")).toBe(reversedKeys.get("ncm:301"));
   });
 
   it("falls back from an unavailable QQ VIP/copyright variant and cools that version down", async () => {

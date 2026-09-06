@@ -8,7 +8,10 @@ import {
   isEnvironmentLocationRequest,
   isFavoriteRequest,
   isFeedbackRequest,
+  isLearningUndoRequest,
+  isTasteSignalMutationRequest,
   isNextRequest,
+  isPlaybackOutcomeRequest,
   isPlayTrackRequest
 } from "../src/contracts.js";
 
@@ -20,7 +23,62 @@ describe("contracts", () => {
 
   it("validates feedback payload", () => {
     expect(isFeedbackRequest({ type: "like", trackId: 1 })).toBe(true);
+    expect(
+      isFeedbackRequest({
+        type: "teach",
+        trackId: "ncm:1",
+        reason: "wrong_for_now",
+        scope: "session"
+      })
+    ).toBe(true);
+    expect(
+      isFeedbackRequest({
+        type: "skip",
+        trackId: "qq:003abc",
+        reason: "wrong_for_now",
+        scope: "session",
+        playbackId: "playback-1",
+        decisionId: "decision-1",
+        listenedMs: 12_000,
+        durationMs: 240_000
+      })
+    ).toBe(true);
     expect(isFeedbackRequest({ type: "oops", trackId: 1 })).toBe(false);
+    expect(isFeedbackRequest({ type: "skip", trackId: 1, reason: "not-a-reason" })).toBe(false);
+    expect(isFeedbackRequest({ type: "skip", trackId: 1, scope: "forever" })).toBe(false);
+    expect(isFeedbackRequest({ type: "skip", trackId: 1, listenedMs: -1 })).toBe(false);
+  });
+
+  it("validates idempotent playback outcomes and learning undo", () => {
+    expect(
+      isPlaybackOutcomeRequest({
+        playbackId: "playback-1",
+        trackId: "ncm:42",
+        outcome: "completed",
+        listenedMs: 200_000,
+        durationMs: 220_000,
+        decisionId: "decision-1"
+      })
+    ).toBe(true);
+    expect(
+      isPlaybackOutcomeRequest({
+        playbackId: "playback-1",
+        trackId: "qq:003abc",
+        outcome: "playback_error",
+        listenedMs: 0
+      })
+    ).toBe(true);
+    expect(isPlaybackOutcomeRequest({ playbackId: "", trackId: 1, outcome: "skipped", listenedMs: 0 })).toBe(
+      false
+    );
+    expect(isPlaybackOutcomeRequest({ playbackId: "p", trackId: 1, outcome: "liked", listenedMs: 0 })).toBe(
+      false
+    );
+    expect(isLearningUndoRequest({ undoToken: "undo-token" })).toBe(true);
+    expect(isLearningUndoRequest({ undoToken: "" })).toBe(false);
+    expect(isTasteSignalMutationRequest({ signalId: "signal-1", action: "decrease" })).toBe(true);
+    expect(isTasteSignalMutationRequest({ action: "reset_automatic" })).toBe(true);
+    expect(isTasteSignalMutationRequest({ action: "delete" })).toBe(false);
   });
 
   it("validates next payload", () => {
@@ -64,6 +122,9 @@ describe("contracts", () => {
       "/api/conversation/voice/turns/voice%2Fa/complete"
     );
     expect(API_ROUTES.musicCommands).toBe("/api/music/commands");
+    expect(API_ROUTES.listeningOutcomes).toBe("/api/listening/outcomes");
+    expect(API_ROUTES.learningUndo).toBe("/api/learning/undo");
+    expect(API_ROUTES.tasteSignals).toBe("/api/taste/signals");
   });
 
   it("validates favorite payload and builds its route", () => {

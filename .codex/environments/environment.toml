@@ -13,7 +13,17 @@ command = "npm run dev"
 [[actions]]
 name = "完整启动"
 icon = "tool"
-command = "npm run dev:full"
+command = "npm run dev"
+
+[[actions]]
+name = "部署检查"
+icon = "tool"
+command = "npm run deployment:check"
+
+[[actions]]
+name = "健康检查"
+icon = "tool"
+command = "npm run health"
 
 [[actions]]
 name = "NCM服务"

@@ -20,6 +20,36 @@ function createKernel(extractMemories?: AiDjAssistant["extractMemories"]) {
 }
 
 describe("ConversationKernel", () => {
+  it("shares one in-flight text turn for concurrent retries with the same turn id", async () => {
+    const { kernel } = createKernel();
+    let executions = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const execute = async () => {
+      executions += 1;
+      await gate;
+      return { action: "pause" as const, reply: "已暂停播放。", now: emptyNow };
+    };
+
+    const first = kernel.respondText(
+      { message: "暂停一下", turnId: "text-concurrent", now: emptyNow },
+      execute
+    );
+    const retry = kernel.respondText(
+      { message: "暂停一下", turnId: "text-concurrent", now: emptyNow },
+      execute
+    );
+    release();
+
+    const [firstResult, retryResult] = await Promise.all([first, retry]);
+
+    expect(executions).toBe(1);
+    expect(retryResult).toEqual(firstResult);
+    expect(kernel.getHistory().messages).toHaveLength(2);
+  });
+
   it("does not execute a retried text turn twice", async () => {
     const { kernel } = createKernel();
     let executions = 0;

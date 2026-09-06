@@ -20,7 +20,8 @@ beforeEach(() => {
     "DEEPSEEK_MODEL",
     "AI_DJ_MEMORY_TURNS",
     "AI_DJ_CHAT_MAX_TOKENS",
-    "REALTIME_CONVERSATION_MODE"
+    "REALTIME_CONVERSATION_MODE",
+    "INTELLIGENCE_POLICY_MODE"
   ]) {
     delete process.env[name];
   }
@@ -41,6 +42,25 @@ describe("config", () => {
     expect(config.aiDjMemoryTurns).toBe(20);
     expect(config.aiDjChatMaxTokens).toBe(800);
     expect(config.realtimeConversationMode).toBe("unified");
+    expect(config.intelligencePolicyMode).toBeUndefined();
+  });
+
+  it("accepts an intelligence policy environment override", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.INTELLIGENCE_POLICY_MODE = "adaptive";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.intelligencePolicyMode).toBe("adaptive");
+  });
+
+  it("treats an empty intelligence policy override as unset", async () => {
+    process.env.MUSICGPT_SKIP_DOTENV = "true";
+    process.env.INTELLIGENCE_POLICY_MODE = "";
+
+    const { config } = await import("../src/config.js");
+
+    expect(config.intelligencePolicyMode).toBeUndefined();
   });
 
   it("treats an empty OPENAI_BASE_URL as unset", async () => {

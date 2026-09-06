@@ -6,13 +6,21 @@ import Fastify from "fastify";
 import { z } from "zod";
 
 import { config, readCurrentNcmCookie } from "./config.js";
-import type { MusicSource, Track, TrackReference } from "@musicgpt/shared";
+import type {
+  FeedbackRequest,
+  MusicSource,
+  PlaybackOutcomeRequest,
+  TasteSignalMutationRequest,
+  Track,
+  TrackReference
+} from "@musicgpt/shared";
 import type { AiDjAssistant } from "./aiDjAssistant.js";
 import { OpenAiDjAssistant } from "./aiDjAssistant.js";
 import { DjBrain } from "./djBrain.js";
 import type { EnvironmentService } from "./environmentService.js";
 import { EnvironmentService as OpenMeteoEnvironmentService } from "./environmentService.js";
 import { NcmConnector } from "./ncmConnector.js";
+import { ListeningPolicy } from "./listeningPolicy.js";
 import { NcmMusicAdapter } from "./ncmMusicAdapter.js";
 import { MusicCatalog, normalizeTrackReference, sourceIdFromKey } from "./musicCatalog.js";
 import { QqMusicAdapter } from "./qqMusicAdapter.js";
@@ -120,8 +128,56 @@ const queuedTrackParamsSchema = z.object({
 });
 
 const feedbackSchema = z.object({
-  type: z.enum(["skip", "like", "unlike", "replay", "complete"]),
-  trackId: z.union([z.string().min(1), z.number().int()])
+  type: z.enum(["skip", "like", "unlike", "replay", "complete", "teach"]),
+  trackId: z.union([z.string().min(1), z.number().int()]),
+  reason: z.enum([
+    "dislike_track",
+    "less_this_artist",
+    "wrong_for_now",
+    "overplayed",
+    "bad_version",
+    "playback_problem"
+  ]).optional(),
+  scope: z.enum(["session", "day", "long_term"]).optional(),
+  playbackId: z.string().min(1).max(200).optional(),
+  decisionId: z.string().min(1).max(200).optional(),
+  listenedMs: z.number().finite().nonnegative().optional(),
+  durationMs: z.number().finite().nonnegative().optional()
+}).superRefine((feedback, context) => {
+  // A reason is a teaching correction, not a second interpretation of a
+  // positive playback action. Reject contradictory combinations before any
+  // favorite/play-count side effect reaches the fact store.
+  if (feedback.reason && ["like", "replay", "complete"].includes(feedback.type)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["type"],
+      message: "feedback_reason_conflicts_with_positive_action"
+    });
+  }
+});
+
+const playbackOutcomeSchema = z.object({
+  playbackId: z.string().min(1).max(200),
+  trackId: z.union([z.string().min(1), z.number().int()]),
+  decisionId: z.string().min(1).max(200).optional(),
+  outcome: z.enum(["completed", "skipped", "abandoned", "playback_error"]),
+  listenedMs: z.number().finite().nonnegative(),
+  durationMs: z.number().finite().nonnegative().optional(),
+  at: z.string().datetime().optional()
+});
+
+const learningUndoSchema = z.object({ undoToken: z.string().min(1).max(500) });
+
+const tasteSignalMutationSchema = z.object({
+  action: z.enum(["confirm", "decrease", "block", "delete", "reset_automatic"]),
+  signalId: z.string().min(1).max(500).optional()
+}).superRefine((value, context) => {
+  if (value.action === "reset_automatic" && value.signalId !== undefined) {
+    context.addIssue({ code: "custom", message: "reset_automatic_does_not_accept_signal_id" });
+  }
+  if (value.action !== "reset_automatic" && value.signalId === undefined) {
+    context.addIssue({ code: "custom", message: "signal_id_required" });
+  }
 });
 
 const favoriteParamsSchema = z.object({
@@ -162,12 +218,14 @@ interface CreateServerOptions {
   routineProvider?: RoutineProvider;
   dailyPlanEngine?: DailyPlanEngine;
   tagEnricher?: TrackTagEnricher;
+  listeningPolicy?: ListeningPolicy;
   djBroadcastInterval?: number;
   importRetryIntervalMs?: number;
   realtimeApiKey?: string;
   realtimeBaseUrl?: string;
   realtimeWorkspaceId?: string;
   realtimeFetch?: typeof fetch;
+  now?: () => Date;
 }
 
 export async function createServer(options: CreateServerOptions = {}) {
@@ -181,6 +239,13 @@ export async function createServer(options: CreateServerOptions = {}) {
   });
 
   const repo = options.repo ?? new StateRepository(config.dbPath);
+  const listeningPolicy = options.listeningPolicy ?? new ListeningPolicy({
+    ...(options.now ? { now: options.now } : {}),
+    state: repo.loadListeningPolicyState(),
+    persistence: repo
+  });
+  const startupNow = options.now?.() ?? new Date();
+  repo.pruneIntelligenceHistory(new Date(startupNow.getTime() - 90 * 24 * 60 * 60_000).toISOString());
   const runtimeStateDir = options.repo ? path.dirname(options.repo.dbPath) : config.stateDir;
   const ncm =
     options.ncm ??
@@ -194,7 +259,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   const routineProvider = options.routineProvider ?? new LocalRoutineProvider(
     options.repo ? path.join(runtimeStateDir, "routine.json") : config.routinePath
   );
-  const dailyPlanEngine = options.dailyPlanEngine ?? new DailyPlanEngine();
+  const dailyPlanEngine = options.dailyPlanEngine ?? new DailyPlanEngine(listeningPolicy);
   const aiTagCompleter = createAiTagCompleter({
     ...(config.openAiApiKey ? { apiKey: config.openAiApiKey } : {}),
     ...(config.openAiBaseUrl ? { baseUrl: config.openAiBaseUrl } : {}),
@@ -215,7 +280,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     repo,
     ncm,
     options.tasteEngine ?? new TasteEngine(),
-    options.planner ?? new RadioPlanner(),
+    options.planner ?? new RadioPlanner(Math.random, listeningPolicy),
     options.djBrain ??
       new DjBrain({
         apiKey: config.openAiApiKey,
@@ -243,14 +308,22 @@ export async function createServer(options: CreateServerOptions = {}) {
     routineProvider,
     dailyPlanEngine,
     tagEnricher,
-    "Asia/Shanghai"
+    "Asia/Shanghai",
+    config.intelligencePolicyMode,
+    listeningPolicy,
+    options.now
   );
   await orchestrator.initialize();
   app.addHook("onClose", async () => {
     await orchestrator.close();
   });
 
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => ({
+    ok: true,
+    release: process.env.MUSICGPT_RELEASE?.trim() || "development",
+    checkout: process.env.MUSICGPT_CHECKOUT?.trim() || "development",
+    runningRoot: process.cwd()
+  }));
 
   app.get("/api/music-sources", async () => orchestrator.getMusicSources());
 
@@ -301,6 +374,7 @@ export async function createServer(options: CreateServerOptions = {}) {
   app.post("/api/daily-plan/regenerate", async () => orchestrator.getDailyPlan(true));
 
   app.post("/api/daily-plan/play", async (_request, reply) => {
+    orchestrator.touchListeningInteraction();
     const result = await orchestrator.playCurrentDailyPlanSegment();
     if (!result) return reply.status(409).send({ error: "daily_plan_segment_empty" });
     return result;
@@ -422,6 +496,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    orchestrator.touchListeningInteraction();
     const now = await orchestrator.nextTrack(parsed.data?.forceReplan ?? false);
     return { now };
   });
@@ -431,6 +506,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
+    orchestrator.touchListeningInteraction();
     const now = await orchestrator.playSuggestedTrack(parsed.data.track as Track, parsed.data.reason);
     return { now };
   });
@@ -442,6 +518,7 @@ export async function createServer(options: CreateServerOptions = {}) {
     }
     let now;
     try {
+      orchestrator.touchListeningInteraction();
       now = await orchestrator.playQueuedTrack(parsed.data.trackId);
     } catch (error) {
       if (error instanceof QueuedTrackPlaybackError) {
@@ -572,8 +649,41 @@ export async function createServer(options: CreateServerOptions = {}) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    await orchestrator.handleFeedback(parsed.data);
-    return { ok: true };
+    const learningReceipt = await orchestrator.handleFeedback(parsed.data as FeedbackRequest);
+    return { ok: true, learningReceipt };
+  });
+
+  app.post("/api/listening/outcomes", async (request, reply) => {
+    const parsed = playbackOutcomeSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const result = await orchestrator.handlePlaybackOutcome(parsed.data as PlaybackOutcomeRequest);
+    return { ok: true, ...result };
+  });
+
+  app.post("/api/learning/undo", async (request, reply) => {
+    const parsed = learningUndoSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const learningReceipt = await orchestrator.undoLearning(parsed.data.undoToken);
+    if (!learningReceipt) {
+      return reply.status(404).send({ error: "learning_receipt_not_found_or_expired" });
+    }
+    return { ok: true, learningReceipt };
+  });
+
+  app.post("/api/taste/signals", async (request, reply) => {
+    const parsed = tasteSignalMutationSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const learningReceipt = await orchestrator.mutateTasteSignal(parsed.data as TasteSignalMutationRequest);
+    if (!learningReceipt) {
+      return reply.status(404).send({ error: "taste_signal_not_found_or_locked" });
+    }
+    return { ok: true, learningReceipt };
   });
 
   app.put("/api/favorites/:trackId", async (request, reply) => {

@@ -1,7 +1,7 @@
 # 拾光电台 Aurora Deck — 前端重构说明
 
-> 分支：`aurora-ui`（commit `c9fa73d`） · Worktree：`D:\MusicGPT\.worktrees\aurora-ui`
-> 基于 `main`（fd5b559）开发，主目录代码零改动。
+> 历史实现记录（2026-08-11）：Aurora UI 已合并到 `main`；当前产品能力、启动方式和 API 以 `README.md` 与 `CONTEXT.md` 为准。
+> 以下分支、worktree、TTS 与合并说明保留当时语境，不是现役操作指引。
 
 ## 这次做了什么
 
